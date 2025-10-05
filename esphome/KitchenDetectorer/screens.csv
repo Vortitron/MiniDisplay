@@ -1,0 +1,14 @@
+Screen,Side,Sensor,title,unit,displayIf,note
+0,All,sensor.smart_plug_4_power,LED1,W,>0,Air Fryer
+1,Left,switch.bio_office_heaters_socket_1,LED2,On/Off,Bio Heaters
+1,Right,sensor.bioofficec3_room_temperature,LED2,C,Bio Temperature
+2,Right,switch.smart_plug_2_socket_1,"Hot",On/Off, Hot water 
+3,Right,sensor.sam_outside_temperature,"Out",C,Outside Temperature
+4,Right,sensor.t_h_sensor_temperature,"In",C,Inside Temperature
+5,Right,sensor.t_h_sensor_humidity,"In h",,Inside Humidity (it's a percentage but can't show % on 7 segs!)
+6,Left,sensor.nordpool_kwh_se4_sek_3_10_025,LED3,,Current power price (SEK/kWh)
+6,Left,sensor.nordpool_kwh_se4_sek_3_10_025(Low Price attribute boolean),LED3,Lo/Hi,Current power price is high or low
+7,Left,Coffee bean level
+8,Left,date,dd.mm
+8,Right,time,hh.mm (date and time, no LED or title)
+

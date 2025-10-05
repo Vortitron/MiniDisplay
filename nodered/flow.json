@@ -2159,5 +2159,624 @@
 		"x": 940,
 		"y": 220,
 		"wires": []
+	},
+	{
+		"id": "hvac_climate_control",
+		"type": "tab",
+		"label": "HVAC Climate Control",
+		"disabled": false,
+		"info": "",
+		"env": []
+	},
+	{
+		"id": "sam_device_config",
+		"type": "ha-device-config",
+		"name": "Sam HVAC Controller",
+		"hwVersion": "",
+		"manufacturer": "Node-RED",
+		"model": "Climate Control Display",
+		"swVersion": "1.0"
+	},
+	{
+		"id": "sam_temp_display_entity",
+		"type": "ha-entity-config",
+		"server": "c8bf64e0.ee9788",
+		"deviceConfig": "sam_device_config",
+		"name": "Sam Temperature Display",
+		"version": 6,
+		"entityType": "sensor",
+		"haConfig": [
+			{
+				"property": "name",
+				"value": "Sam Temperature Display"
+			},
+			{
+				"property": "icon",
+				"value": "mdi:thermometer"
+			},
+			{
+				"property": "device_class",
+				"value": "temperature"
+			},
+			{
+				"property": "unit_of_measurement",
+				"value": "°C"
+			},
+			{
+				"property": "state_class",
+				"value": "measurement"
+			}
+		],
+		"resend": true,
+		"debugEnabled": false
+	},
+	{
+		"id": "sam_humidity_display_entity",
+		"type": "ha-entity-config",
+		"server": "c8bf64e0.ee9788",
+		"deviceConfig": "sam_device_config",
+		"name": "Sam Humidity Display",
+		"version": 6,
+		"entityType": "sensor",
+		"haConfig": [
+			{
+				"property": "name",
+				"value": "Sam Humidity Display"
+			},
+			{
+				"property": "icon",
+				"value": "mdi:water-percent"
+			},
+			{
+				"property": "device_class",
+				"value": "humidity"
+			},
+			{
+				"property": "unit_of_measurement",
+				"value": "%"
+			},
+			{
+				"property": "state_class",
+				"value": "measurement"
+			}
+		],
+		"resend": true,
+		"debugEnabled": false
+	},
+	{
+		"id": "sam_temp_setpoint_entity",
+		"type": "ha-entity-config",
+		"server": "c8bf64e0.ee9788",
+		"deviceConfig": "sam_device_config",
+		"name": "Sam Temperature Setpoint",
+		"version": 6,
+		"entityType": "number",
+		"haConfig": [
+			{
+				"property": "name",
+				"value": "Sam Temperature Setpoint"
+			},
+			{
+				"property": "icon",
+				"value": "mdi:thermostat"
+			},
+			{
+				"property": "entity_category",
+				"value": "config"
+			},
+			{
+				"property": "device_class",
+				"value": "temperature"
+			},
+			{
+				"property": "unit_of_measurement",
+				"value": "°C"
+			},
+			{
+				"property": "min_value",
+				"value": "15"
+			},
+			{
+				"property": "max_value",
+				"value": "27"
+			},
+			{
+				"property": "step_value",
+				"value": "0.5"
+			},
+			{
+				"property": "mode",
+				"value": "slider"
+			}
+		],
+		"resend": true,
+		"debugEnabled": false
+	},
+	{
+		"id": "sam_temp_display",
+		"type": "ha-sensor",
+		"z": "hvac_climate_control",
+		"name": "Temperature Display",
+		"version": 1,
+		"debugenabled": false,
+		"inputs": 1,
+		"outputs": 1,
+		"entityConfig": "sam_temp_display_entity",
+		"exposeAsEntityConfig": "",
+		"state": "payload",
+		"stateType": "msg",
+		"outputProperties": [],
+		"x": 420,
+		"y": 80,
+		"wires": [
+			[]
+		]
+	},
+	{
+		"id": "sam_humidity_display",
+		"type": "ha-sensor",
+		"z": "hvac_climate_control",
+		"name": "Humidity Display",
+		"version": 1,
+		"debugenabled": false,
+		"inputs": 1,
+		"outputs": 1,
+		"entityConfig": "sam_humidity_display_entity",
+		"exposeAsEntityConfig": "",
+		"state": "payload",
+		"stateType": "msg",
+		"outputProperties": [],
+		"x": 420,
+		"y": 140,
+		"wires": [
+			[]
+		]
+	},
+	{
+		"id": "sam_temp_setpoint",
+		"type": "ha-number",
+		"z": "hvac_climate_control",
+		"name": "Temperature Setpoint",
+		"version": 1,
+		"debugenabled": false,
+		"inputs": 1,
+		"outputs": 1,
+		"entityConfig": "sam_temp_setpoint_entity",
+		"exposeAsEntityConfig": "",
+		"mode": "both",
+		"value": "payload",
+		"valueType": "msg",
+		"outputProperties": [
+			{
+				"property": "payload",
+				"propertyType": "msg",
+				"value": "",
+				"valueType": "value"
+			},
+			{
+				"property": "previousValue",
+				"propertyType": "msg",
+				"value": "",
+				"valueType": "previousValue"
+			}
+		],
+		"x": 430,
+		"y": 220,
+		"wires": [
+			[
+				"update_ha_setpoint"
+			]
+		]
+	},
+	{
+		"id": "temp_monitor",
+		"type": "server-state-changed",
+		"z": "hvac_climate_control",
+		"name": "Temperature Monitor",
+		"server": "c8bf64e0.ee9788",
+		"version": 6,
+		"outputs": 1,
+		"exposeAsEntityConfig": "",
+		"entities": [
+			{
+				"entityId": "sensor.t_h_sensor_temperature",
+				"entityIdType": "exact"
+			}
+		],
+		"outputInitially": true,
+		"stateType": "str",
+		"ifState": "",
+		"ifStateType": "str",
+		"ifStateOperator": "is",
+		"outputOnlyOnStateChange": true,
+		"for": "0",
+		"forType": "num",
+		"forUnits": "minutes",
+		"ignorePrevStateNull": false,
+		"ignorePrevStateUnknown": false,
+		"ignorePrevStateUnavailable": false,
+		"ignoreCurrentStateUnknown": false,
+		"ignoreCurrentStateUnavailable": false,
+		"outputProperties": [
+			{
+				"property": "payload",
+				"propertyType": "msg",
+				"value": "",
+				"valueType": "entityState"
+			}
+		],
+		"x": 160,
+		"y": 80,
+		"wires": [
+			[
+				"format_temp_value"
+			]
+		]
+	},
+	{
+		"id": "humidity_monitor",
+		"type": "server-state-changed",
+		"z": "hvac_climate_control",
+		"name": "Humidity Monitor",
+		"server": "c8bf64e0.ee9788",
+		"version": 6,
+		"outputs": 1,
+		"exposeAsEntityConfig": "",
+		"entities": [
+			{
+				"entityId": "sensor.t_h_sensor_humidity",
+				"entityIdType": "exact"
+			}
+		],
+		"outputInitially": true,
+		"stateType": "str",
+		"ifState": "",
+		"ifStateType": "str",
+		"ifStateOperator": "is",
+		"outputOnlyOnStateChange": true,
+		"for": "0",
+		"forType": "num",
+		"forUnits": "minutes",
+		"ignorePrevStateNull": false,
+		"ignorePrevStateUnknown": false,
+		"ignorePrevStateUnavailable": false,
+		"ignoreCurrentStateUnknown": false,
+		"ignoreCurrentStateUnavailable": false,
+		"outputProperties": [
+			{
+				"property": "payload",
+				"propertyType": "msg",
+				"value": "",
+				"valueType": "entityState"
+			}
+		],
+		"x": 160,
+		"y": 140,
+		"wires": [
+			[
+				"format_humidity_value"
+			]
+		]
+	},
+	{
+		"id": "setpoint_monitor",
+		"type": "server-state-changed",
+		"z": "hvac_climate_control",
+		"name": "Setpoint Monitor",
+		"server": "c8bf64e0.ee9788",
+		"version": 6,
+		"outputs": 1,
+		"exposeAsEntityConfig": "",
+		"entities": [
+			{
+				"entityId": "input_number.sam_desired_temperature",
+				"entityIdType": "exact"
+			}
+		],
+		"outputInitially": true,
+		"stateType": "str",
+		"ifState": "",
+		"ifStateType": "str",
+		"ifStateOperator": "is",
+		"outputOnlyOnStateChange": true,
+		"for": "0",
+		"forType": "num",
+		"forUnits": "minutes",
+		"ignorePrevStateNull": false,
+		"ignorePrevStateUnknown": false,
+		"ignorePrevStateUnavailable": false,
+		"ignoreCurrentStateUnknown": false,
+		"ignoreCurrentStateUnavailable": false,
+		"outputProperties": [
+			{
+				"property": "payload",
+				"propertyType": "msg",
+				"value": "",
+				"valueType": "entityState"
+			}
+		],
+		"x": 160,
+		"y": 220,
+		"wires": [
+			[
+				"format_setpoint_value"
+			]
+		]
+	},
+	{
+		"id": "format_temp_value",
+		"type": "function",
+		"z": "hvac_climate_control",
+		"name": "Format Temperature",
+		"func": "// Format temperature value for display\nlet temp = parseFloat(msg.payload);\nif (isNaN(temp)) {\n    temp = 0;\n}\n\n// Round to 1 decimal place\ntemp = Math.round(temp * 10) / 10;\n\nreturn {\n    payload: temp\n};",
+		"outputs": 1,
+		"timeout": 0,
+		"noerr": 0,
+		"initialize": "",
+		"finalize": "",
+		"libs": [],
+		"x": 270,
+		"y": 80,
+		"wires": [
+			[
+				"sam_temp_display",
+				"mqtt_temp_update"
+			]
+		]
+	},
+	{
+		"id": "format_humidity_value",
+		"type": "function",
+		"z": "hvac_climate_control",
+		"name": "Format Humidity",
+		"func": "// Format humidity value for display\nlet humidity = parseFloat(msg.payload);\nif (isNaN(humidity)) {\n    humidity = 0;\n}\n\n// Round to nearest integer\nhumidity = Math.round(humidity);\n\nreturn {\n    payload: humidity\n};",
+		"outputs": 1,
+		"timeout": 0,
+		"noerr": 0,
+		"initialize": "",
+		"finalize": "",
+		"libs": [],
+		"x": 270,
+		"y": 140,
+		"wires": [
+			[
+				"sam_humidity_display",
+				"mqtt_humidity_update"
+			]
+		]
+	},
+	{
+		"id": "format_setpoint_value",
+		"type": "function",
+		"z": "hvac_climate_control",
+		"name": "Format Setpoint",
+		"func": "// Format setpoint value for display\nlet setpoint = parseFloat(msg.payload);\nif (isNaN(setpoint)) {\n    setpoint = 20; // default value\n}\n\n// Ensure it's within range\nsetpoint = Math.max(15, Math.min(27, setpoint));\n\n// Round to 0.5 degree increments\nsetpoint = Math.round(setpoint * 2) / 2;\n\nreturn {\n    payload: setpoint\n};",
+		"outputs": 1,
+		"timeout": 0,
+		"noerr": 0,
+		"initialize": "",
+		"finalize": "",
+		"libs": [],
+		"x": 270,
+		"y": 220,
+		"wires": [
+			[
+				"sam_temp_setpoint"
+			]
+		]
+	},
+	{
+		"id": "update_ha_setpoint",
+		"type": "api-call-service",
+		"z": "hvac_climate_control",
+		"name": "Update HA Setpoint",
+		"server": "c8bf64e0.ee9788",
+		"version": 7,
+		"debugenabled": false,
+		"action": "input_number.set_value",
+		"floorId": [],
+		"areaId": [],
+		"deviceId": [],
+		"entityId": [],
+		"labelId": [],
+		"data": "{\"entity_id\": \"input_number.sam_desired_temperature\", \"value\": $number($$.payload)}",
+		"dataType": "jsonata",
+		"mergeContext": "",
+		"mustacheAltTags": false,
+		"outputProperties": [],
+		"queue": "none",
+		"blockInputOverrides": false,
+		"domain": "input_number",
+		"service": "set_value",
+		"x": 680,
+		"y": 220,
+		"wires": [
+			[
+				"mqtt_setpoint_update"
+			]
+		]
+	},
+	{
+		"id": "climate_state_monitor",
+		"type": "server-state-changed",
+		"z": "hvac_climate_control",
+		"name": "Climate State Monitor",
+		"server": "c8bf64e0.ee9788",
+		"version": 6,
+		"outputs": 1,
+		"exposeAsEntityConfig": "",
+		"entities": [
+			{
+				"entityId": "climate.sam",
+				"entityIdType": "exact"
+			}
+		],
+		"outputInitially": true,
+		"stateType": "str",
+		"ifState": "",
+		"ifStateType": "str",
+		"ifStateOperator": "is",
+		"outputOnlyOnStateChange": true,
+		"for": "0",
+		"forType": "num",
+		"forUnits": "minutes",
+		"ignorePrevStateNull": false,
+		"ignorePrevStateUnknown": false,
+		"ignorePrevStateUnavailable": false,
+		"ignoreCurrentStateUnknown": false,
+		"ignoreCurrentStateUnavailable": false,
+		"outputProperties": [
+			{
+				"property": "payload",
+				"propertyType": "msg",
+				"value": "",
+				"valueType": "entityState"
+			},
+			{
+				"property": "attributes",
+				"propertyType": "msg",
+				"value": "",
+				"valueType": "entity"
+			}
+		],
+		"x": 170,
+		"y": 300,
+		"wires": [
+			[
+				"format_climate_data"
+			]
+		]
+	},
+	{
+		"id": "format_climate_data",
+		"type": "function",
+		"z": "hvac_climate_control",
+		"name": "Format Climate Data",
+		"func": "// Extract climate information for MQTT publishing\nconst state = msg.payload;\nconst attrs = msg.attributes || {};\n\nconst climateData = {\n    state: state,\n    current_temperature: attrs.current_temperature || null,\n    target_temperature: attrs.temperature || null,\n    hvac_mode: attrs.hvac_mode || 'off',\n    hvac_action: attrs.hvac_action || 'idle',\n    fan_mode: attrs.fan_mode || null,\n    preset_mode: attrs.preset_mode || null\n};\n\nreturn {\n    payload: JSON.stringify(climateData),\n    topic: \"homeassistant/climate/sam/state\"\n};",
+		"outputs": 1,
+		"timeout": 0,
+		"noerr": 0,
+		"initialize": "",
+		"finalize": "",
+		"libs": [],
+		"x": 410,
+		"y": 300,
+		"wires": [
+			[
+				"mqtt_climate_update"
+			]
+		]
+	},
+	{
+		"id": "mqtt_temp_update",
+		"type": "mqtt out",
+		"z": "hvac_climate_control",
+		"name": "Temperature MQTT",
+		"topic": "homeassistant/sensor/sam/temperature/state",
+		"qos": "2",
+		"retain": "",
+		"respTopic": "",
+		"contentType": "",
+		"userProps": "",
+		"correl": "",
+		"expiry": "",
+		"broker": "93e8dd50b41a1c38",
+		"x": 640,
+		"y": 80,
+		"wires": []
+	},
+	{
+		"id": "mqtt_humidity_update",
+		"type": "mqtt out",
+		"z": "hvac_climate_control",
+		"name": "Humidity MQTT",
+		"topic": "homeassistant/sensor/sam/humidity/state",
+		"qos": "2",
+		"retain": "",
+		"respTopic": "",
+		"contentType": "",
+		"userProps": "",
+		"correl": "",
+		"expiry": "",
+		"broker": "93e8dd50b41a1c38",
+		"x": 640,
+		"y": 140,
+		"wires": []
+	},
+	{
+		"id": "mqtt_setpoint_update",
+		"type": "mqtt out",
+		"z": "hvac_climate_control",
+		"name": "Setpoint MQTT",
+		"topic": "homeassistant/number/sam/setpoint/state",
+		"qos": "2",
+		"retain": "",
+		"respTopic": "",
+		"contentType": "",
+		"userProps": "",
+		"correl": "",
+		"expiry": "",
+		"broker": "93e8dd50b41a1c38",
+		"x": 920,
+		"y": 220,
+		"wires": []
+	},
+	{
+		"id": "mqtt_climate_update",
+		"type": "mqtt out",
+		"z": "hvac_climate_control",
+		"name": "Climate MQTT",
+		"topic": "",
+		"qos": "2",
+		"retain": "",
+		"respTopic": "",
+		"contentType": "",
+		"userProps": "",
+		"correl": "",
+		"expiry": "",
+		"broker": "93e8dd50b41a1c38",
+		"x": 630,
+		"y": 300,
+		"wires": []
+	},
+	{
+		"id": "mqtt_setpoint_command",
+		"type": "mqtt in",
+		"z": "hvac_climate_control",
+		"name": "Setpoint Commands",
+		"topic": "homeassistant/number/sam/setpoint/command",
+		"qos": "2",
+		"datatype": "auto-detect",
+		"broker": "93e8dd50b41a1c38",
+		"nl": false,
+		"rap": false,
+		"inputs": 0,
+		"x": 170,
+		"y": 380,
+		"wires": [
+			[
+				"handle_setpoint_command"
+			]
+		]
+	},
+	{
+		"id": "handle_setpoint_command",
+		"type": "function",
+		"z": "hvac_climate_control",
+		"name": "Handle Setpoint Command",
+		"func": "// Handle incoming setpoint commands from MQTT\nlet setpoint = parseFloat(msg.payload);\nif (isNaN(setpoint)) {\n    return null;\n}\n\n// Ensure it's within range\nsetpoint = Math.max(15, Math.min(27, setpoint));\n\n// Round to 0.5 degree increments\nsetpoint = Math.round(setpoint * 2) / 2;\n\nreturn {\n    payload: setpoint\n};",
+		"outputs": 1,
+		"timeout": 0,
+		"noerr": 0,
+		"initialize": "",
+		"finalize": "",
+		"libs": [],
+		"x": 440,
+		"y": 380,
+		"wires": [
+			[
+				"update_ha_setpoint"
+			]
+		]
 	}
 ]

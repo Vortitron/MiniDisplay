@@ -1,0 +1,251 @@
+esphome:
+  name: manifoldtemperature
+  friendly_name: ManifoldTemperature
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    
+
+#github.com/Vortitron/WIZ820io_w5500_esphome_patch   
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/Vortitron/WIZ820io_w5500_esphome_patch2
+      ref: main
+    components: [ethernet_patch]
+    refresh: always
+
+ethernet_patch:
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "CYM+X3tIAeAaIWson+NrIoSV3KJQrK2oGOJ9K+OnfOk="
+
+ota:
+  - platform: esphome
+    password: "d5db3b91c9f86717fe13391851a90b79"
+
+# Ethernet configuration with built-in support (now using your forked IDF)
+ethernet:
+  type: W5500
+  mosi_pin: GPIO13
+  miso_pin: GPIO12
+  clk_pin: GPIO14
+  cs_pin: GPIO15
+  reset_pin: GPIO26
+  interrupt_pin: GPIO27
+  clock_speed: 12MHz
+
+# 1-Wire setup for DS18B20
+one_wire:
+  - platform: gpio
+    pin: GPIO4
+
+# Define sensors
+sensor:
+  - platform: dallas_temp
+    id: manifold_input_temp
+    name: "Manifold Input Temp"
+    address: "0x170000007bc02828"  # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: loop_1_return_temp
+    name: "Loop 1 Return Temp"
+    address: "0x7b0000007a769928"    # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: loop_2_return_temp
+    name: "Loop 2 Return Temp"
+    address: "0x780000007a859c28"    # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: loop_3_return_temp
+    name: "Loop 3 Return Temp"
+    address: "0x8300000077cf3e28"    # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: loop_4_return_temp
+    name: "Loop 4 Return Temp"
+    address: "0x0e000000788c2b28"    # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: loop_5_return_temp
+    name: "Loop 5 Return Temp"
+    address: "0x430000007852bb28"    # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: loop_6_return_temp
+    name: "Loop 6 Return Temp"
+    address: "0xaa000000788bcf28"    # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: loop_7_return_temp
+    name: "Loop 7 Return Temp"
+    address: "0xb30000007bfe9f28"    # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: loop_8_return_temp
+    name: "Loop 8 Return Temp"
+    address: "0x060000007cf13f28"    # Adjust after mapping
+    update_interval: 10s
+  - platform: dallas_temp
+    id: air_temp
+    name: "Air Temp"
+    address: "0xde0000007c3ac428"    # Adjust after mapping
+    update_interval: 10s
+
+# TM1638 Display and LED/Button Controller (Unchanged Pins)
+display:
+  - platform: tm1638
+    id: tm_display
+    stb_pin: GPIO19
+    clk_pin: GPIO5
+    dio_pin: GPIO18
+    update_interval: 1s
+    intensity: 7  # 0-7, adjust brightness
+    lambda: |-
+      auto now = id(last_button_press) + 10000; // 10-second timeout
+      // Create a vector of sensor pointers for indexing
+      std::vector<sensor::Sensor*> sensors = {
+        id(loop_1_return_temp), id(loop_2_return_temp), id(loop_3_return_temp),
+        id(loop_4_return_temp), id(loop_5_return_temp), id(loop_6_return_temp),
+        id(loop_7_return_temp), id(loop_8_return_temp)
+      };
+      // Initialize led_states if not already set
+      static bool led_states_initialized = false;
+      if (!led_states_initialized) {
+        for (int i = 0; i < 8; i++) {
+          id(led_states)[i] = false;
+        }
+        led_states_initialized = true;
+      }
+      static unsigned long last_flash = 0;
+      if (millis() - last_flash > 500) { // Flash every 500ms
+        for (int i = 0; i < 8; i++) {
+          if (sensors[i] && sensors[i]->state != NAN && sensors[i]->state < 5.0) {
+            id(led_states)[i] = !id(led_states)[i]; // Toggle for flashing
+          } else {
+            id(led_states)[i] = false; // Off if in range
+          }
+          it.set_led(i, id(led_states)[i]); // Zero-indexed LEDs (0-7)
+        }
+        last_flash = millis();
+      }
+      if (id(display_index) > 0 && id(display_index) <= 8 && millis() < now) {
+        // Show selected loop temperature and light corresponding LED
+        if (sensors[id(display_index) - 1] && sensors[id(display_index) - 1]->state != NAN) {
+          it.printf("%.1fC", sensors[id(display_index) - 1]->state);  // Left 4 digits
+          char air_temp_str[6];
+          snprintf(air_temp_str, sizeof(air_temp_str), "%.1fC", id(air_temp)->state);
+          it.print(4, air_temp_str);                                // Right 4 digits with "C"
+          it.set_led(id(display_index) - 1, true);                  // Zero-indexed LED
+        } else {
+          it.print("----");
+          char air_temp_str[6];
+          snprintf(air_temp_str, sizeof(air_temp_str), "%.1fC", id(air_temp)->state);
+          it.print(4, air_temp_str);                                // Show Air Temp if loop fails
+        }
+      } else {
+        // Normal mode: Show Manifold Input and Air Temp
+        if (id(manifold_input_temp) && id(manifold_input_temp)->state != NAN && id(air_temp) && id(air_temp)->state != NAN) {
+          it.printf("%.1fC", id(manifold_input_temp)->state);      // Left 4 digits for Manifold
+          char air_temp_str[6];
+          snprintf(air_temp_str, sizeof(air_temp_str), "%.1fC", id(air_temp)->state);
+          it.print(4, air_temp_str);                               // Right 4 digits for Air with "C"
+        } else {
+          it.print("----");
+          it.print(4, "----");                                    // Fallback if sensors fail
+        }
+        // Turn off all LEDs in default mode
+        for (int i = 0; i < 8; i++) {
+          it.set_led(i, false);
+        }
+      }
+
+# Button Inputs via TM1638
+binary_sensor:
+  - platform: tm1638
+    name: "Button S1"
+    id: button_s1
+    key: 0  # Zero-indexed (S1 = key 0)
+    on_press:
+      - lambda: |-
+          id(display_index) = 1;
+          id(last_button_press) = millis();
+  - platform: tm1638
+    name: "Button S2"
+    id: button_s2
+    key: 1  # Zero-indexed (S2 = key 1)
+    on_press:
+      - lambda: |-
+          id(display_index) = 2;
+          id(last_button_press) = millis();
+  - platform: tm1638
+    name: "Button S3"
+    id: button_s3
+    key: 2  # Zero-indexed (S3 = key 2)
+    on_press:
+      - lambda: |-
+          id(display_index) = 3;
+          id(last_button_press) = millis();
+  - platform: tm1638
+    name: "Button S4"
+    id: button_s4
+    key: 3  # Zero-indexed (S4 = key 3)
+    on_press:
+      - lambda: |-
+          id(display_index) = 4;
+          id(last_button_press) = millis();
+  - platform: tm1638
+    name: "Button S5"
+    id: button_s5
+    key: 4  # Zero-indexed (S5 = key 4)
+    on_press:
+      - lambda: |-
+          id(display_index) = 5;
+          id(last_button_press) = millis();
+  - platform: tm1638
+    name: "Button S6"
+    id: button_s6
+    key: 5  # Zero-indexed (S6 = key 5)
+    on_press:
+      - lambda: |-
+          id(display_index) = 6;
+          id(last_button_press) = millis();
+  - platform: tm1638
+    name: "Button S7"
+    id: button_s7
+    key: 6  # Zero-indexed (S7 = key 6)
+    on_press:
+      - lambda: |-
+          id(display_index) = 7;
+          id(last_button_press) = millis();
+  - platform: tm1638
+    name: "Button S8"
+    id: button_s8
+    key: 7  # Zero-indexed (S8 = key 7)
+    on_press:
+      - lambda: |-
+          id(display_index) = 8;
+          id(last_button_press) = millis();
+
+# Globals for display and LED state
+globals:
+  - id: display_index
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: last_button_press
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: led_states
+    type: std::array<bool, 8>
+    restore_value: no

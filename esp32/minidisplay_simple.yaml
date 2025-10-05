@@ -1,0 +1,239 @@
+# Simplified ESPHome configuration for MiniDisplay
+esphome:
+  name: minidisplay
+  friendly_name: MiniDisplay Controller
+  on_boot:
+    priority: 600
+    then:
+      - output.turn_on: status_led
+      - logger.log: "MiniDisplay Controller booted"
+  on_shutdown:
+    then:
+      - output.turn_off: status_led
+      - logger.log: "MiniDisplay Controller shutting down"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  level: DEBUG
+  baud_rate: 115200
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "yvY99rlLAA8Xsa1wX4aVqYtBJrv3NovUoy61MOzH1Lo="
+  reboot_timeout: 0s
+
+# OTA updates
+ota:
+  platform: esphome
+  password: "6702401779ea71ccf3a1fb2b93113405"
+
+# WiFi configuration
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: LIGHT
+  fast_connect: false
+  reboot_timeout: 0s
+
+# Bluetooth proxy
+bluetooth_proxy:
+  active: true
+
+# Status LED
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: status_led
+    inverted: true
+
+# Global variables for state tracking
+globals:
+  - id: current_entity_index
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  - id: entity_states
+    type: std::vector<bool>
+    restore_value: no
+    initial_value: '{false, false, false, false, false, false, false}'
+
+  - id: tv_source_index
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  - id: climate_temperature
+    type: float
+    restore_value: yes
+    initial_value: '20.0'
+
+# Button inputs
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO27
+      mode:
+        input: true
+        pullup: true
+    id: encoder_push
+    name: "Encoder Push"
+    on_press:
+      then:
+        - script.execute: handle_encoder_push
+    filters:
+      - delayed_off: 50ms
+
+  - platform: gpio
+    pin:
+      number: GPIO14
+      mode:
+        input: true
+        pullup: true
+    id: back_button
+    name: "Back Button"
+    on_press:
+      then:
+        - script.execute: handle_back_button
+    filters:
+      - delayed_off: 50ms
+
+  - platform: gpio
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pullup: true
+    id: confirm_button
+    name: "Confirm Button"
+    on_press:
+      then:
+        - script.execute: handle_confirm_button
+    filters:
+      - delayed_off: 50ms
+
+# I2C for OLED display
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+
+# Font for display
+font:
+  - file: "gfonts://Roboto"
+    id: default_font
+    size: 12
+
+# Display configuration
+display:
+  - platform: ssd1306_i2c
+    id: oled_display
+    model: "SSD1306 128x64"
+    address: 0x3C
+    lambda: |-
+      // Simple display
+      static const char* entity_names[] = {
+        "Gold Light", "LED Flood", "Bio Flood", "LG TV", "Sam HVAC", "Hot Water"
+      };
+      
+      if (id(current_entity_index) >= 0 && id(current_entity_index) < 6) {
+        it.print(0, 0, id(default_font), entity_names[id(current_entity_index)]);
+      } else {
+        it.print(0, 0, id(default_font), "Unknown Entity");
+      }
+      
+      auto& states = id(entity_states);
+      if (id(current_entity_index) < static_cast<int>(states.size())) {
+        bool state = states[id(current_entity_index)];
+        it.print(0, 20, id(default_font), state ? "State: ON" : "State: OFF");
+      }
+
+# Rotary encoder
+sensor:
+  - platform: rotary_encoder
+    id: rotary_encoder
+    pin_a:
+      number: GPIO25
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO26
+      mode:
+        input: true
+        pullup: true
+    resolution: 1
+    on_value:
+      then:
+        - lambda: |-
+            int current_value = id(rotary_encoder).state;
+            static int last_value = 0;
+            int change = current_value - last_value;
+            last_value = current_value;
+            
+            if (change != 0) {
+              id(handle_encoder_change).execute(change);
+            }
+
+  - platform: wifi_signal
+    name: "WiFi Signal dB"
+    update_interval: 60s
+
+# Scripts for entity control
+script:
+  - id: update_display
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Display update triggered for entity %d", id(current_entity_index));
+
+  - id: switch_entity
+    parameters:
+      entity_index: int
+    then:
+      - lambda: |-
+          id(current_entity_index) = entity_index;
+          id(update_display).execute();
+          ESP_LOGI("script", "Switched to entity %d", entity_index);
+
+  - id: handle_back_button
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Back button pressed");
+          id(update_display).execute();
+
+  - id: handle_confirm_button
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Confirm button pressed");
+          int next_entity = id(current_entity_index) + 1;
+          if (next_entity >= 7) {
+            next_entity = 0;
+          }
+          id(switch_entity).execute(next_entity);
+
+  - id: handle_encoder_push
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Encoder push pressed");
+          auto& states = id(entity_states);
+          if (id(current_entity_index) < static_cast<int>(states.size())) {
+            states[id(current_entity_index)] = !states[id(current_entity_index)];
+          }
+          id(update_display).execute();
+
+  - id: handle_encoder_change
+    parameters:
+      change: int
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Encoder value changed by %d", change);
+          if (id(current_entity_index) == 5) {
+            id(climate_temperature) += static_cast<float>(change) * 0.5f;
+          }
+          id(update_display).execute();

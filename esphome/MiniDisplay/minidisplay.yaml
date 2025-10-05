@@ -1,0 +1,1548 @@
+# ESPHome configuration for MiniDisplay controller
+esphome:
+  name: minidisplay
+  friendly_name: MiniDisplay Controller
+  on_boot:
+    priority: 600
+    then:
+      - output.turn_on: status_led
+      - logger.log: "MiniDisplay Controller booted, LED should be ON"
+  on_shutdown:
+    then:
+      - output.turn_off: status_led
+      - logger.log: "MiniDisplay Controller shutting down"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  level: DEBUG
+  baud_rate: 115200
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "yvY99rlLAA8Xsa1wX4aVqYtBJrv3NovUoy61MOzH1Lo="
+  reboot_timeout: 0s
+  on_client_connected:
+    then:
+      - output.turn_on: status_led
+      - logger.log: "Home Assistant API connected - ready for service calls"
+  on_client_disconnected:
+    then:
+      - output.turn_off: status_led
+      - logger.log: "Home Assistant API disconnected - service calls will fail"
+
+# OTA updates
+ota:
+  platform: esphome
+  password: "6702401779ea71ccf3a1fb2b93113405"
+
+# WiFi configuration
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: LIGHT
+  fast_connect: false
+  reboot_timeout: 0s
+  manual_ip:
+    static_ip: 192.168.1.32
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+# Bluetooth proxy for BLE devices
+bluetooth_proxy:
+  active: true
+
+# Status LED
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: status_led
+    inverted: true
+
+  - platform: gpio
+    pin: GPIO5
+    id: button_led
+    inverted: true
+
+
+# I2C for OLED display
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+
+# Font for display
+font:
+  - file: "gfonts://Roboto"
+    id: default_font
+    size: 12
+
+# Display configuration
+display:
+  - platform: ssd1306_i2c
+    id: oled_display
+    model: "SSD1306 128x64"
+    address: 0x3C
+    lambda: |-
+      // Simple ESPHome display
+      static const char* entity_names[] = {
+        "Gold Light", "LED Flood", "Bio Flood", "Living Office Stand", "LG TV", "Sam HVAC", "Hot Water", "Isolde's Bed"
+      };
+      
+      // Display current entity name
+      if (id(current_entity_index) >= 0 && id(current_entity_index) < 8) {
+        it.print(0, 0, id(default_font), entity_names[id(current_entity_index)]);
+      } else {
+        it.print(0, 0, id(default_font), "Unknown Entity");
+      }
+      
+      // Display real state info from Home Assistant (string sensors)
+      auto state_str = std::string("unknown");
+      if (id(current_entity_index) == 0 && id(gold_light_state).has_state()) {
+        state_str = id(gold_light_state).state.c_str();
+      } else if (id(current_entity_index) == 1 && id(led_flood_state).has_state()) {
+        state_str = id(led_flood_state).state.c_str();
+      } else if (id(current_entity_index) == 2 && id(bio_flood_state).has_state()) {
+        state_str = id(bio_flood_state).state.c_str();
+      } else if (id(current_entity_index) == 3 && id(living_office_state).has_state()) {
+        state_str = id(living_office_state).state.c_str();
+      } else if (id(current_entity_index) == 4 && id(lg_tv_state).has_state()) {
+        state_str = id(lg_tv_state).state.c_str();
+      } else if (id(current_entity_index) == 5 && id(sam_hvac_state).has_state()) {
+        state_str = id(sam_hvac_state).state.c_str();
+      } else if (id(current_entity_index) == 6 && id(hot_water_state).has_state()) {
+        state_str = id(hot_water_state).state.c_str();
+      } else if (id(current_entity_index) == 7 && id(isolde_bed_state).has_state()) {
+        state_str = id(isolde_bed_state).state.c_str();
+      }
+
+      bool real_state = (state_str == "on" || state_str == "playing" || state_str == "heat" || state_str == "cool" || state_str == "auto");
+      
+      // For HVAC, show mode next to ON/OFF status
+      if (id(current_entity_index) == 5 && id(sam_hvac_state).has_state()) {
+        std::string hvac_mode = id(sam_hvac_state).state.c_str();
+        std::string status_text = real_state ? "ON " : "OFF ";
+        status_text += hvac_mode;
+        it.print(0, 16, id(default_font), status_text.c_str());  // Moved up 4 pixels
+      } else {
+        it.print(0, 16, id(default_font), real_state ? "ON" : "OFF");  // Moved up 4 pixels
+      }
+      
+      // Show additional info based on entity type using real HA values
+      char buf[64];
+      if ((id(current_entity_index) >= 0 && id(current_entity_index) <= 3) || id(current_entity_index) == 7) {
+        // Light entities - show brightness and color
+        float brightness = 0;
+        bool has_pending = false;
+        int pending_val = -1;
+        
+        // Check for pending brightness value first
+        auto& pending_brightness_vec = id(pending_brightness);
+        int brightness_index = (id(current_entity_index) == 7) ? 4 : id(current_entity_index);
+        if (brightness_index < static_cast<int>(pending_brightness_vec.size()) && 
+            pending_brightness_vec[brightness_index] >= 0) {
+          pending_val = pending_brightness_vec[brightness_index];
+          has_pending = true;
+        }
+        
+        // Get real brightness from HA
+        if (id(current_entity_index) == 0 && id(gold_light_brightness).has_state()) {
+          brightness = id(gold_light_brightness).state;
+        } else if (id(current_entity_index) == 1 && id(led_flood_brightness).has_state()) {
+          brightness = id(led_flood_brightness).state;
+        } else if (id(current_entity_index) == 2 && id(bio_flood_brightness).has_state()) {
+          brightness = id(bio_flood_brightness).state;
+        } else if (id(current_entity_index) == 3 && id(living_office_brightness).has_state()) {
+          brightness = id(living_office_brightness).state;
+        } else if (id(current_entity_index) == 7 && id(isolde_bed_brightness).has_state()) {
+          brightness = id(isolde_bed_brightness).state;
+        }
+        
+        // Display brightness with brackets if pending
+        if (has_pending) {
+          snprintf(buf, sizeof(buf), "Brightness: [%d%%]", (int)(pending_val * 100 / 255));
+        } else {
+          snprintf(buf, sizeof(buf), "Brightness: %d%%", (int)(brightness * 100 / 255));
+        }
+        it.print(0, 26, id(default_font), buf);
+        
+      // Show real color info from HA attributes
+      if (id(current_entity_index) == 0) {
+        if (id(gold_light_color_mode).has_state()) {
+          std::string cm = id(gold_light_color_mode).state.c_str();
+          if (cm == "hs" && id(gold_light_hs).has_state()) {
+            std::string hs = id(gold_light_hs).state.c_str();
+            it.print(0, 41, id(default_font), ("HS: " + hs).c_str());
+          } else if (cm == "color_temp" && id(gold_light_color_temp).has_state()) {
+            snprintf(buf, sizeof(buf), "CT: %d", (int) id(gold_light_color_temp).state);
+            it.print(0, 41, id(default_font), buf);
+          } else {
+            it.print(0, 41, id(default_font), cm.c_str());
+          }
+        }
+      } else if (id(current_entity_index) == 1) {
+        if (id(led_flood_color_mode).has_state()) {
+          std::string cm = id(led_flood_color_mode).state.c_str();
+          if (cm == "hs" && id(led_flood_hs).has_state()) {
+            std::string hs = id(led_flood_hs).state.c_str();
+            it.print(0, 41, id(default_font), ("HS: " + hs).c_str());
+          } else if (cm == "color_temp" && id(led_flood_color_temp).has_state()) {
+            snprintf(buf, sizeof(buf), "CT: %d", (int) id(led_flood_color_temp).state);
+            it.print(0, 41, id(default_font), buf);
+          } else {
+            it.print(0, 41, id(default_font), cm.c_str());
+          }
+        }
+      } else if (id(current_entity_index) == 2) {
+        if (id(bio_flood_color_mode).has_state()) {
+          std::string cm = id(bio_flood_color_mode).state.c_str();
+          if (cm == "hs" && id(bio_flood_hs).has_state()) {
+            std::string hs = id(bio_flood_hs).state.c_str();
+            it.print(0, 41, id(default_font), ("HS: " + hs).c_str());
+          } else if (cm == "color_temp" && id(bio_flood_color_temp).has_state()) {
+            snprintf(buf, sizeof(buf), "CT: %d", (int) id(bio_flood_color_temp).state);
+            it.print(0, 41, id(default_font), buf);
+          } else {
+            it.print(0, 41, id(default_font), cm.c_str());
+          }
+        }
+      } else if (id(current_entity_index) == 3) {
+        if (id(office_color_mode).has_state()) {
+          std::string cm = id(office_color_mode).state.c_str();
+          if (cm == "color_temp" && id(office_color_temp).has_state()) {
+            snprintf(buf, sizeof(buf), "CT: %d", (int) id(office_color_temp).state);
+            it.print(0, 41, id(default_font), buf);
+          } else {
+            it.print(0, 41, id(default_font), cm.c_str());
+          }
+        }
+      } else if (id(current_entity_index) == 7) {
+        if (id(isolde_bed_color_mode).has_state()) {
+          std::string cm = id(isolde_bed_color_mode).state.c_str();
+          if (cm == "hs" && id(isolde_bed_hs).has_state()) {
+            std::string hs = id(isolde_bed_hs).state.c_str();
+            it.print(0, 41, id(default_font), ("HS: " + hs).c_str());
+          } else if (cm == "color_temp" && id(isolde_bed_color_temp).has_state()) {
+            snprintf(buf, sizeof(buf), "CT: %d", (int) id(isolde_bed_color_temp).state);
+            it.print(0, 41, id(default_font), buf);
+          } else {
+            it.print(0, 41, id(default_font), cm.c_str());
+          }
+        }
+      }
+      } else if (id(current_entity_index) == 4) {
+        // LG TV - show volume with pending support
+        if (id(pending_volume) >= 0) {
+          // Show pending volume in brackets
+          snprintf(buf, sizeof(buf), "Volume: [%d%%]", (int)(id(pending_volume) * 100));
+          it.print(0, 26, id(default_font), buf);
+        } else if (id(lg_tv_volume).has_state()) {
+          // Show real volume from HA
+          float volume = id(lg_tv_volume).state;
+          snprintf(buf, sizeof(buf), "Volume: %d%%", (int)(volume * 100));
+          it.print(0, 26, id(default_font), buf);
+        }
+      } else if (id(current_entity_index) == 5) {
+        // Climate entity - show target temperature with pending support
+        if (id(pending_temperature) >= 0) {
+          // Show pending temperature in brackets
+          snprintf(buf, sizeof(buf), "Target: [%.1fC]", id(pending_temperature));
+          it.print(0, 26, id(default_font), buf);
+        } else if (id(sam_hvac_target_temp).has_state()) {
+          // Show real temperature from HA
+          float target_temp = id(sam_hvac_target_temp).state;
+          snprintf(buf, sizeof(buf), "Target: %.1fC", target_temp);
+          it.print(0, 26, id(default_font), buf);
+        }
+        if (id(sam_outside_temperature).has_state()) {
+          float outside_temp = id(sam_outside_temperature).state;
+          snprintf(buf, sizeof(buf), "Outside: %.1fC", outside_temp);
+          it.print(0, 38, id(default_font), buf);  // Moved up 4 pixels
+        }
+        if (id(th_sensor_temperature).has_state() && id(th_sensor_humidity).has_state()) {
+          float indoor_temp = id(th_sensor_temperature).state;
+          float humidity = id(th_sensor_humidity).state;
+          snprintf(buf, sizeof(buf), "In: %.1fC %.0f%%", indoor_temp, humidity);
+          it.print(0, 50, id(default_font), buf);  // Moved up 4 pixels
+        }
+      }
+
+# Rotary encoder
+sensor:
+  - platform: rotary_encoder
+    id: main_rotary_encoder
+    pin_a:
+      number: GPIO25
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO26
+      mode:
+        input: true
+        pullup: true
+    resolution: 1
+    on_value:
+      then:
+        - lambda: |-
+            int current_value = id(main_rotary_encoder).state;
+            static int last_value = 0;
+            int change = current_value - last_value;
+            last_value = current_value;
+            
+            if (change != 0) {
+              id(handle_encoder_change).execute(change);
+            }
+
+  - platform: wifi_signal
+    name: "WiFi Signal dB"
+    update_interval: 60s
+
+# Home Assistant sensors to read entity states
+  - platform: homeassistant
+    id: gold_light_brightness
+    entity_id: light.gold_light
+    attribute: brightness
+    on_value:
+      then:
+        - lambda: |-
+            auto &pending_vec = id(pending_brightness);
+            if (pending_vec.size() > 0) {
+              pending_vec[0] = -1;
+            }
+            if (id(current_entity_index) == 0) {
+              id(update_display).execute();
+            }
+    
+  - platform: homeassistant
+    id: led_flood_brightness
+    entity_id: light.led_flood_light
+    attribute: brightness
+    on_value:
+      then:
+        - lambda: |-
+            auto &pending_vec = id(pending_brightness);
+            if (pending_vec.size() > 1) {
+              pending_vec[1] = -1;
+            }
+            if (id(current_entity_index) == 1) {
+              id(update_display).execute();
+            }
+    
+  - platform: homeassistant
+    id: bio_flood_brightness
+    entity_id: light.bio_floodlight
+    attribute: brightness
+    on_value:
+      then:
+        - lambda: |-
+            auto &pending_vec = id(pending_brightness);
+            if (pending_vec.size() > 2) {
+              pending_vec[2] = -1;
+            }
+            if (id(current_entity_index) == 2) {
+              id(update_display).execute();
+            }
+
+  # Light attribute sensors for color sync
+  - platform: homeassistant
+    id: gold_light_color_temp
+    entity_id: light.gold_light
+    attribute: color_temp
+  - platform: homeassistant
+    id: led_flood_color_temp
+    entity_id: light.led_flood_light
+    attribute: color_temp
+  - platform: homeassistant
+    id: bio_flood_color_temp
+    entity_id: light.bio_floodlight
+    attribute: color_temp
+  - platform: homeassistant
+    id: office_color_temp
+    entity_id: light.wifi_smart_bulb
+    attribute: color_temp
+
+  - platform: homeassistant
+    id: living_office_brightness
+    entity_id: light.wifi_smart_bulb
+    attribute: brightness
+    on_value:
+      then:
+        - lambda: |-
+            auto &pending_vec = id(pending_brightness);
+            if (pending_vec.size() > 3) {
+              pending_vec[3] = -1;
+            }
+            if (id(current_entity_index) == 3) {
+              id(update_display).execute();
+            }
+
+  - platform: homeassistant
+    id: isolde_bed_brightness
+    entity_id: light.isp_ba4bb8_4bb8
+    attribute: brightness
+    on_value:
+      then:
+        - lambda: |-
+            auto &pending_vec = id(pending_brightness);
+            if (pending_vec.size() > 4) {
+              pending_vec[4] = -1;
+            }
+            if (id(current_entity_index) == 7) {
+              id(update_display).execute();
+            }
+
+  - platform: homeassistant
+    id: isolde_bed_color_temp
+    entity_id: light.isp_ba4bb8_4bb8
+    attribute: color_temp
+
+  - platform: homeassistant
+    id: lg_tv_volume
+    entity_id: media_player.lgnano_55
+    attribute: volume_level
+    on_value:
+      then:
+        - lambda: |-
+            id(pending_volume) = -1.0f;
+            if (id(current_entity_index) == 4) {
+              id(update_display).execute();
+            }
+
+  - platform: homeassistant
+    id: sam_hvac_target_temp
+    entity_id: input_number.sam_desired_temperature
+    on_value:
+      then:
+        - lambda: |-
+            id(pending_temperature) = -1.0f;
+            if (id(current_entity_index) == 5) {
+              id(update_display).execute();
+            }
+
+  - platform: homeassistant
+    id: sam_outside_temperature
+    entity_id: sensor.sam_outside_temperature
+
+  - platform: homeassistant
+    id: th_sensor_temperature
+    entity_id: sensor.t_h_sensor_temperature
+
+  - platform: homeassistant
+    id: th_sensor_humidity
+    entity_id: sensor.t_h_sensor_humidity
+
+  - platform: homeassistant
+    id: hot_water_state_sensor
+    entity_id: switch.smart_plug_2_socket_1
+
+# Binary sensors for reading entity on/off states (hardware buttons)
+binary_sensor:
+  # Hardware buttons (keep existing ones)
+  - platform: gpio
+    pin:
+      number: GPIO27
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: encoder_push
+    name: "Encoder Push"
+    on_press:
+      then:
+        - script.execute: handle_encoder_push
+
+  - platform: gpio
+    pin:
+      number: GPIO14
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: back_button
+    name: "Back Button"
+    on_click:
+      min_length: 10ms
+      max_length: 750ms
+      then:
+        - script.execute: handle_back_button
+
+  - platform: gpio
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: confirm_button
+    name: "Confirm Button" 
+    on_multi_click:
+      - timing:
+          - ON for at least 800ms
+        then:
+          - script.execute: handle_confirm_hold_start
+      - timing:
+          - OFF for at least 20ms
+        then:
+          - if:
+              condition:
+                lambda: 'return id(entity_scroll_mode);'
+              then:
+                - script.execute: handle_confirm_hold_end
+              else:
+                - script.execute: handle_confirm_button
+
+text_sensor:
+  # Home Assistant entity states as strings
+  - platform: homeassistant
+    id: gold_light_state
+    entity_id: light.gold_light
+  - platform: homeassistant
+    id: led_flood_state
+    entity_id: light.led_flood_light
+  - platform: homeassistant
+    id: bio_flood_state
+    entity_id: light.bio_floodlight
+  - platform: homeassistant
+    id: living_office_state
+    entity_id: light.wifi_smart_bulb
+  # Light color attribute text_sensors
+  - platform: homeassistant
+    id: gold_light_color_mode
+    entity_id: light.gold_light
+    attribute: color_mode
+  - platform: homeassistant
+    id: gold_light_hs
+    entity_id: light.gold_light
+    attribute: hs_color
+  - platform: homeassistant
+    id: led_flood_color_mode
+    entity_id: light.led_flood_light
+    attribute: color_mode
+  - platform: homeassistant
+    id: led_flood_hs
+    entity_id: light.led_flood_light
+    attribute: hs_color
+  - platform: homeassistant
+    id: bio_flood_color_mode
+    entity_id: light.bio_floodlight
+    attribute: color_mode
+  - platform: homeassistant
+    id: bio_flood_hs
+    entity_id: light.bio_floodlight
+    attribute: hs_color
+  - platform: homeassistant
+    id: office_color_mode
+    entity_id: light.wifi_smart_bulb
+    attribute: color_mode
+  - platform: homeassistant
+    id: isolde_bed_state
+    entity_id: light.isp_ba4bb8_4bb8
+  - platform: homeassistant
+    id: isolde_bed_color_mode
+    entity_id: light.isp_ba4bb8_4bb8
+    attribute: color_mode
+  - platform: homeassistant
+    id: isolde_bed_hs
+    entity_id: light.isp_ba4bb8_4bb8
+    attribute: hs_color
+  - platform: homeassistant
+    id: lg_tv_state
+    entity_id: media_player.lgnano_55
+  - platform: homeassistant
+    id: sam_hvac_state
+    entity_id: climate.sam
+  - platform: homeassistant
+    id: hot_water_state
+    entity_id: switch.smart_plug_2_socket_1
+
+# Global variables for state tracking
+globals:
+  - id: current_entity_index
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  - id: entity_states
+    type: std::vector<bool>
+    restore_value: no
+    initial_value: '{false, false, false, false, false, false, false, false}'
+
+  - id: tv_source_index
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  - id: light_color_indices
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{0, 0, 0, 0, 0}'  # One for each light entity (0-3, 7)
+
+  - id: light_brightness_values
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{128, 128, 128, 128, 128}'
+
+  - id: light_color_temp_values
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{270, 270, 270, 270, 270}'
+
+  - id: media_volume_values
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{13, 13}'
+
+  - id: climate_temperature
+    type: float
+    restore_value: yes
+    initial_value: '20.0'
+
+  - id: entity_scroll_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # Predictive display globals (pending values shown in brackets)
+  - id: pending_brightness
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{-1, -1, -1, -1, -1}'  # -1 means no pending value (entities 0-3, 7 uses index 4)
+
+  - id: pending_volume
+    type: float
+    restore_value: no
+    initial_value: '-1.0'  # -1 means no pending value
+
+  - id: pending_temperature
+    type: float
+    restore_value: no
+    initial_value: '-1.0'  # -1 means no pending value
+
+# Scripts for entity control and display management
+script:
+  - id: update_display
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Display update triggered for entity %d", id(current_entity_index));
+      - component.update: oled_display
+
+  - id: switch_entity
+    parameters:
+      entity_index: int
+    then:
+      - lambda: |-
+          id(current_entity_index) = entity_index;
+          id(update_display).execute();
+          ESP_LOGI("script", "Switched to entity %d", entity_index);
+
+  - id: toggle_entity_ha
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Toggling entity %d", id(current_entity_index));
+      - output.turn_on: button_led  # Visual feedback that toggle was called
+      - delay: 100ms
+      - output.turn_off: button_led
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 0;'
+          then:
+            - logger.log: "Calling light.toggle for gold_light"
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  entity_id: light.gold_light
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 1;'
+          then:
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  entity_id: light.led_flood_light
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 2;'
+          then:
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  entity_id: light.bio_floodlight
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 3;'
+          then:
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  entity_id: light.wifi_smart_bulb
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 4;'
+          then:
+            - logger.log: "Calling media_player.toggle for media_player.lgnano_55"
+            - homeassistant.service:
+                service: media_player.toggle
+                data:
+                  entity_id: media_player.lgnano_55
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 5;'
+          then:
+            - logger.log: "Calling homeassistant.toggle for climate.sam"
+            - homeassistant.service:
+                service: homeassistant.toggle
+                data:
+                  entity_id: climate.sam
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 6;'
+          then:
+            - homeassistant.service:
+                service: switch.toggle
+                data:
+                  entity_id: switch.smart_plug_2_socket_1
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 7;'
+          then:
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+      - delay: 500ms  # Give HA time to update
+      - script.execute: update_display
+
+  - id: adjust_brightness
+    mode: queued
+    max_runs: 5
+    parameters:
+      change: int
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Adjusting brightness for entity %d, change: %d", id(current_entity_index), change);
+          
+          auto& pending_brightness_vec = id(pending_brightness);
+          int entity_index = id(current_entity_index);
+          int brightness_index = (entity_index == 7) ? 4 : entity_index;
+          
+          if (brightness_index < static_cast<int>(pending_brightness_vec.size())) {
+            int base_brightness = (pending_brightness_vec[brightness_index] >= 0)
+                                  ? pending_brightness_vec[brightness_index]
+                                  : 128;
+
+            if (pending_brightness_vec[brightness_index] < 0) {
+              if (entity_index == 0 && id(gold_light_brightness).has_state()) {
+                base_brightness = (int)id(gold_light_brightness).state;
+              } else if (entity_index == 1 && id(led_flood_brightness).has_state()) {
+                base_brightness = (int)id(led_flood_brightness).state;
+              } else if (entity_index == 2 && id(bio_flood_brightness).has_state()) {
+                base_brightness = (int)id(bio_flood_brightness).state;
+              } else if (entity_index == 3 && id(living_office_brightness).has_state()) {
+                base_brightness = (int)id(living_office_brightness).state;
+              } else if (entity_index == 7 && id(isolde_bed_brightness).has_state()) {
+                base_brightness = (int)id(isolde_bed_brightness).state;
+              }
+            }
+
+            int new_brightness = base_brightness + (change * 10);
+            new_brightness = std::max(0, std::min(255, new_brightness));
+            pending_brightness_vec[brightness_index] = new_brightness;
+
+            ESP_LOGI("script", "Set pending brightness to %d for entity %d (base %d)", new_brightness, entity_index, base_brightness);
+          }
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 0;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  brightness: !lambda |-
+                    auto& pending_brightness_vec = id(pending_brightness);
+                    int pending = pending_brightness_vec[0];
+                    if (pending >= 0) {
+                      return pending;
+                    }
+                    int base = id(gold_light_brightness).has_state() ? (int)id(gold_light_brightness).state : 128;
+                    int new_brightness = base + (change * 10);
+                    new_brightness = std::max(0, std::min(255, new_brightness));
+                    return new_brightness;
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 1;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  brightness: !lambda |-
+                    auto& pending_brightness_vec = id(pending_brightness);
+                    int pending = pending_brightness_vec[1];
+                    if (pending >= 0) {
+                      return pending;
+                    }
+                    int base = id(led_flood_brightness).has_state() ? (int)id(led_flood_brightness).state : 128;
+                    int new_brightness = base + (change * 10);
+                    new_brightness = std::max(0, std::min(255, new_brightness));
+                    return new_brightness;
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 2;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  brightness: !lambda |-
+                    auto& pending_brightness_vec = id(pending_brightness);
+                    int pending = pending_brightness_vec[2];
+                    if (pending >= 0) {
+                      return pending;
+                    }
+                    int base = id(bio_flood_brightness).has_state() ? (int)id(bio_flood_brightness).state : 128;
+                    int new_brightness = base + (change * 10);
+                    new_brightness = std::max(0, std::min(255, new_brightness));
+                    return new_brightness;
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 3;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.wifi_smart_bulb
+                  brightness: !lambda |-
+                    auto& pending_brightness_vec = id(pending_brightness);
+                    int pending = pending_brightness_vec[3];
+                    if (pending >= 0) {
+                      return pending;
+                    }
+                    int base = id(living_office_brightness).has_state() ? (int)id(living_office_brightness).state : 128;
+                    int new_brightness = base + (change * 10);
+                    new_brightness = std::max(0, std::min(255, new_brightness));
+                    return new_brightness;
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 7;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  brightness: !lambda |-
+                    auto& pending_brightness_vec = id(pending_brightness);
+                    int pending = pending_brightness_vec[4];
+                    if (pending >= 0) {
+                      return pending;
+                    }
+                    int base = id(isolde_bed_brightness).has_state() ? (int)id(isolde_bed_brightness).state : 128;
+                    int new_brightness = base + (change * 10);
+                    new_brightness = std::max(0, std::min(255, new_brightness));
+                    return new_brightness;
+      - script.execute: update_display  # Show pending values immediately
+
+  - id: adjust_volume
+    parameters:
+      change: int
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Adjusting volume for entity %d, change: %d", id(current_entity_index), change);
+          
+          if (id(current_entity_index) == 4) {
+            float base_volume = (id(pending_volume) >= 0)
+                                ? id(pending_volume)
+                                : (id(lg_tv_volume).has_state() ? id(lg_tv_volume).state : 0.5f);
+            float new_volume = base_volume + (change * 0.05f);
+            new_volume = std::max(0.0f, std::min(1.0f, new_volume));
+            id(pending_volume) = new_volume;
+            ESP_LOGI("script", "Set pending volume to %.2f (base %.2f) for entity %d", new_volume, base_volume, id(current_entity_index));
+          }
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 4;'
+          then:
+            - homeassistant.service:
+                service: media_player.volume_set
+                data:
+                  entity_id: media_player.lgnano_55
+                  volume_level: !lambda |-
+                    if (id(pending_volume) >= 0) {
+                      return id(pending_volume);
+                    }
+                    float base = id(lg_tv_volume).has_state() ? id(lg_tv_volume).state : 0.5f;
+                    float new_volume = base + (change * 0.05f);
+                    new_volume = std::max(0.0f, std::min(1.0f, new_volume));
+                    return new_volume;
+      - script.execute: update_display
+
+  - id: adjust_temperature
+    parameters:
+      change: int
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Adjusting temperature for entity %d, change: %d", id(current_entity_index), change);
+          
+          if (id(current_entity_index) == 5) {
+            float base_temp = (id(pending_temperature) >= 0)
+                              ? id(pending_temperature)
+                              : (id(sam_hvac_target_temp).has_state() ? id(sam_hvac_target_temp).state : 20.0f);
+            float new_temp = base_temp + (static_cast<float>(change) * 0.5f);
+            new_temp = std::max(10.0f, std::min(30.0f, new_temp));
+            id(pending_temperature) = new_temp;
+            ESP_LOGI("script", "Set pending temperature to %.1f (base %.1f) for entity %d", new_temp, base_temp, id(current_entity_index));
+          }
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 5;'
+          then:
+            - homeassistant.service:
+                service: input_number.set_value
+                data:
+                  entity_id: input_number.sam_desired_temperature
+                  value: !lambda |-
+                    if (id(pending_temperature) >= 0) {
+                      return id(pending_temperature);
+                    }
+                    float base = id(sam_hvac_target_temp).has_state() ? id(sam_hvac_target_temp).state : 20.0f;
+                    float new_temp = base + (static_cast<float>(change) * 0.5f);
+                    new_temp = std::max(10.0f, std::min(30.0f, new_temp));
+                    return new_temp;
+      - script.execute: update_display
+
+  - id: cycle_light_color
+    then:
+      - lambda: |-
+          if ((id(current_entity_index) >= 0 && id(current_entity_index) <= 3) || id(current_entity_index) == 7) {
+            auto& color_indices = id(light_color_indices);
+            int color_index_pos = (id(current_entity_index) == 7) ? 4 : id(current_entity_index);
+            if (color_index_pos < static_cast<int>(color_indices.size())) {
+              int& color_index = color_indices[color_index_pos];
+              
+              // Office stand (entity 3) only cycles through white temperatures (6-9)
+              if (id(current_entity_index) == 3) {
+                color_index = (color_index < 6) ? 6 : (color_index + 1);
+                if (color_index >= 10) color_index = 6;  // Stay in white range 6-9
+              } else {
+                color_index = (color_index + 1) % 10;  // Full color range for other lights
+              }
+              
+              ESP_LOGI("script", "Cycled color for entity %d to index %d", 
+                       id(current_entity_index), color_index);
+            }
+          }
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 0;'
+          then:
+            - script.execute: apply_gold_light_color
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 1;'
+          then:
+            - script.execute: apply_led_flood_color
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 2;'
+          then:
+            - script.execute: apply_bio_flood_color
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 3;'
+          then:
+            - script.execute: apply_office_light_color
+      - if:
+          condition:
+            lambda: 'return id(current_entity_index) == 7;'
+          then:
+            - script.execute: apply_isolde_bed_color
+      - script.execute: update_display
+
+  - id: apply_gold_light_color
+    then:
+      - lambda: |-
+          auto& color_indices = id(light_color_indices);
+          int color_index = color_indices[0];
+          ESP_LOGI("script", "Applying gold light color index %d", color_index);
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 0;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_name: red
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 1;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_name: green
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 2;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_name: blue
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 3;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_name: yellow
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 4;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_name: magenta
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 5;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_name: cyan
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 6;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_temp: "454"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 7;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_temp: "250"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 8;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_temp: "153"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[0] == 9;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.gold_light
+                  color_temp: "370"
+                  brightness_pct: "100"
+
+  - id: apply_led_flood_color
+    then:
+      - lambda: |-
+          auto& color_indices = id(light_color_indices);
+          int color_index = color_indices[1];
+          ESP_LOGI("script", "Applying LED flood color index %d", color_index);
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 0;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_name: red
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 1;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_name: green
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 2;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_name: blue
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 3;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_name: yellow
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 4;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_name: magenta
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 5;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_name: cyan
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 6;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_temp: "454"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 7;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_temp: "250"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 8;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_temp: "153"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[1] == 9;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.led_flood_light
+                  color_temp: "370"
+                  brightness_pct: "100"
+
+  - id: apply_bio_flood_color
+    then:
+      - lambda: |-
+          auto& color_indices = id(light_color_indices);
+          int color_index = color_indices[2];
+          ESP_LOGI("script", "Applying bio flood color index %d", color_index);
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 0;'
+          then:
+            - logger.log: "Calling RED service for bio flood"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_name: red
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 1;'
+          then:
+            - logger.log: "Calling GREEN service for bio flood"
+            - logger.log: "About to call homeassistant.service"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_name: green
+                  brightness_pct: "100"
+            - logger.log: "Called homeassistant.service for GREEN"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 2;'
+          then:
+            - logger.log: "Calling BLUE service for bio flood"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_name: blue
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 3;'
+          then:
+            - logger.log: "Calling YELLOW service for bio flood"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_name: yellow
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 4;'
+          then:
+            - logger.log: "Calling MAGENTA service for bio flood"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_name: magenta
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 5;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_name: cyan
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 6;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_temp: "454"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 7;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_temp: "250"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 8;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_temp: "153"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[2] == 9;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bio_floodlight
+                  color_temp: "370"
+                  brightness_pct: "100"
+
+  - id: apply_office_light_color
+    then:
+      - lambda: |-
+          auto& color_indices = id(light_color_indices);
+          int color_index = color_indices[3];
+          ESP_LOGI("script", "Applying office light color index %d (whites only)", color_index);
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[3] == 6;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.wifi_smart_bulb
+                  color_temp: "454"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[3] == 7;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.wifi_smart_bulb
+                  color_temp: "250"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[3] == 8;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.wifi_smart_bulb
+                  color_temp: "153"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[3] == 9;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.wifi_smart_bulb
+                  color_temp: "370"
+
+  - id: apply_isolde_bed_color
+    then:
+      - lambda: |-
+          auto& color_indices = id(light_color_indices);
+          int color_index = color_indices[4];
+          ESP_LOGI("script", "Applying Isolde bed light color index %d", color_index);
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 0;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_name: red
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 1;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_name: green
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 2;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_name: blue
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 3;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_name: yellow
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 4;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_name: magenta
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 5;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_name: cyan
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 6;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_temp: "454"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 7;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_temp: "250"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 8;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_temp: "153"
+                  brightness_pct: "100"
+      - if:
+          condition:
+            lambda: 'return id(light_color_indices)[4] == 9;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.isp_ba4bb8_4bb8
+                  color_temp: "370"
+                  brightness_pct: "100"
+
+  - id: cycle_tv_source
+    then:
+      - lambda: |-
+          if (id(current_entity_index) == 4) {
+            id(tv_source_index) = (id(tv_source_index) + 1) % 4;  // 4 sources
+            ESP_LOGI("script", "Cycled TV source to index %d", id(tv_source_index));
+          }
+          id(update_display).execute();
+
+  # Button handler scripts
+  - id: handle_back_button
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Back button pressed for entity %d", id(current_entity_index));
+      - if:
+          condition:
+            lambda: 'return (id(current_entity_index) >= 0 && id(current_entity_index) <= 3) || id(current_entity_index) == 7;'
+          then:
+            - script.execute: cycle_light_color
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(current_entity_index) == 4;'
+                then:
+                  - script.execute: cycle_tv_source
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(current_entity_index) == 5;'
+                      then:
+                        - if:
+                            condition:
+                              lambda: 'return id(sam_hvac_state).has_state() && id(sam_hvac_state).state == "heat";'
+                            then:
+                              - homeassistant.service:
+                                  service: climate.set_hvac_mode
+                                  data:
+                                    entity_id: climate.sam
+                                    hvac_mode: fan_only
+                            else:
+                              - homeassistant.service:
+                                  service: climate.set_hvac_mode
+                                  data:
+                                    entity_id: climate.sam
+                                    hvac_mode: heat
+                      else:
+                        - if:
+                            condition:
+                              lambda: 'return id(current_entity_index) == 6;'
+                            then:
+                              - script.execute: toggle_entity_ha
+
+  - id: handle_confirm_button
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Confirm button pressed");
+          // Short press: cycle entities; long-press handled separately
+          int next_entity = (id(current_entity_index) + 1) % 8;  // 8 total entities (0-7)
+          id(switch_entity).execute(next_entity);
+
+  - id: handle_confirm_hold_start
+    then:
+      - lambda: |-
+          id(entity_scroll_mode) = true;
+          ESP_LOGI("script", "Entity scroll mode enabled");
+
+  - id: handle_confirm_hold_end
+    then:
+      - lambda: |-
+          id(entity_scroll_mode) = false;
+          ESP_LOGI("script", "Entity scroll mode disabled");
+
+  - id: handle_encoder_push
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Encoder push pressed for entity %d", id(current_entity_index));
+          // Encoder push toggles entity state (on/off)
+          id(toggle_entity_ha).execute();
+
+  - id: handle_encoder_change
+    parameters:
+      change: int
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Encoder value changed by %d for entity %d", change, id(current_entity_index));
+          // Encoder rotation adjusts values based on entity type
+          if (id(entity_scroll_mode)) {
+            // In scroll mode, jump by 2 entities per step for faster cycling
+            int step = (change > 0) ? 2 : -2;
+            int next = id(current_entity_index) + step;
+            if (next < 0) next = 7;
+            if (next > 7) next = 0;
+            id(switch_entity).execute(next);
+            return;
+          } else if ((id(current_entity_index) >= 0 && id(current_entity_index) <= 3) || id(current_entity_index) == 7) {
+            // Light entities - adjust brightness
+            id(adjust_brightness).execute(change);
+          } else if (id(current_entity_index) == 4) {
+            // Media player entity - adjust volume
+            id(adjust_volume).execute(change);
+          } else if (id(current_entity_index) == 5) {
+            // Climate entity - adjust temperature
+            id(adjust_temperature).execute(change);
+          }
+           // Hot water (entity 6) has no adjustable values

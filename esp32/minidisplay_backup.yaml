@@ -1,0 +1,904 @@
+esphome:
+  name: minidisplay
+  friendly_name: MiniDisplay Controller
+  on_boot:
+    priority: 600
+    then:
+      - output.turn_on: status_led
+      - logger.log: "MiniDisplay Controller booted, LED should be ON"
+  on_shutdown:
+    then:
+      - output.turn_off: status_led
+      - logger.log: "MiniDisplay Controller shutting down"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  level: DEBUG
+  baud_rate: 115200
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "yvY99rlLAA8Xsa1wX4aVqYtBJrv3NovUoy61MOzH1Lo="
+  reboot_timeout: 0s
+  on_client_connected:
+    then:
+      - output.turn_on: status_led
+      - logger.log: "Home Assistant API connected"
+  on_client_disconnected:
+    then:
+      - output.turn_off: status_led
+      - logger.log: "Home Assistant API disconnected"
+
+# OTA updates
+ota:
+  platform: esphome
+  password: "6702401779ea71ccf3a1fb2b93113405"
+
+# WiFi configuration
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: LIGHT
+  fast_connect: false  # Disabled to fix 'Auth Leave' errors
+  reboot_timeout: 0s
+  manual_ip:
+    static_ip: 192.168.1.32
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+  on_connect:
+    then:
+      - output.turn_on: status_led
+      - logger.log: "Wi-Fi connected"
+  on_disconnect:
+    then:
+      - output.turn_off: status_led
+      - logger.log: "Wi-Fi disconnected"
+
+# Bluetooth proxy for BTLE devices
+bluetooth_proxy:
+  active: true
+  connection_slots: 2
+
+# GPIO pin definitions
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: status_led
+    inverted: true  # Built-in LED is active low
+
+  - platform: gpio
+    pin: GPIO5
+    id: button_led
+    inverted: false
+
+# Binary sensors for buttons
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO27
+      mode:
+        input: true
+        pullup: true
+    id: encoder_push
+    name: "Encoder Push"
+    on_press:
+      then:
+        - script.execute: handle_encoder_push
+    filters:
+      - delayed_off: 50ms
+
+  - platform: gpio
+    pin:
+      number: GPIO14
+      mode:
+        input: true
+        pullup: true
+    id: back_button
+    name: "Back Button"
+    on_press:
+      then:
+        - script.execute: handle_back_button
+    filters:
+      - delayed_off: 50ms
+
+  - platform: gpio
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pullup: true
+    id: confirm_button
+    name: "Confirm Button"
+    on_press:
+      then:
+        - script.execute: handle_confirm_button
+    filters:
+      - delayed_off: 50ms
+
+# I2C for OLED display
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+
+# Font for display
+font:
+  - file: "gfonts://Roboto"
+    id: default_font
+    size: 12
+
+# Display configuration
+display:
+  - platform: ssd1306_i2c
+    id: oled_display
+    model: "SSD1306 128x64"
+    address: 0x3C
+    lambda: |-
+      // Display logic - shows current entity or weather screensaver
+      static bool show_weather = false;
+      static unsigned long last_weather_toggle = 0;
+
+      // Toggle weather display every 10 seconds when idle
+      if (millis() - last_weather_toggle > 10000) {
+        show_weather = !show_weather;
+        last_weather_toggle = millis();
+      }
+
+      if (show_weather) {
+        // Weather display mode
+        it.clear();
+        it.setTextSize(1);
+        it.setTextColor(SSD1306_WHITE);
+        it.setCursor(0, 0);
+        it.print("Weather");
+
+        it.setCursor(0, 20);
+        float indoor_temp = id(weather_temperature).state;
+        if (!isnan(indoor_temp)) {
+          it.printf("Indoor: %.1fC", indoor_temp);
+        } else {
+          it.print("Indoor: --C");
+        }
+
+        it.setCursor(0, 35);
+        float outdoor_temp = id(weather_forecast).state;
+        if (!isnan(outdoor_temp)) {
+          it.printf("Outdoor: %.1fC", outdoor_temp);
+        } else {
+          it.print("Outdoor: --C");
+        }
+
+        it.setCursor(0, 50);
+        float humidity = id(weather_humidity).state;
+        if (!isnan(humidity)) {
+          it.printf("Humidity: %.0f%%", humidity);
+        } else {
+          it.print("Humidity: --%");
+        }
+      } else {
+        // Entity control display mode
+        it.clear();
+        it.setTextSize(1);
+        it.setTextColor(SSD1306_WHITE);
+        it.setCursor(0, 0);
+
+        // Entity names (corresponding to indices 0-6)
+        std::vector<std::string> entity_names = {
+          "Gold Light", "Living Room Flood", "Bio Floodlight",
+          "LG Nano 55", "LG Nano 55", "Sam HVAC", "Hot Water"
+        };
+
+        if (id(current_entity_index) < entity_names.size()) {
+          it.print(entity_names[id(current_entity_index)].c_str());
+        } else {
+          it.print("Unknown Entity");
+        }
+
+        it.setCursor(0, 20);
+
+        if (id(current_entity_index) >= 0 && id(current_entity_index) <= 2) {
+          // Light entity
+          float brightness = 0;
+          if (id(current_entity_index) == 0) {
+            brightness = id(gold_light_brightness).state;
+          } else if (id(current_entity_index) == 1) {
+            brightness = id(led_flood_light_brightness).state;
+          } else if (id(current_entity_index) == 2) {
+            // Bio floodlight - assuming similar structure
+            brightness = 128; // Placeholder
+          }
+
+          it.printf("Brightness: %d%%", (int)(brightness / 2.55));
+          it.setCursor(0, 35);
+
+          // Get current color name from the color indices
+          auto color_indices = id(light_color_indices);
+          std::vector<std::string> color_names = {
+            "Red", "Green", "Blue", "Yellow", "Magenta", "Cyan",
+            "White", "WarmWhite", "CoolWhite", "Daylight"
+          };
+
+          if (id(current_entity_index) < color_indices.size()) {
+            int color_index = color_indices[id(current_entity_index)];
+            if (color_index < color_names.size()) {
+              it.print(color_names[color_index].c_str());
+            }
+          }
+        } else if (id(current_entity_index) >= 3 && id(current_entity_index) <= 4) {
+          // Media player
+          float volume = 0;
+          if (id(current_entity_index) == 3) {
+            volume = id(lg_nano_55_volume).state;
+          } else if (id(current_entity_index) == 4) {
+            volume = id(lg_nano_55_volume).state;
+          }
+
+          it.printf("Volume: %d%%", (int)(volume * 100));
+          it.setCursor(0, 35);
+          it.print(tv_sources[id(tv_source_index)].c_str());
+        } else if (id(current_entity_index) == 5) {
+          // Climate
+          float temp = id(sam_hvac_temperature).state;
+          if (!isnan(temp)) {
+            it.printf("Target: %.1fC", temp);
+          } else {
+            it.print("Target: --C");
+          }
+        } else if (id(current_entity_index) == 6) {
+          // Hot Water
+          it.print("Hot Water");
+          it.setCursor(0, 35);
+          it.print("Smart Plug");
+        }
+
+        it.setCursor(0, 55);
+        it.print("State: ");
+
+        std::string state_str = "UNKNOWN";
+        if (id(current_entity_index) == 0) {
+          state_str = id(gold_light_state).state;
+        } else if (id(current_entity_index) == 1) {
+          state_str = id(led_flood_light_state).state;
+        } else if (id(current_entity_index) == 2) {
+          state_str = id(bio_floodlight_state).state;
+        } else if (id(current_entity_index) == 3) {
+          state_str = id(lg_nano_55_state).state;
+        } else if (id(current_entity_index) == 4) {
+          state_str = id(lg_nano_55_state).state; // Same entity
+        } else if (id(current_entity_index) == 5) {
+          state_str = id(sam_hvac_state).state;
+        } else if (id(current_entity_index) == 6) {
+          state_str = id(hot_water_state).state;
+        }
+
+        // Convert state to ON/OFF
+        if (state_str == "on" || state_str == "playing" || state_str == "heat" || state_str == "cool") {
+          it.print("ON");
+        } else if (state_str == "off" || state_str == "idle" || state_str == "paused") {
+          it.print("OFF");
+        } else {
+          it.print(state_str.c_str());
+        }
+      }
+      it.display();
+
+# Rotary encoder
+sensor:
+  - platform: rotary_encoder
+    id: _rotary_encoder
+    pin_a:
+      number: GPIO25
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO26
+      mode:
+        input: true
+        pullup: true
+    resolution: 1
+    on_value:
+      then:
+        - logger.log:
+            format: "Encoder value changed to %d"
+            args: ['id(_rotary_encoder).state']
+        - lambda: |-
+            // Handle encoder value change directly
+            int current_value = id(_rotary_encoder).state;
+            static int last_value = 0;
+            int change = current_value - last_value;
+            last_value = current_value;
+            
+            if (change != 0) {
+              id(handle_encoder_change).execute(change);
+            }
+            ESP_LOGI("encoder", "Encoder value: %d, change: %d", current_value, change);
+
+  - platform: wifi_signal
+    name: "WiFi Signal dB"
+    update_interval: 60s
+
+  # Entity state sensors from Home Assistant
+  - platform: homeassistant
+    id: gold_light_state
+    entity_id: light.gold_light
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "Gold Light: %s"
+            args: ['id(gold_light_state).state']
+
+  - platform: homeassistant
+    id: gold_light_brightness
+    entity_id: light.gold_light
+    attribute: brightness
+    on_value:
+      then:
+        - logger.log:
+            format: "Gold Light brightness: %d"
+            args: ['id(gold_light_brightness).state']
+
+  - platform: homeassistant
+    id: gold_light_color_temp
+    entity_id: light.gold_light
+    attribute: color_temp
+    on_value:
+      then:
+        - logger.log:
+            format: "Gold Light color temp: %d"
+            args: ['id(gold_light_color_temp).state']
+
+  - platform: homeassistant
+    id: led_flood_light_state
+    entity_id: light.led_flood_light
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "LED Flood Light: %s"
+            args: ['id(led_flood_light_state).state']
+
+  - platform: homeassistant
+    id: led_flood_light_brightness
+    entity_id: light.led_flood_light
+    attribute: brightness
+    on_value:
+      then:
+        - logger.log:
+            format: "LED Flood Light brightness: %d"
+            args: ['id(led_flood_light_brightness).state']
+
+  - platform: homeassistant
+    id: bio_floodlight_state
+    entity_id: light.bio_floodlight
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "Bio Floodlight: %s"
+            args: ['id(bio_floodlight_state).state']
+
+  - platform: homeassistant
+    id: lg_nano_55_state
+    entity_id: media_player.lgnano_55
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "LG Nano 55: %s"
+            args: ['id(lg_nano_55_state).state']
+
+  - platform: homeassistant
+    id: lg_nano_55_volume
+    entity_id: media_player.lgnano_55
+    attribute: volume_level
+    on_value:
+      then:
+        - logger.log:
+            format: "LG Nano 55 volume: %.2f"
+            args: ['id(lg_nano_55_volume).state']
+
+  - platform: homeassistant
+    id: sam_hvac_state
+    entity_id: climate.sam
+    attribute: hvac_mode
+    on_value:
+      then:
+        - logger.log:
+            format: "Sam HVAC mode: %s"
+            args: ['id(sam_hvac_state).state']
+
+  - platform: homeassistant
+    id: sam_hvac_temperature
+    entity_id: climate.sam
+    attribute: current_temperature
+    on_value:
+      then:
+        - logger.log:
+            format: "Sam HVAC current temp: %.1f°C"
+            args: ['id(sam_hvac_temperature).state']
+
+  - platform: homeassistant
+    id: sam_hvac_target_temp
+    entity_id: input_number.sam_desired_temperature
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "Sam HVAC target temp: %.1f°C"
+            args: ['id(sam_hvac_target_temp).state']
+
+  - platform: homeassistant
+    id: hot_water_state
+    entity_id: switch.smart_plug_2_socket_1
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "Hot Water: %s"
+            args: ['id(hot_water_state).state']
+
+  # Weather sensors from Home Assistant
+  - platform: homeassistant
+    id: weather_temperature
+    entity_id: sensor.indoor_temperature
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "Indoor temperature: %.1f°C"
+            args: ['id(weather_temperature).state']
+
+  - platform: homeassistant
+    id: weather_humidity
+    entity_id: sensor.indoor_humidity
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "Indoor humidity: %.1f%%"
+            args: ['id(weather_humidity).state']
+
+  - platform: homeassistant
+    id: weather_forecast
+    entity_id: sensor.outdoor_temperature
+    attribute: state
+    on_value:
+      then:
+        - logger.log:
+            format: "Outdoor temperature: %.1f°C"
+            args: ['id(weather_forecast).state']
+
+# Interval for periodic tasks
+interval:
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - logger.log: "Wi-Fi disconnected, attempting reconnect"
+            - wifi.disable:
+            - delay: 5s
+            - wifi.enable:
+            - logger.log: "Wi-Fi re-enabled"
+
+# Global variables for state tracking
+globals:
+  - id: current_entity_index
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  - id: entity_states
+    type: std::vector<bool>
+    restore_value: no
+    initial_value: '{false, false, false, false, false, false, false}'
+
+  - id: tv_source_index
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  - id: light_color_indices
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{0, 0, 0}'  # One for each light entity
+
+  - id: light_brightness_values
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{128, 128, 128}'
+
+  - id: light_color_temp_values
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{270, 270, 270}'
+
+  - id: media_volume_values
+    type: std::vector<int>
+    restore_value: no
+    initial_value: '{13, 13}'
+
+  - id: climate_temperature
+    type: float
+    restore_value: yes
+    initial_value: '20.0'
+
+
+# Scripts for entity control using Home Assistant API
+script:
+  - id: update_display
+    then:
+      - lambda: |-
+          // Display update logic
+          ESP_LOGI("script", "Display update triggered for entity %d", id(current_entity_index));
+
+  - id: switch_entity
+    parameters:
+      entity_index: int
+    then:
+      - lambda: |-
+          id(current_entity_index) = entity_index;
+          id(update_display).execute();
+          ESP_LOGI("script", "Switched to entity %d", entity_index);
+
+  - id: control_light
+    parameters:
+      entity_index: int
+      brightness: int
+      color_temp: int
+    then:
+      - lambda: |-
+          static const char* light_entities[] = {
+            "light.gold_light",
+            "light.led_flood_light",
+            "light.bio_floodlight"
+          };
+
+          constexpr int num_lights = sizeof(light_entities) / sizeof(light_entities[0]);
+
+          if (entity_index < num_lights) {
+            std::string entity_id = light_entities[entity_index];
+
+            if (entity_index < static_cast<int>(id(light_brightness_values).size())) {
+              id(light_brightness_values)[entity_index] = brightness;
+            }
+            if (entity_index < static_cast<int>(id(light_color_temp_values).size())) {
+              id(light_color_temp_values)[entity_index] = color_temp;
+            }
+
+            std::vector<std::pair<std::string, std::string>> data;
+            data.emplace_back("entity_id", entity_id);
+            data.emplace_back("brightness", std::to_string(brightness));
+            data.emplace_back("color_temp", std::to_string(color_temp));
+
+            call_service("light.turn_on", data);
+
+            ESP_LOGI("script", "Light %s: brightness=%d, color_temp=%d",
+                     entity_id.c_str(), brightness, color_temp);
+          }
+
+  - id: control_media_player
+    parameters:
+      entity_index: int
+      volume: int
+    then:
+      - lambda: |-
+          static const char* media_entities[] = {
+            "media_player.lgnano_55",
+            "media_player.lgnano_55"  // Same entity for now
+          };
+
+          constexpr int num_media = sizeof(media_entities) / sizeof(media_entities[0]);
+
+          if (entity_index < num_media) {
+            std::string entity_id = media_entities[entity_index];
+
+            if (entity_index < static_cast<int>(id(media_volume_values).size())) {
+              id(media_volume_values)[entity_index] = volume;
+            }
+
+            std::vector<std::pair<std::string, std::string>> data;
+            data.emplace_back("entity_id", entity_id);
+            data.emplace_back("volume_level", std::to_string(volume / 100.0f));
+
+            call_service("media_player.volume_set", data);
+
+            ESP_LOGI("script", "Media player %s: volume=%.2f",
+                     entity_id.c_str(), volume / 100.0);
+          }
+
+  - id: control_climate
+    parameters:
+      temperature: float
+    then:
+      - lambda: |-
+          std::vector<std::pair<std::string, std::string>> data;
+          data.emplace_back("entity_id", "input_number.sam_desired_temperature");
+          data.emplace_back("value", std::to_string(temperature));
+          call_service("input_number.set_value", data);
+
+          ESP_LOGI("script", "Climate temperature set to %.1f°C", temperature);
+
+  - id: control_light_hs_color
+    parameters:
+      entity_index: int
+      hue: float
+      saturation: float
+    then:
+      - lambda: |-
+          static const char* light_entities[] = {
+            "light.gold_light",
+            "light.led_flood_light",
+            "light.bio_floodlight"
+          };
+
+          constexpr int num_lights = sizeof(light_entities) / sizeof(light_entities[0]);
+
+          if (entity_index < num_lights) {
+            std::string entity_id = light_entities[entity_index];
+
+            std::vector<std::pair<std::string, std::string>> data;
+            data.emplace_back("entity_id", entity_id);
+            // hs_color expects an array, stringify it
+            data.emplace_back("hs_color",
+                              "[" + std::to_string(hue) + "," + std::to_string(saturation) + "]");
+
+            call_service("light.turn_on", data);
+
+            ESP_LOGI("script", "Light %s: HS color set to %.0f, %.0f",
+                     entity_id.c_str(), hue, saturation);
+          }
+
+  - id: cycle_light_color
+    parameters:
+      entity_index: int
+      direction: int
+    then:
+      - lambda: |-
+          static const char* color_names[] = {
+            "Red", "Green", "Blue", "Yellow", "Magenta", "Cyan",
+            "White", "WarmWhite", "CoolWhite", "Daylight"
+          };
+
+          static const float hs_hues[] = {0, 120, 240, 60, 300, 180, 0};
+          static const float hs_sats[] = {100, 100, 100, 100, 100, 100, 0};
+          static const int color_temps[] = {0, 270, 200, 153};
+
+          auto& color_indices = id(light_color_indices);
+          auto& brightnesses = id(light_brightness_values);
+          auto& color_temps_state = id(light_color_temp_values);
+
+          if (entity_index < 0 || entity_index >= static_cast<int>(color_indices.size())) {
+            return;
+          }
+
+          int current_index = color_indices[entity_index];
+          int step = (direction >= 0) ? 1 : -1;
+          int new_index = (current_index + step + 10) % 10; // wrap within 0-9
+          color_indices[entity_index] = new_index;
+
+          int brightness = (entity_index < static_cast<int>(brightnesses.size()))
+                                 ? brightnesses[entity_index]
+                                 : 128;
+
+          brightness = std::max(0, std::min(255, brightness));
+
+          ESP_LOGI("script", "Light color cycled to: %s", color_names[new_index]);
+
+          if (new_index >= 7) { // Color temperature entries
+            int ct_value = color_temps[new_index - 6];
+            if (entity_index < static_cast<int>(color_temps_state.size())) {
+              color_temps_state[entity_index] = ct_value;
+            }
+            id(control_light).execute(entity_index, brightness, ct_value);
+          } else { // HS colors
+            float hue = hs_hues[new_index];
+            float saturation = hs_sats[new_index];
+            id(control_light_hs_color).execute(entity_index, hue, saturation);
+          }
+
+  - id: control_hot_water
+    parameters:
+      state: string
+    then:
+      - lambda: |-
+          // Control hot water switch
+          std::string service = "switch.turn_" + state;
+          
+          std::vector<std::pair<std::string, std::string>> data;
+          data.emplace_back("entity_id", "switch.smart_plug_2_socket_1");
+          
+          call_service(service, data);
+
+          ESP_LOGI("script", "Hot water turned %s", state.c_str());
+
+  - id: control_media_source
+    parameters:
+      entity_index: int
+      source_index: int
+    then:
+      - lambda: |-
+          static const char* media_entities[] = {
+            "media_player.lgnano_55",
+            "media_player.lgnano_55"
+          };
+
+          static const char* sources[] = {
+            "Disney+", "Jellyfin", "Max", "Netflix", "Prime Video", "Roku",
+            "SVT Play", "TV4 Play", "Telia Play", "YouTube", "HDMI 3"
+          };
+
+          constexpr int num_media = sizeof(media_entities) / sizeof(media_entities[0]);
+          constexpr int num_sources = sizeof(sources) / sizeof(sources[0]);
+
+          if (entity_index < num_media) {
+            std::string entity_id = media_entities[entity_index];
+            int wrapped_index = source_index % num_sources;
+            std::string source_name = sources[wrapped_index];
+
+            std::vector<std::pair<std::string, std::string>> data;
+            data.emplace_back("entity_id", entity_id);
+            data.emplace_back("source", source_name);
+
+            call_service("media_player.select_source", data);
+
+            ESP_LOGI("script", "Media player %s: source set to %s",
+                     entity_id.c_str(), source_name.c_str());
+          }
+
+  - id: toggle_entity_state
+    parameters:
+      entity_index: int
+    then:
+      - lambda: |-
+          static const char* light_entities[] = {
+            "light.gold_light",
+            "light.led_flood_light",
+            "light.bio_floodlight"
+          };
+
+          static const char* media_entities[] = {
+            "media_player.lgnano_55",
+            "media_player.lgnano_55"
+          };
+
+          constexpr int num_lights = sizeof(light_entities) / sizeof(light_entities[0]);
+          constexpr int num_media = sizeof(media_entities) / sizeof(media_entities[0]);
+
+          std::vector<std::pair<std::string, std::string>> data;
+
+          if (entity_index < num_lights) {
+            // Toggle light
+            std::string entity_id = light_entities[entity_index];
+            data.emplace_back("entity_id", entity_id);
+            call_service("light.toggle", data);
+            ESP_LOGI("script", "Toggled light %s", entity_id.c_str());
+          } else if (entity_index < num_lights + num_media) {
+            // Toggle media player
+            int media_index = entity_index - num_lights;
+            std::string entity_id = media_entities[media_index];
+            data.emplace_back("entity_id", entity_id);
+            call_service("media_player.toggle", data);
+            ESP_LOGI("script", "Toggled media player %s", entity_id.c_str());
+          } else if (entity_index == 5) {
+            // Toggle climate
+            data.emplace_back("entity_id", "climate.sam");
+            call_service("climate.toggle", data);
+            ESP_LOGI("script", "Toggled climate");
+          } else if (entity_index == 6) {
+            // Toggle hot water
+            id(control_hot_water).execute("toggle");
+          }
+
+  - id: handle_back_button
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Back button pressed");
+          // Handle back button logic
+          if (id(current_entity_index) >= 0 && id(current_entity_index) <= 2) {
+            // Light entity - cycle through previous color
+            id(cycle_light_color).execute(id(current_entity_index), -1);
+            ESP_LOGI("script", "Cycling light color backward for entity %d", id(current_entity_index));
+          } else if (id(current_entity_index) >= 3 && id(current_entity_index) <= 4) {
+            // Media player - cycle through sources backwards
+            int new_source_index = id(tv_source_index) - 1;
+            const int total_sources = 11;
+            if (new_source_index < 0) {
+              new_source_index += total_sources;
+            }
+            id(tv_source_index) = new_source_index % total_sources;
+            id(control_media_source).execute(id(current_entity_index), id(tv_source_index));
+            ESP_LOGI("script", "Cycling media source backward for entity %d to index %d", id(current_entity_index), id(tv_source_index));
+          } else if (id(current_entity_index) == 6) {
+            // Hot Water - toggle on/off
+            id(control_hot_water).execute("toggle");
+          }
+          id(update_display).execute();
+
+  - id: handle_confirm_button
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Confirm button pressed");
+          // Switch to next entity (wrap if needed)
+          int next_entity = id(current_entity_index) + 1;
+          if (next_entity >= 7) {
+            next_entity = 0;
+          }
+          id(switch_entity).execute(next_entity);
+
+  - id: handle_encoder_push
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Encoder push pressed");
+          // Handle encoder push logic - toggle entity state
+          id(toggle_entity_state).execute(id(current_entity_index));
+          id(update_display).execute();
+
+  - id: handle_encoder_change
+    parameters:
+      change: int
+    then:
+      - lambda: |-
+          ESP_LOGI("script", "Encoder value changed by %d", change);
+          // Handle encoder rotation - adjust current entity value
+          if (id(current_entity_index) >= 0 && id(current_entity_index) <= 2) {
+            // Light entity - adjust brightness
+            auto& brightnesses = id(light_brightness_values);
+            if (id(current_entity_index) < static_cast<int>(brightnesses.size())) {
+              brightnesses[id(current_entity_index)] = std::max(0, std::min(255, brightnesses[id(current_entity_index)] + change));
+              int ct_value = (id(current_entity_index) < static_cast<int>(id(light_color_temp_values).size())) ? id(light_color_temp_values)[id(current_entity_index)] : 270;
+              id(control_light).execute(id(current_entity_index), brightnesses[id(current_entity_index)], ct_value);
+            }
+          } else if (id(current_entity_index) >= 3 && id(current_entity_index) <= 4) {
+            // Media player - adjust volume
+            auto& volumes = id(media_volume_values);
+            int idx = id(current_entity_index) - 3;
+            if (idx >= 0 && idx < static_cast<int>(volumes.size())) {
+              volumes[idx] = std::max(0, std::min(100, volumes[idx] + change));
+              id(control_media_player).execute(id(current_entity_index), volumes[idx]);
+            }
+          } else if (id(current_entity_index) == 5) {
+            // Climate - adjust temperature
+            id(climate_temperature) += static_cast<float>(change) * 0.5f;
+            id(control_climate).execute(id(climate_temperature));
+          } else if (id(current_entity_index) == 6) {
+            // Hot Water - no volume control, do nothing
+            ESP_LOGI("script", "Hot Water entity doesn't support encoder adjustments");
+          }
+          id(update_display).execute();
+
+# Event handlers for button presses
+event:
+  - platform: template
+    name: "Back Button Pressed"
+    id: back_button_pressed_event
+    event_types:
+      - "button_press"
+
+  - platform: template
+    name: "Confirm Button Pressed"
+    id: confirm_button_pressed_event
+    event_types:
+      - "button_press"
+
+  - platform: template
+    name: "Encoder Push Pressed"
+    id: encoder_push_pressed_event
+    event_types:
+      - "button_press"
+
+  - platform: template
+    name: "Encoder Value Changed"
+    id: encoder_value_changed_event
+    event_types:
+      - "value_change"
