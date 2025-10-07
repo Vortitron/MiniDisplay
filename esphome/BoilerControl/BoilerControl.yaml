@@ -1,0 +1,139 @@
+esphome:
+  name: boiler-control
+  friendly_name: Boiler Control
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+
+# WiFi configuration
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  
+  # Enable fallback hotspot (captive portal) in case WiFi connection fails
+  ap:
+    ssid: "Boiler-Control-Fallback"
+    password: "changeme123"
+
+# Captive portal for easy initial setup
+captive_portal:
+
+# API for Home Assistant
+api:
+  encryption:
+    key: !secret boiler_control_api_key
+
+# OTA updates
+ota:
+  platform: esphome
+  password: !secret esphome_password
+
+# Bluetooth Proxy (extends Home Assistant BLE range)
+bluetooth_proxy:
+  active: true
+
+# Global to track button press state (0=all off, 1=relay1 on, 2=both on)
+globals:
+  - id: relay_state
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+# LED controlled by relay states
+output:
+  - platform: gpio
+    pin: GPIO2
+    id: status_led_output
+    inverted: false
+
+light:
+  - platform: binary
+    name: "Status LED"
+    id: status_led
+    output: status_led_output
+    internal: true
+
+# Relay 1 - Typically used for boiler/heating control
+switch:
+  - platform: gpio
+    name: "Boiler Relay 1"
+    id: relay_1
+    pin: GPIO16
+    inverted: false
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:water-boiler"
+    on_turn_on:
+      - logger.log: "Relay 1 turned ON"
+      - light.turn_on: status_led
+    on_turn_off:
+      - logger.log: "Relay 1 turned OFF"
+      - lambda: |-
+          // Only turn off LED if both relays are off
+          if (!id(relay_2).state) {
+            id(status_led).turn_off();
+          }
+
+  # Relay 2 - Secondary control
+  - platform: gpio
+    name: "Boiler Relay 2"
+    id: relay_2
+    pin: GPIO17
+    inverted: false
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:water-boiler"
+    on_turn_on:
+      - logger.log: "Relay 2 turned ON"
+      - light.turn_on: status_led
+    on_turn_off:
+      - logger.log: "Relay 2 turned OFF"
+      - lambda: |-
+          // Only turn off LED if both relays are off
+          if (!id(relay_1).state) {
+            id(status_led).turn_off();
+          }
+
+# Programmable button (GPIO0) - cycles relays through states
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO0
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Control Button"
+    id: control_button
+    internal: true
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_press:
+      - lambda: |-
+          // Cycle through states: 0 (all off) -> 1 (relay1 on) -> 2 (both on) -> 0
+          id(relay_state) = (id(relay_state) + 1) % 3;
+          
+          ESP_LOGI("button", "Button pressed, new state: %d", id(relay_state));
+          
+          if (id(relay_state) == 0) {
+            // All off
+            id(relay_1).turn_off();
+            id(relay_2).turn_off();
+          } else if (id(relay_state) == 1) {
+            // Relay 1 ON, Relay 2 OFF
+            id(relay_1).turn_on();
+            id(relay_2).turn_off();
+          } else if (id(relay_state) == 2) {
+            // Both ON
+            id(relay_1).turn_on();
+            id(relay_2).turn_on();
+          }
+
+# Restart button (accessible from Home Assistant)
+button:
+  - platform: restart
+    name: "Boiler Control Restart"

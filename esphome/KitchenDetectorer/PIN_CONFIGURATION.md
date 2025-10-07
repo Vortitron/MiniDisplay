@@ -57,10 +57,16 @@ The device cycles through up to 10 screens every 3.5 seconds (some are condition
 ## Button Functions
 Buttons 1-4 are configured as toggles. When pressed, they toggle Home Assistant entities and briefly display status. Button 8 is used for calibration.
 
+**Button 2 (Bio Office)** has special logic:
+- If **heaters are OFF** → turns **both heaters AND lights ON**
+- If **heaters are ON** → turns **both heaters AND lights OFF**
+- Heater state is the control (light state is ignored)
+- This matches LED2 which indicates Bio Office data on screen 1
+
 | Button | TM1638 Key | Function | Home Assistant Entity |
 |--------|------------|----------|----------------------|
-| 1 | Key 0 | Toggle Bio Office Lights | light.bio_office |
-| 2 | Key 1 | Toggle Living Room Lights | light.living_room |
+| 1 | Key 0 | Toggle Living Room Lights | light.living_room |
+| 2 | Key 1 | Toggle Bio Office (heaters + lights together) | switch.bio_office_heaters_socket_1, light.bio_office |
 | 3 | Key 2 | Toggle Bedroom Lights | light.bedroom |
 | 4 | Key 3 | Toggle Hot Water | switch.smart_plug_2_socket_1 |
 | 5-7 | Keys 4-6 | Reserved for future use | - |
@@ -73,10 +79,10 @@ Buttons 1-4 are configured as toggles. When pressed, they toggle Home Assistant 
 | LED1 | Air Fryer Active | Lights when air fryer power > 0W |
 | LED2 | Bio Office Screen | Lights during Bio Office screen display |
 | LED3 | Power Price Screen | Lights during power price screen display |
-| LED4 | Coffee Bean Warning | Lights when coffee beans are low |
+| LED4 | Coffee Bean Warning | Lights when coffee beans are low (on screen 7 only) |
 | LED5 | Calendar Alerts | Lights during calendar event screen display |
 | LED6-7 | Reserved | Available for future features |
-| LED8 | Calibration Mode | Lights when in calibration mode |
+| LED8 | Low Beans Alert | **Flashes continuously** when beans are low (any screen) |
 
 ## Home Assistant Integration
 The device subscribes to the following Home Assistant entities:
@@ -112,10 +118,12 @@ To calibrate the coffee bean level sensor using Button 8 on the TM1638 (reversed
 During calibration, LED8 (index 7) remains lit to indicate calibration mode is active.
 
 ## Calendar Event Alerts
-The device monitors `calendar.handl_f` for specific family events:
+The device monitors `calendar.handl_f` for specific family events.
+
+**⚠️ Important Limitation**: Home Assistant calendar entities only show the **next** event. If multiple events exist on the same day (e.g., "Felix Swim" at 08:00 and "Fastighetsautomation" at 13:00), the display will only show whichever event is currently "next". As time progresses and events pass, the display will update to show the next upcoming Felix/Isolde event.
 
 ### Felix Activities (8am events)
-- Displays from **6pm the day before** until **8am on event day**
+- Displays whenever a "Felix" event is the next event in the calendar
 - Events starting with "Felix" are automatically shortened:
   - **"Felix Swim"** → displays as **"F. Swim"**
   - **"Felix Idrott"** → displays as **"F.   PE"**
@@ -123,11 +131,32 @@ The device monitors `calendar.handl_f` for specific family events:
 - LED5 lights up during display
 
 ### Isolde Riding Lessons (Saturdays 9:30am)
-- Displays when **"Ridlekis Isolde"** event found on Saturdays
+- Displays when **"Ridlekis Isolde"** event is next on Saturdays
 - Shows **"Riding 930"** on display
 - LED5 lights up during display
 
-These alerts help ensure morning activities aren't forgotten!
+### Recommended: Create a Helper Sensor in Home Assistant
+To get more reliable advance warning for Felix events, create a template sensor in Home Assistant:
+
+```yaml
+# Add to configuration.yaml
+template:
+  - binary_sensor:
+      - name: "Felix Morning Activity Alert"
+        unique_id: felix_morning_alert
+        state: >
+          {# Check if there's a Felix 8am event today or tomorrow #}
+          {% set ns = namespace(found=false) %}
+          {% set cal_state = states('calendar.handl_f') %}
+          {% if cal_state != 'unavailable' and 'Felix' in state_attr('calendar.handl_f', 'message') | default('') %}
+            {% set event_start = state_attr('calendar.handl_f', 'start_time') %}
+            {# Show alert from 6pm day before until 8am event day #}
+            {% set ns.found = true %}
+          {% endif %}
+          {{ ns.found }}
+```
+
+Then update ESPHome to monitor this binary sensor instead for more reliable alerts.
 
 ## Air Fryer Beep Detection
 When the air fryer beep is detected:
@@ -155,3 +184,5 @@ This provides a clear visual alert that the air fryer needs attention.
 - Screen 9 (Calendar) is automatically skipped unless there's a relevant Felix or Isolde event
 - Calibration order has been reversed: start with empty container and fill up (easier than removing beans)
 - Bio temperature now displays with °C suffix on screen 1
+- LED8 flashes continuously (500ms interval) whenever beans are low - provides persistent alert across all screens
+- Button 1 (Key 0) controls Living Room, Button 2 (Key 1) controls Bio Office to match LED2 placement

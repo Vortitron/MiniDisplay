@@ -177,27 +177,47 @@ binary_sensor:
   
   # TM1638 Buttons (Button 1-4 for toggles, 5-8 available for future use)
   - platform: tm1638
-    name: "Button 1"
+    name: "Button 1 - Living Room"
     id: button_1
     key: 0
     on_press:
       - homeassistant.service:
           service: light.toggle
           data:
-            entity_id: light.bio_office
+            entity_id: light.living_room
       - lambda: |-
           id(button_pressed) = true;
           id(button_press_time) = millis();
   
   - platform: tm1638
-    name: "Button 2"
+    name: "Button 2 - Bio Office"
     id: button_2
     key: 1
     on_press:
-      - homeassistant.service:
-          service: light.toggle
-          data:
-            entity_id: light.living_room
+      # Check heater state and toggle both heaters and lights together
+      - if:
+          condition:
+            lambda: 'return id(bio_heaters).state;'
+          then:
+            # Heaters are ON, turn both OFF
+            - homeassistant.service:
+                service: switch.turn_off
+                data:
+                  entity_id: "switch.bio_office_heaters_socket_1"
+            - homeassistant.service:
+                service: light.turn_off
+                data:
+                  entity_id: "light.bio_office"
+          else:
+            # Heaters are OFF, turn both ON
+            - homeassistant.service:
+                service: switch.turn_on
+                data:
+                  entity_id: "switch.bio_office_heaters_socket_1"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: "light.bio_office"
       - lambda: |-
           id(button_pressed) = true;
           id(button_press_time) = millis();
@@ -319,20 +339,20 @@ display:
             id(current_screen) = 0;  // Skip to next screen cycle
           } else {
             std::string event = id(felix_calendar_event).state;
-            bool show_felix = false;
-            bool show_isolde = false;
+            bool show_event = false;
             
-            // Check for Felix events (8am) - show from 6pm day before until 8am
+            // Check for Felix events - show whenever detected (HA calendar shows next event)
+            // Note: HA calendar entities only show next event, so if multiple events exist,
+            // we'll only see one at a time as they become "next"
             if (event.find("Felix") == 0) {
-              // Show from 18:00 previous day until 08:00 event day
-              show_felix = true;  // Simplified - would need more complex time checking
+              show_event = true;
             }
-            // Check for Ridlekis Isolde on Saturdays at 9:30am
+            // Check for Ridlekis Isolde on Saturdays
             if (time_now.day_of_week == 6 && event.find("Ridlekis Isolde") == 0) {
-              show_isolde = true;
+              show_event = true;
             }
             
-            if (!show_felix && !show_isolde) {
+            if (!show_event) {
               id(current_screen) = 0;  // Skip calendar screen
             }
           }
@@ -351,6 +371,18 @@ display:
       // Turn off all LEDs first
       for (int i = 0; i < 8; i++) {
         it.set_led(i, false);
+      }
+      
+      // Check if beans are low and flash LED8
+      float bean_threshold = id(full_dist) + (id(empty_dist) - id(full_dist)) * 0.2;
+      static unsigned long last_bean_flash = 0;
+      static bool bean_led_state = false;
+      if (id(espresso_bean_level).state > bean_threshold && id(espresso_bean_level).state > 0) {
+        if (millis() - last_bean_flash > 500) {  // Flash every 500ms
+          bean_led_state = !bean_led_state;
+          last_bean_flash = millis();
+        }
+        it.set_led(7, bean_led_state);  // Flash LED8
       }
       
       // Clear display
