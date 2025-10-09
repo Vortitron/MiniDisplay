@@ -99,8 +99,12 @@ The device subscribes to the following Home Assistant entities:
 - `switch.bio_office_heaters_socket_1` - Bio office heaters status
 - `switch.smart_plug_2_socket_1` - Hot water switch status
 
-### Calendar
-- `calendar.handl_f` - Family calendar for Felix activities and Isolde riding lessons
+### Binary Sensors
+- `binary_sensor.felix_morning_alert` - Indicates when Felix has a morning activity (custom template helper)
+- `binary_sensor.isolde_morning_alert` - Indicates when Isolde has riding lesson (custom template helper)
+
+### Calendar & Text Sensors
+- `calendar.handl_f` - Family calendar entity (provides event names for display)
 
 ### Time
 - `homeassistant_time` - Date and time synchronisation
@@ -118,45 +122,49 @@ To calibrate the coffee bean level sensor using Button 8 on the TM1638 (reversed
 During calibration, LED8 (index 7) remains lit to indicate calibration mode is active.
 
 ## Calendar Event Alerts
-The device monitors `calendar.handl_f` for specific family events.
+The device uses **Home Assistant binary sensors** to reliably track family events, even when multiple events exist on the same day.
 
-**⚠️ Important Limitation**: Home Assistant calendar entities only show the **next** event. If multiple events exist on the same day (e.g., "Felix Swim" at 08:00 and "Fastighetsautomation" at 13:00), the display will only show whichever event is currently "next". As time progresses and events pass, the display will update to show the next upcoming Felix/Isolde event.
+### Required Home Assistant Binary Sensors
+The device monitors these binary sensors (create via Settings → Devices & Services → Helpers → Template):
 
-### Felix Activities (8am events)
-- Displays whenever a "Felix" event is the next event in the calendar
+**`binary_sensor.felix_morning_alert`** - Felix morning activity alert
+```yaml
+{# Check if there's a Felix 8am event today or tomorrow #}
+{% set ns = namespace(found=false) %}
+{% set cal_state = states('calendar.handl_f') %}
+{% if cal_state != 'unavailable' and 'Felix' in state_attr('calendar.handl_f', 'message') | default('') %}
+  {% set event_start = state_attr('calendar.handl_f', 'start_time') %}
+  {# Show alert from 6pm day before until 8am event day #}
+  {% set ns.found = true %}
+{% endif %}
+{{ ns.found }}
+```
+
+**`binary_sensor.isolde_morning_alert`** - Isolde riding lesson alert
+```yaml
+{# Check for Ridlekis Isolde on Saturdays #}
+{% set ns = namespace(found=false) %}
+{% set cal_state = states('calendar.handl_f') %}
+{% if cal_state != 'unavailable' and 'Ridlekis Isolde' in state_attr('calendar.handl_f', 'message') | default('') %}
+  {% set ns.found = true %}
+{% endif %}
+{{ ns.found }}
+```
+
+### Felix Activities Display
+- Calendar screen appears when `binary_sensor.felix_morning_alert` is ON
 - Events starting with "Felix" are automatically shortened:
   - **"Felix Swim"** → displays as **"F. Swim"**
   - **"Felix Idrott"** → displays as **"F.   PE"**
   - Other Felix events → displays as **"F."** + first 4 chars after "Felix"
 - LED5 lights up during display
 
-### Isolde Riding Lessons (Saturdays 9:30am)
-- Displays when **"Ridlekis Isolde"** event is next on Saturdays
+### Isolde Riding Lessons Display
+- Calendar screen appears when `binary_sensor.isolde_morning_alert` is ON
 - Shows **"Riding 930"** on display
 - LED5 lights up during display
 
-### Recommended: Create a Helper Sensor in Home Assistant
-To get more reliable advance warning for Felix events, create a template sensor in Home Assistant:
-
-```yaml
-# Add to configuration.yaml
-template:
-  - binary_sensor:
-      - name: "Felix Morning Activity Alert"
-        unique_id: felix_morning_alert
-        state: >
-          {# Check if there's a Felix 8am event today or tomorrow #}
-          {% set ns = namespace(found=false) %}
-          {% set cal_state = states('calendar.handl_f') %}
-          {% if cal_state != 'unavailable' and 'Felix' in state_attr('calendar.handl_f', 'message') | default('') %}
-            {% set event_start = state_attr('calendar.handl_f', 'start_time') %}
-            {# Show alert from 6pm day before until 8am event day #}
-            {% set ns.found = true %}
-          {% endif %}
-          {{ ns.found }}
-```
-
-Then update ESPHome to monitor this binary sensor instead for more reliable alerts.
+**✅ Benefit**: This approach works even when multiple events exist on the same day! The binary sensors can analyze the full calendar while ESPHome displays the relevant event name.
 
 ## Air Fryer Beep Detection
 When the air fryer beep is detected:

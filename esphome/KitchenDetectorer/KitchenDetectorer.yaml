@@ -13,6 +13,13 @@ logger:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  reboot_timeout: 0s
+  manual_ip:
+    static_ip: 192.168.1.34
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
 
 api:
   encryption:
@@ -159,7 +166,7 @@ binary_sensor:
           service: notify.mobile_app
           data:
             message: "Airfryer is beeping! Check for shaking reminder."
-  
+
   # Home Assistant binary sensors/switches
   - platform: homeassistant
     id: bio_heaters
@@ -173,6 +180,14 @@ binary_sensor:
     id: power_price_is_low
     entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
     attribute: low_price
+    internal: true
+  - platform: homeassistant
+    id: felix_morning_alert
+    entity_id: binary_sensor.felix_morning_alert
+    internal: true
+  - platform: homeassistant
+    id: isolde_morning_alert
+    entity_id: binary_sensor.isolde_morning_alert
     internal: true
   
   # TM1638 Buttons (Button 1-4 for toggles, 5-8 available for future use)
@@ -334,27 +349,12 @@ display:
         }
         // Skip calendar screen (9) if no relevant events
         if (id(current_screen) == 9) {
-          auto time_now = id(homeassistant_time).now();
-          if (!time_now.is_valid() || !id(felix_calendar_event).has_state()) {
-            id(current_screen) = 0;  // Skip to next screen cycle
-          } else {
-            std::string event = id(felix_calendar_event).state;
-            bool show_event = false;
-            
-            // Check for Felix events - show whenever detected (HA calendar shows next event)
-            // Note: HA calendar entities only show next event, so if multiple events exist,
-            // we'll only see one at a time as they become "next"
-            if (event.find("Felix") == 0) {
-              show_event = true;
-            }
-            // Check for Ridlekis Isolde on Saturdays
-            if (time_now.day_of_week == 6 && event.find("Ridlekis Isolde") == 0) {
-              show_event = true;
-            }
-            
-            if (!show_event) {
-              id(current_screen) = 0;  // Skip calendar screen
-            }
+          // Check binary sensors from Home Assistant for reliable morning alerts
+          bool show_felix = id(felix_morning_alert).has_state() && id(felix_morning_alert).state;
+          bool show_isolde = id(isolde_morning_alert).has_state() && id(isolde_morning_alert).state;
+          
+          if (!show_felix && !show_isolde) {
+            id(current_screen) = 0;  // Skip calendar screen - no alerts active
           }
         }
         id(last_screen_change) = millis();
@@ -480,7 +480,13 @@ display:
         }
       } else if (id(current_screen) == 9) {
         // Screen 9: Calendar Events (Felix activities, Isolde riding)
-        if (id(felix_calendar_event).has_state()) {
+        // Binary sensors determine if we should show, calendar entity provides the actual event name
+        it.set_led(4, true);  // LED5 for calendar alerts
+        
+        bool felix_alert = id(felix_morning_alert).has_state() && id(felix_morning_alert).state;
+        bool isolde_alert = id(isolde_morning_alert).has_state() && id(isolde_morning_alert).state;
+        
+        if (felix_alert && id(felix_calendar_event).has_state()) {
           std::string event = id(felix_calendar_event).state;
           
           // Check for Felix events and shorten
@@ -488,19 +494,23 @@ display:
             it.print("F. Swim");
           } else if (event.find("Felix Idrott") == 0) {
             it.print("F.   PE");
-          } else if (event.find("Ridlekis Isolde") == 0) {
-            it.print("Riding");
-            it.printf(4, "930");
-          } else {
+          } else if (event.find("Felix") == 0) {
             // Generic Felix event
-            if (event.find("Felix") == 0) {
-              it.print("F.");
-              if (event.length() > 6) {
-                it.printf(4, event.substr(6, 4).c_str());
-              }
+            it.print("F.");
+            if (event.length() > 6) {
+              it.printf(4, event.substr(6, 4).c_str());
             }
+          } else {
+            // Fallback if calendar doesn't show Felix event but alert is active
+            it.print("Felix");
+            it.printf(4, " 8am");
           }
-          it.set_led(4, true);  // LED5 for calendar alerts
+        } else if (isolde_alert) {
+          it.print("Riding");
+          it.printf(4, " 930");
+        } else {
+          // Shouldn't get here, but fallback
+          it.print("Event");
         }
       }
 

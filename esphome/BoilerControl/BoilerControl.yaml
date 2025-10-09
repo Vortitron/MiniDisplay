@@ -1,37 +1,36 @@
 esphome:
-  name: boiler-control
-  friendly_name: Boiler Control
+  name: boilercontrol
+  friendly_name: BoilerControl
 
 esp32:
   board: esp32dev
   framework:
-    type: arduino
+    type: esp-idf
 
 # Enable logging
 logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "FpSU4uWfdjSNc0dAxtMGojEgLKCgl6bhTWJxpMT6mXE="
+
+ota:
+  - platform: esphome
+    password: "b5238b88692d6b7e4aa3ee4377c8f76b"
 
 # WiFi configuration
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  reboot_timeout: 0s
+  manual_ip:
+    static_ip: 192.168.1.35
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
   
-  # Enable fallback hotspot (captive portal) in case WiFi connection fails
-  ap:
-    ssid: "Boiler-Control-Fallback"
-    password: "changeme123"
-
-# Captive portal for easy initial setup
-captive_portal:
-
-# API for Home Assistant
-api:
-  encryption:
-    key: !secret boiler_control_api_key
-
-# OTA updates
-ota:
-  platform: esphome
-  password: !secret esphome_password
 
 # Bluetooth Proxy (extends Home Assistant BLE range)
 bluetooth_proxy:

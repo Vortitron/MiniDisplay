@@ -100,6 +100,32 @@ sensor:
     name: "Air Temp"
     address: "0xde0000007c3ac428"    # Adjust after mapping
     update_interval: 10s
+  - platform: dallas_temp
+    id: boiler_temp
+    name: "Hot Water Boiler Temp"
+    address: "0xbc0000006a8e5228"    # Adjust after mapping - run esphome to discover
+    update_interval: 10s
+  
+  # MQ2 Gas Sensor - Analog Output (converted to percentage)
+  - platform: adc
+    pin: GPIO34
+    id: mq2_analog
+    name: "MQ2 Gas/Smoke Level"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 2s
+    attenuation: 11db  # Allows reading 0-3.3V range
+    filters:
+      - calibrate_linear:
+          # Map voltage to percentage (0V=0%, 3.3V=100%)
+          - 0.0 -> 0.0
+          - 3.3 -> 100.0
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 5
+      - clamp:
+          min_value: 0
+          max_value: 100
 
 # TM1638 Display and LED/Button Controller (Unchanged Pins)
 display:
@@ -139,18 +165,25 @@ display:
         last_flash = millis();
       }
       if (id(display_index) > 0 && id(display_index) <= 8 && millis() < now) {
-        // Show selected loop temperature and light corresponding LED
+        // Show selected loop temperature - INVERTED LED (all on except selected)
         if (sensors[id(display_index) - 1] && sensors[id(display_index) - 1]->state != NAN) {
           it.printf("%.1fC", sensors[id(display_index) - 1]->state);  // Left 4 digits
           char air_temp_str[6];
           snprintf(air_temp_str, sizeof(air_temp_str), "%.1fC", id(air_temp)->state);
           it.print(4, air_temp_str);                                // Right 4 digits with "C"
-          it.set_led(id(display_index) - 1, true);                  // Zero-indexed LED
+          // Inverted LED logic - all on except the selected one
+          for (int i = 0; i < 8; i++) {
+            it.set_led(i, i != (id(display_index) - 1));           // All on except selected
+          }
         } else {
           it.print("----");
           char air_temp_str[6];
           snprintf(air_temp_str, sizeof(air_temp_str), "%.1fC", id(air_temp)->state);
           it.print(4, air_temp_str);                                // Show Air Temp if loop fails
+          // Inverted LED logic even on error
+          for (int i = 0; i < 8; i++) {
+            it.set_led(i, i != (id(display_index) - 1));
+          }
         }
       } else {
         // Normal mode: Show Manifold Input and Air Temp
@@ -163,8 +196,29 @@ display:
           it.print("----");
           it.print(4, "----");                                    // Fallback if sensors fail
         }
-        // Turn off all LEDs in default mode
-        for (int i = 0; i < 8; i++) {
+        // Normal mode: Show status on LEDs
+        // LED 0: Boiler Control Available/Connected
+        it.set_led(0, id(boiler_available));
+        // LED 1: Boiler Relay 1
+        it.set_led(1, id(boiler_relay_1).state);
+        // LED 2: Boiler Relay 2
+        it.set_led(2, id(boiler_relay_2).state);
+        // LED 3: Smoke/Gas Alarm (ON when smoke/gas detected, flashing for attention)
+        static unsigned long last_alarm_flash = 0;
+        static bool alarm_led_state = false;
+        if (id(mq2_digital).state) {
+          // Alarm active - flash LED rapidly
+          if (millis() - last_alarm_flash > 250) {
+            alarm_led_state = !alarm_led_state;
+            last_alarm_flash = millis();
+          }
+          it.set_led(3, alarm_led_state);
+        } else {
+          // No alarm - LED off
+          it.set_led(3, false);
+        }
+        // LEDs 4-7: Available for future use
+        for (int i = 4; i < 8; i++) {
           it.set_led(i, false);
         }
       }
@@ -235,6 +289,30 @@ binary_sensor:
       - lambda: |-
           id(display_index) = 8;
           id(last_button_press) = millis();
+  
+  # MQ2 Gas Sensor - Digital Output (Threshold Alarm)
+  # Note: MQ2 DO is active LOW (LOW=detected, HIGH=safe)
+  - platform: gpio
+    pin: 
+      number: GPIO35
+      inverted: true  # Invert so ON=alarm, OFF=safe
+    id: mq2_digital
+    name: "MQ2 Smoke/Gas Alarm"
+    device_class: smoke
+  
+  # Import Home Assistant switch states for LED display
+  - platform: homeassistant
+    id: boiler_relay_1
+    entity_id: switch.boilercontrol_boiler_relay_1
+    on_state:
+      then:
+        - lambda: |-
+            id(boiler_available) = true;
+    internal: true
+  - platform: homeassistant
+    id: boiler_relay_2
+    entity_id: switch.boilercontrol_boiler_relay_2
+    internal: true
 
 # Globals for display and LED state
 globals:
@@ -249,3 +327,7 @@ globals:
   - id: led_states
     type: std::array<bool, 8>
     restore_value: no
+  - id: boiler_available
+    type: bool
+    restore_value: no
+    initial_value: 'false'

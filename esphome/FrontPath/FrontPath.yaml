@@ -1,0 +1,111 @@
+esphome:
+  name: frontpath
+  friendly_name: FrontPath
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  baud_rate: 0  # Disable UART logging to free up UART0
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "2RwJ1P/hXAYM+mPPS68KUxQLqYy4ONzj/YgyVhjEdQk="
+
+ota:
+  - platform: esphome
+    password: "8db97f33b277385c2ab325b44c38aa92"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  reboot_timeout: 0s
+  manual_ip:
+    static_ip: 192.168.1.35
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+  output_power: 8.5dB
+
+# Bluetooth Proxy (extends HA BLE range)
+bluetooth_proxy:
+  active: true
+
+# UART Configuration for LD2410C sensors
+uart:
+  - id: uart_sensor1
+    tx_pin: GPIO20
+    rx_pin: GPIO21
+    baud_rate: 256000
+    parity: NONE
+    stop_bits: 1
+  
+  - id: uart_sensor2
+    tx_pin: GPIO8
+    rx_pin: GPIO9
+    baud_rate: 256000
+    parity: NONE
+    stop_bits: 1
+
+# LD2410C Sensors
+ld2410:
+  - uart_id: uart_sensor1
+    id: radar_sensor1
+    throttle: 1000ms
+  
+  - uart_id: uart_sensor2
+    id: radar_sensor2
+    throttle: 1000ms
+
+# Binary Sensors
+binary_sensor:
+  - platform: ld2410
+    ld2410_id: radar_sensor1
+    has_target:
+      name: "Sensor 1 Presence"
+    has_moving_target:
+      name: "Sensor 1 Moving Target"
+    has_still_target:
+      name: "Sensor 1 Still Target"
+  
+  - platform: ld2410
+    ld2410_id: radar_sensor2
+    has_target:
+      name: "Sensor 2 Presence"
+    has_moving_target:
+      name: "Sensor 2 Moving Target"
+    has_still_target:
+      name: "Sensor 2 Still Target"
+
+# Sensors
+sensor:
+  - platform: ld2410
+    ld2410_id: radar_sensor1
+    moving_distance:
+      name: "Sensor 1 Moving Distance"
+    still_distance:
+      name: "Sensor 1 Still Distance"
+    moving_energy:
+      name: "Sensor 1 Moving Energy"
+    still_energy:
+      name: "Sensor 1 Still Energy"
+    detection_distance:
+      name: "Sensor 1 Detection Distance"
+  
+  - platform: ld2410
+    ld2410_id: radar_sensor2
+    moving_distance:
+      name: "Sensor 2 Moving Distance"
+    still_distance:
+      name: "Sensor 2 Still Distance"
+    moving_energy:
+      name: "Sensor 2 Moving Energy"
+    still_energy:
+      name: "Sensor 2 Still Energy"
+    detection_distance:
+      name: "Sensor 2 Detection Distance"
