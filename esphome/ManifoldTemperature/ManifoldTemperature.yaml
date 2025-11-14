@@ -54,78 +54,149 @@ sensor:
     id: manifold_input_temp
     name: "Manifold Input Temp"
     address: "0x170000007bc02828"  # Adjust after mapping
-    update_interval: 10s
+    update_interval: 31s   # 60/2=30, +1 for prime
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: loop_1_return_temp
     name: "Loop 1 Return Temp"
     address: "0x7b0000007a769928"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 33s   # 66/2=33, next prime is 37
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: loop_2_return_temp
     name: "Loop 2 Return Temp"
     address: "0x780000007a859c28"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 37s   # 72/2=36, next prime is 37
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: loop_3_return_temp
     name: "Loop 3 Return Temp"
     address: "0x8300000077cf3e28"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 41s   # 78/2=39, next prime is 41
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: loop_4_return_temp
     name: "Loop 4 Return Temp"
     address: "0x0e000000788c2b28"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 43s   # 84/2=42, next prime is 43
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: loop_5_return_temp
     name: "Loop 5 Return Temp"
     address: "0x430000007852bb28"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 29s   # 90/2=45, next prime is 47
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: loop_6_return_temp
     name: "Loop 6 Return Temp"
     address: "0xaa000000788bcf28"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 31s   # 96/2=48, prev prime is 47
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: loop_7_return_temp
     name: "Loop 7 Return Temp"
     address: "0xb30000007bfe9f28"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 32s   # 102/2=51, next prime is 53
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: loop_8_return_temp
     name: "Loop 8 Return Temp"
     address: "0x060000007cf13f28"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 33s   # 108/2=54, prev prime is 53
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: air_temp
     name: "Air Temp"
     address: "0xde0000007c3ac428"    # Adjust after mapping
-    update_interval: 10s
+    update_interval: 29s   # 114/2=57, next prime is 59
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   - platform: dallas_temp
     id: boiler_temp
     name: "Hot Water Boiler Temp"
     address: "0xbc0000006a8e5228"    # Adjust after mapping - run esphome to discover
-    update_interval: 10s
+    update_interval: 23s
+    filters:
+      - filter_out: nan
+      - timeout: 5min
   
-  # MQ2 Gas Sensor - Analog Output (converted to percentage)
+  # Virtual sensor: Lowest loop return temperature
+  - platform: template
+    name: "Lowest Loop Return Temp"
+    id: lowest_loop_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+    update_interval: 30s
+    lambda: |-
+      std::vector<sensor::Sensor*> sensors = {
+        id(loop_1_return_temp), id(loop_2_return_temp), id(loop_3_return_temp),
+        id(loop_4_return_temp), id(loop_5_return_temp), id(loop_6_return_temp),
+        id(loop_7_return_temp), id(loop_8_return_temp)
+      };
+      float min_temp = NAN;
+      bool found_valid = false;
+      for (auto* sensor : sensors) {
+        if (sensor && sensor->state != NAN) {
+          if (!found_valid || sensor->state < min_temp) {
+            min_temp = sensor->state;
+            found_valid = true;
+          }
+        }
+      }
+      return min_temp;
+  
+  # MQ2 Gas Sensor - Raw Analog Voltage
   - platform: adc
     pin: GPIO34
-    id: mq2_analog
-    name: "MQ2 Gas/Smoke Level"
-    unit_of_measurement: "%"
-    accuracy_decimals: 1
+    id: mq2_analog_raw
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
     update_interval: 2s
     attenuation: 11db  # Allows reading 0-3.3V range
+    internal: true  # Hide raw voltage from HA
     filters:
-      - calibrate_linear:
-          # Map voltage to percentage (0V=0%, 3.3V=100%)
-          - 0.0 -> 0.0
-          - 3.3 -> 100.0
       - sliding_window_moving_average:
           window_size: 15
           send_every: 5
-      - clamp:
-          min_value: 0
-          max_value: 100
+  
+  # MQ2 Gas Sensor - Percentage (template sensor to avoid device_class conflict)
+  - platform: template
+    name: "MQ2 Gas/Smoke Level"
+    id: mq2_analog
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 2s
+    lambda: |-
+      if (id(mq2_analog_raw).state != NAN) {
+        // Convert voltage (0-3.3V) to percentage (0-100%)
+        float percentage = (id(mq2_analog_raw).state / 3.3) * 100.0;
+        // Clamp between 0-100%
+        if (percentage < 0.0) return 0.0;
+        if (percentage > 100.0) return 100.0;
+        return percentage;
+      }
+      return NAN;
 
 # TM1638 Display and LED/Button Controller (Unchanged Pins)
 display:
@@ -167,9 +238,9 @@ display:
       if (id(display_index) > 0 && id(display_index) <= 8 && millis() < now) {
         // Show selected loop temperature - INVERTED LED (all on except selected)
         if (sensors[id(display_index) - 1] && sensors[id(display_index) - 1]->state != NAN) {
-          it.printf("%.1fC", sensors[id(display_index) - 1]->state);  // Left 4 digits
-          char air_temp_str[6];
-          snprintf(air_temp_str, sizeof(air_temp_str), "%.1fC", id(air_temp)->state);
+          it.printf("%04.1fC", sensors[id(display_index) - 1]->state);  // Left 4 digits
+          char air_temp_str[7];
+          snprintf(air_temp_str, sizeof(air_temp_str), "%04.1fC", id(air_temp)->state);
           it.print(4, air_temp_str);                                // Right 4 digits with "C"
           // Inverted LED logic - all on except the selected one
           for (int i = 0; i < 8; i++) {
@@ -177,8 +248,8 @@ display:
           }
         } else {
           it.print("----");
-          char air_temp_str[6];
-          snprintf(air_temp_str, sizeof(air_temp_str), "%.1fC", id(air_temp)->state);
+          char air_temp_str[7];
+          snprintf(air_temp_str, sizeof(air_temp_str), "%04.1fC", id(air_temp)->state);
           it.print(4, air_temp_str);                                // Show Air Temp if loop fails
           // Inverted LED logic even on error
           for (int i = 0; i < 8; i++) {
@@ -188,9 +259,9 @@ display:
       } else {
         // Normal mode: Show Manifold Input and Air Temp
         if (id(manifold_input_temp) && id(manifold_input_temp)->state != NAN && id(air_temp) && id(air_temp)->state != NAN) {
-          it.printf("%.1fC", id(manifold_input_temp)->state);      // Left 4 digits for Manifold
-          char air_temp_str[6];
-          snprintf(air_temp_str, sizeof(air_temp_str), "%.1fC", id(air_temp)->state);
+          it.printf("%04.1fC", id(manifold_input_temp)->state);      // Left 4 digits for Manifold
+          char air_temp_str[7];
+          snprintf(air_temp_str, sizeof(air_temp_str), "%04.1fC", id(air_temp)->state);
           it.print(4, air_temp_str);                               // Right 4 digits for Air with "C"
         } else {
           it.print("----");
@@ -290,15 +361,26 @@ binary_sensor:
           id(display_index) = 8;
           id(last_button_press) = millis();
   
-  # MQ2 Gas Sensor - Digital Output (Threshold Alarm)
-  # Note: MQ2 DO is active LOW (LOW=detected, HIGH=safe)
-  - platform: gpio
-    pin: 
-      number: GPIO35
-      inverted: true  # Invert so ON=alarm, OFF=safe
+  # MQ2 Gas Sensor - Software Alarm (based on analog percentage)
+  # Uses hysteresis to prevent oscillation: triggers at 25%, clears at 20%
+  - platform: template
     id: mq2_digital
     name: "MQ2 Smoke/Gas Alarm"
     device_class: smoke
+    lambda: |-
+      static bool alarm_state = false;
+      if (id(mq2_analog).state != NAN) {
+        if (id(mq2_analog).state >= 25.0) {
+          alarm_state = true;   // Trigger at 25%
+        } else if (id(mq2_analog).state <= 20.0) {
+          alarm_state = false;  // Clear at 20%
+        }
+        // Between 20-25% it maintains previous state (hysteresis)
+      }
+      return alarm_state;
+    filters:
+      - delayed_on: 2s  # Must be high for 2s to trigger (prevents spikes)
+      - delayed_off: 10s  # Stays on for 10s after clearing (latching)
   
   # Import Home Assistant switch states for LED display
   - platform: homeassistant

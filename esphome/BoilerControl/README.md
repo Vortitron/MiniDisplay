@@ -145,6 +145,14 @@ If the relays don't respond:
 - Check logs: `esphome logs BoilerControl.yaml`
 - The relay may use inverted logic - try changing `inverted: false` to `inverted: true`
 
+### Frequent API Disconnections
+If you see "Processing unexpected disconnect" or "CONNECTION_CLOSED" errors:
+- The Bluetooth proxy may be causing resource exhaustion
+- Try disabling the Bluetooth proxy temporarily to test
+- Check your WiFi signal strength at the device location
+- Consider using a static IP (already configured in this setup)
+- The device has `reboot_timeout: 0s` set to prevent reboots during temporary disconnects
+
 ### Serial Monitor
 To view logs during initial setup:
 ```bash
@@ -174,8 +182,43 @@ Once running, the device should automatically appear in Home Assistant:
    - Boiler Relay 1 (switch)
    - Boiler Relay 2 (switch)
    - Restart button
-   - Bluetooth Proxy
    - Diagnostic sensors
+
+**Note:** Bluetooth Proxy is disabled by default due to stability concerns. See section below if you want to enable it.
+
+### Failsafe Feature
+
+The device includes an automatic failsafe mechanism for reliability:
+
+- **If the connection to Home Assistant is lost for 15 minutes or more**, Relay 1 will automatically turn ON (failsafe mode)
+- This ensures the boiler remains operational even if Home Assistant is unavailable
+- **When connection is restored**, the relay will automatically return to its previous state
+- **If connection returns within 15 minutes**, the failsafe never activates (prevents flip-flopping during brief network issues)
+
+The failsafe status is logged and can be viewed in the ESPHome logs.
+
+### Bluetooth Proxy (Disabled by Default)
+
+The Bluetooth proxy is **disabled by default** because it causes frequent API disconnections (typically every hour) on this device. The ESP32 running ESP-IDF with active BLE scanning is resource-intensive and interferes with stable API connectivity.
+
+**For a critical boiler control device, stability is more important than BLE proxy functionality.**
+
+If you need Bluetooth proxy functionality and can tolerate brief hourly disconnects:
+
+1. The failsafe mechanism will protect you (only activates after 15 minutes of disconnection)
+2. Enable it by uncommenting in `BoilerControl.yaml`:
+
+```yaml
+# Change from this:
+# bluetooth_proxy:
+#   active: true
+
+# To this:
+bluetooth_proxy:
+  active: true
+```
+
+After enabling, expect brief disconnections roughly every hour during BLE scan cycles.
 
 ## Customisation
 

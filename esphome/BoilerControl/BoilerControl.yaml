@@ -9,11 +9,47 @@ esp32:
 
 # Enable logging
 logger:
+  level: DEBUG
 
 # Enable Home Assistant API
 api:
   encryption:
     key: "FpSU4uWfdjSNc0dAxtMGojEgLKCgl6bhTWJxpMT6mXE="
+  reboot_timeout: 0s  # Don't reboot on API timeout
+  # Failsafe: If connection to HA is lost for 15+ minutes, activate failsafe
+  on_client_disconnected:
+    - lambda: |-
+        // Mark as disconnected (only if we had a connection)
+        if (id(ha_connected)) {
+          ESP_LOGI("api", "HA connection lost - failsafe will activate in 15 minutes if not reconnected");
+          id(ha_connected) = false;
+        }
+    - delay: 15min
+    - lambda: |-
+        // Only activate failsafe if still disconnected after 15 minutes
+        if (!id(ha_connected) && !id(failsafe_active)) {
+          ESP_LOGI("api", "HA connection lost for 15+ minutes - activating failsafe (relay 1 on)");
+          // Save current relay 1 state before failsafe
+          id(relay_1_pre_failsafe_state) = id(relay_1).state;
+          id(failsafe_active) = true;
+          id(relay_1).turn_on();
+        }
+  on_client_connected:
+    - lambda: |-
+        ESP_LOGI("api", "HA connection established");
+        // Mark as connected
+        id(ha_connected) = true;
+        
+        // If failsafe was active, restore previous state
+        if (id(failsafe_active)) {
+          ESP_LOGI("api", "Restoring relay 1 to pre-failsafe state: %s", id(relay_1_pre_failsafe_state) ? "ON" : "OFF");
+          if (id(relay_1_pre_failsafe_state)) {
+            id(relay_1).turn_on();
+          } else {
+            id(relay_1).turn_off();
+          }
+          id(failsafe_active) = false;
+        }
 
 ota:
   - platform: esphome
@@ -33,8 +69,10 @@ wifi:
   
 
 # Bluetooth Proxy (extends Home Assistant BLE range)
-bluetooth_proxy:
-  active: true
+# DISABLED: Causes frequent API disconnections on this device
+# Uncomment if you need BLE proxy functionality and can tolerate brief disconnects
+# bluetooth_proxy:
+#   active: true
 
 # Global to track button press state (0=all off, 1=relay1 on, 2=both on)
 globals:
@@ -42,13 +80,31 @@ globals:
     type: int
     restore_value: no
     initial_value: "0"
+  
+  # Track relay 1 state before failsafe activation
+  - id: relay_1_pre_failsafe_state
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  
+  # Track if failsafe is currently active
+  - id: failsafe_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  
+  # Track if HA is connected (used to prevent delayed action executing after reconnect)
+  - id: ha_connected
+    type: bool
+    restore_value: no
+    initial_value: "false"
 
 # LED controlled by relay states
 output:
   - platform: gpio
     pin: GPIO2
     id: status_led_output
-    inverted: false
+    inverted: true
 
 light:
   - platform: binary
@@ -63,7 +119,7 @@ switch:
     name: "Boiler Relay 1"
     id: relay_1
     pin: GPIO16
-    inverted: false
+    inverted: true
     restore_mode: RESTORE_DEFAULT_OFF
     icon: "mdi:water-boiler"
     on_turn_on:
@@ -82,7 +138,7 @@ switch:
     name: "Boiler Relay 2"
     id: relay_2
     pin: GPIO17
-    inverted: false
+    inverted: true
     restore_mode: RESTORE_DEFAULT_OFF
     icon: "mdi:water-boiler"
     on_turn_on:

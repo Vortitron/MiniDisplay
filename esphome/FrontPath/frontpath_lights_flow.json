@@ -1,0 +1,268 @@
+[
+    {
+        "id": "frontpath_lights",
+        "type": "tab",
+        "label": "Front Path Lights",
+        "disabled": false,
+        "info": "Controls front porch and path lights based on sunset/midnight schedule and person position detection"
+    },
+    {
+        "id": "sunset_trigger",
+        "type": "sun",
+        "z": "frontpath_lights",
+        "name": "Sunset",
+        "event": "sunset",
+        "offset": 0,
+        "offsetType": "num",
+        "offsetUnits": "seconds",
+        "x": 140,
+        "y": 80,
+        "wires": [["turn_on_30"]]
+    },
+    {
+        "id": "midnight_trigger",
+        "type": "inject",
+        "z": "frontpath_lights",
+        "name": "Midnight",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "0 0 * * *",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 140,
+        "y": 140,
+        "wires": [["turn_off_lights"]]
+    },
+    {
+        "id": "position_listener",
+        "type": "server-state",
+        "z": "frontpath_lights",
+        "name": "Path Position",
+        "server": "",
+        "version": 3,
+        "exposeToHomeAssistant": false,
+        "haConfig": [
+            {
+                "property": "name",
+                "value": ""
+            },
+            {
+                "property": "icon",
+                "value": ""
+            }
+        ],
+        "entityid": "sensor.frontpath_path_person_position",
+        "entityidfiltertype": "exact",
+        "outputinitially": false,
+        "state_type": "str",
+        "haltifstate": "",
+        "halt_if_type": "str",
+        "halt_if_compare": "is",
+        "outputs": 1,
+        "x": 140,
+        "y": 240,
+        "wires": [["store_position"]]
+    },
+    {
+        "id": "sun_state_listener",
+        "type": "server-state",
+        "z": "frontpath_lights",
+        "name": "Sun State",
+        "server": "",
+        "version": 3,
+        "exposeToHomeAssistant": false,
+        "haConfig": [
+            {
+                "property": "name",
+                "value": ""
+            },
+            {
+                "property": "icon",
+                "value": ""
+            }
+        ],
+        "entityid": "sun.sun",
+        "entityidfiltertype": "exact",
+        "outputinitially": false,
+        "state_type": "str",
+        "haltifstate": "",
+        "halt_if_type": "str",
+        "halt_if_compare": "is",
+        "outputs": 1,
+        "x": 140,
+        "y": 300,
+        "wires": [["calc_brightness"]]
+    },
+    {
+        "id": "turn_on_30",
+        "type": "api-call-service",
+        "z": "frontpath_lights",
+        "name": "Turn On at 30%",
+        "server": "",
+        "version": 3,
+        "debugenabled": false,
+        "service_domain": "light",
+        "service": "turn_on",
+        "entityId": "light.front_porch,light.zl_1w3h_aw",
+        "data": "{\"brightness_pct\":30}",
+        "dataType": "json",
+        "mergecontext": "",
+        "output_location": "",
+        "output_location_type": "none",
+        "mustacheAltTags": false,
+        "x": 190,
+        "y": 80,
+        "wires": [[], []]
+    },
+    {
+        "id": "turn_off_lights",
+        "type": "api-call-service",
+        "z": "frontpath_lights",
+        "name": "Turn Off Lights",
+        "server": "",
+        "version": 3,
+        "debugenabled": false,
+        "service_domain": "light",
+        "service": "turn_off",
+        "entityId": "light.front_porch,light.zl_1w3h_aw",
+        "data": "",
+        "dataType": "json",
+        "mergecontext": "",
+        "output_location": "",
+        "output_location_type": "none",
+        "mustacheAltTags": false,
+        "x": 180,
+        "y": 140,
+        "wires": [[], []]
+    },
+    {
+        "id": "store_position",
+        "type": "function",
+        "z": "frontpath_lights",
+        "name": "Store Position",
+        "func": "// Store position for use in brightness calculation\nconst position = parseFloat(msg.payload) || null;\nflow.set('current_position', position);\n\n// Trigger brightness calculation\nreturn { payload: position };",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 320,
+        "y": 240,
+        "wires": [["calc_brightness"]]
+    },
+    {
+        "id": "calc_brightness",
+        "type": "function",
+        "z": "frontpath_lights",
+        "name": "Calculate Brightness",
+        "func": "// Get stored position\nconst position = flow.get('current_position');\n\n// Get sun state from sun listener (if available)\nconst sunState = msg.payload || flow.get('sun_state') || 'below_horizon';\nflow.set('sun_state', sunState);\n\n// Get current time\nconst now = new Date();\nconst hours = now.getHours();\nconst isBeforeMidnight = hours >= 0 && hours < 24;\nconst isAfterSunset = sunState === 'below_horizon';\nconst isNightTime = isAfterSunset && isBeforeMidnight;\n\n// Use position from message or stored position\nconst pos = typeof msg.payload === 'number' ? msg.payload : position;\n\nlet targetBrightness;\n\nif (pos === null || pos === undefined || isNaN(pos)) {\n    // No person detected\n    if (isNightTime) {\n        targetBrightness = 30; // Stay at 30% after sunset until midnight\n    } else {\n        targetBrightness = 0; // Turn off before sunset\n    }\n} else {\n    // Person detected - calculate brightness based on position\n    // Position 0-8m = far end, 8-16m = near door\n    // Closer to door (higher position) = brighter\n    \n    if (pos <= 8) {\n        // Far side: 30% (at 0m) to 60% (at 8m)\n        targetBrightness = 30 + (pos / 8) * 30;\n    } else {\n        // Near side: 60% (at 8m) to 100% (at 16m)\n        targetBrightness = 60 + ((pos - 8) / 8) * 40;\n    }\n    \n    // Ensure minimum brightness after sunset\n    if (isNightTime && targetBrightness < 30) {\n        targetBrightness = 30;\n    }\n    \n    // Clamp to valid range\n    targetBrightness = Math.max(0, Math.min(100, Math.round(targetBrightness)));\n}\n\n// Only send update if brightness > 0 or we need to turn off during day\nif (targetBrightness > 0 || !isNightTime) {\n    msg.payload = {\n        brightness_pct: targetBrightness,\n        transition: 2\n    };\n    \n    return msg;\n}\n\n// Don't send anything if we should turn off and it's not night time\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 270,
+        "wires": [["set_brightness"]]
+    },
+    {
+        "id": "set_brightness",
+        "type": "api-call-service",
+        "z": "frontpath_lights",
+        "name": "Set Brightness",
+        "server": "",
+        "version": 3,
+        "debugenabled": false,
+        "service_domain": "light",
+        "service": "turn_on",
+        "entityId": "light.front_porch,light.zl_1w3h_aw",
+        "data": "{{payload}}",
+        "dataType": "json",
+        "mergecontext": "",
+        "output_location": "",
+        "output_location_type": "none",
+        "mustacheAltTags": false,
+        "x": 200,
+        "y": 270,
+        "wires": [[], []]
+    },
+    {
+        "id": "person_detected",
+        "type": "server-state",
+        "z": "frontpath_lights",
+        "name": "Person Detected",
+        "server": "",
+        "version": 3,
+        "exposeToHomeAssistant": false,
+        "haConfig": [
+            {
+                "property": "name",
+                "value": ""
+            },
+            {
+                "property": "icon",
+                "value": ""
+            }
+        ],
+        "entityid": "binary_sensor.frontpath_path_person_detected",
+        "entityidfiltertype": "exact",
+        "outputinitially": false,
+        "state_type": "str",
+        "haltifstate": "",
+        "halt_if_type": "str",
+        "halt_if_compare": "is",
+        "outputs": 1,
+        "x": 140,
+        "y": 360,
+        "wires": [["person_off_handler"]]
+    },
+    {
+        "id": "person_off_handler",
+        "type": "switch",
+        "z": "frontpath_lights",
+        "name": "Person Off?",
+        "property": "payload",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "eq",
+                "v": "off",
+                "vt": "str"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 1,
+        "x": 170,
+        "y": 360,
+        "wires": [["fade_out_after_delay"]]
+    },
+    {
+        "id": "fade_out_after_delay",
+        "type": "delay",
+        "z": "frontpath_lights",
+        "name": "Delay 5s",
+        "pauseType": "delay",
+        "timeout": "5",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": false,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 180,
+        "y": 400,
+        "wires": [["calc_brightness"]]
+    }
+]

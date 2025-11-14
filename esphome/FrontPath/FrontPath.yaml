@@ -10,11 +10,16 @@ esp32:
 # Enable logging
 logger:
   baud_rate: 0  # Disable UART logging to free up UART0
+  level: INFO   # Reduce log verbosity to save memory
+  logs:
+    person_detect: INFO  # Keep our custom detection logs
+    ld2410: ERROR        # Suppress occasional invalid header warnings (only show critical errors)
 
 # Enable Home Assistant API
 api:
   encryption:
     key: "2RwJ1P/hXAYM+mPPS68KUxQLqYy4ONzj/YgyVhjEdQk="
+  reboot_timeout: 15min  # Reboot if no HA connection for 15 mins
 
 ota:
   - platform: esphome
@@ -25,16 +30,103 @@ wifi:
   password: !secret wifi_password
   power_save_mode: NONE
   fast_connect: false
-  reboot_timeout: 0s
-  manual_ip:
-    static_ip: 192.168.1.35
-    gateway: 192.168.1.1
-    subnet: 255.255.255.0
-  output_power: 8.5dB
+  reboot_timeout: 15min  # Reboot if WiFi connection lost for 15 mins
+  output_power: 13.5dB
+
 
 # Bluetooth Proxy (extends HA BLE range)
 bluetooth_proxy:
   active: true
+
+# Globals for adaptive baseline tracking
+globals:
+  # Long-term baseline (very slow moving average - adapts to weather over minutes)
+  - id: sensor_1_baseline
+    type: float
+    restore_value: no
+    initial_value: '5.0'  # Start with reasonable default (lower than before)
+  
+  - id: sensor_2_baseline
+    type: float
+    restore_value: no
+    initial_value: '5.0'
+  
+  # Short-term smoothed values (fast moving average - filters momentary spikes)
+  - id: sensor_1_smoothed
+    type: float
+    restore_value: no
+    initial_value: '5.0'
+  
+  - id: sensor_2_smoothed
+    type: float
+    restore_value: no
+    initial_value: '5.0'
+  
+  - id: person_detected_prev
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  
+  # Raw readings direct from sensors (no processing)
+  - id: sensor_1_moving_energy_raw
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  
+  - id: sensor_2_moving_energy_raw
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+
+# Watchdog timer and memory monitoring
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          // Log free memory every minute to track potential leaks
+          // ESP32-C3 uses ESP-IDF framework
+          ESP_LOGI("memory", "Free heap: %u bytes", esp_get_free_heap_size());
+  
+  # Fast smoothing - updates every second to filter momentary spikes
+  # This creates a short-term average that still responds quickly
+  - interval: 1s
+    then:
+      - lambda: |-
+          float s1_raw = id(sensor_1_moving_energy_raw);
+          float s2_raw = id(sensor_2_moving_energy_raw);
+          
+          if (!isnan(s1_raw) && s1_raw >= 0) {
+            // Fast exponential moving average: 0.7 old + 0.3 new
+            // Smooths out single-reading spikes while staying responsive
+            id(sensor_1_smoothed) = 0.7 * id(sensor_1_smoothed) + 0.3 * s1_raw;
+          }
+          
+          if (!isnan(s2_raw) && s2_raw >= 0) {
+            id(sensor_2_smoothed) = 0.7 * id(sensor_2_smoothed) + 0.3 * s2_raw;
+          }
+  
+  # Baseline tracking - updates every 15 seconds (only when no person detected)
+  # Very slow adaptation to weather changes (rain, wind picking up, etc.)
+  - interval: 15s
+    then:
+      - lambda: |-
+          // Only update baseline when no person is detected
+          // This prevents person energy from polluting the baseline
+          if (!id(person_detected_prev)) {
+            float s1_smooth = id(sensor_1_smoothed);
+            float s2_smooth = id(sensor_2_smoothed);
+            
+            if (!isnan(s1_smooth) && s1_smooth >= 0) {
+              // Very slow exponential moving average: 0.95 old + 0.05 new
+              // Takes ~5 minutes to fully adapt to gradual changes
+              // Ignores brief spikes (already filtered by smoothed values)
+              id(sensor_1_baseline) = 0.95 * id(sensor_1_baseline) + 0.05 * s1_smooth;
+            }
+            
+            if (!isnan(s2_smooth) && s2_smooth >= 0) {
+              id(sensor_2_baseline) = 0.95 * id(sensor_2_baseline) + 0.05 * s2_smooth;
+            }
+          }
 
 # UART Configuration for LD2410C sensors
 uart:
@@ -53,14 +145,14 @@ uart:
     stop_bits: 1
 
 # LD2410C Sensors
+# Sensor 1: Points towards house (one end of 12m path)
+# Sensor 2: Points away from house (other end of 12m path)
 ld2410:
   - uart_id: uart_sensor1
     id: radar_sensor1
-    throttle: 1000ms
   
   - uart_id: uart_sensor2
     id: radar_sensor2
-    throttle: 1000ms
 
 # Binary Sensors
 binary_sensor:
@@ -70,8 +162,13 @@ binary_sensor:
       name: "Sensor 1 Presence"
     has_moving_target:
       name: "Sensor 1 Moving Target"
+      id: sensor_1_moving_target
+      filters:
+        - delayed_on: 500ms  # Ignore brief movements (rain spikes, branches, small animals)
+        - delayed_off: 2s    # Keep active to avoid flickering as person moves
     has_still_target:
       name: "Sensor 1 Still Target"
+      internal: true  # Hide from HA - not useful for outdoor path detection
   
   - platform: ld2410
     ld2410_id: radar_sensor2
@@ -79,33 +176,495 @@ binary_sensor:
       name: "Sensor 2 Presence"
     has_moving_target:
       name: "Sensor 2 Moving Target"
+      id: sensor_2_moving_target
+      filters:
+        - delayed_on: 500ms  # Ignore brief movements (rain spikes, branches, small animals)
+        - delayed_off: 2s    # Keep active to avoid flickering as person moves
     has_still_target:
       name: "Sensor 2 Still Target"
+      internal: true  # Hide from HA - not useful for outdoor path detection
+  
 
-# Sensors
+  # Template "Person-sized target" detection - adaptive thresholds based on baseline
+  # Automatically adjusts to weather conditions (rain, wind, etc.)
+  - platform: template
+    name: "Path Person Detected"
+    id: path_person_detected
+    device_class: occupancy
+    lambda: |-
+      // Use fast sensors for quick detection
+      float s1_energy = id(sensor_1_moving_energy_fast).state;
+      float s2_energy = id(sensor_2_moving_energy_fast).state;
+      float s1_baseline = id(sensor_1_baseline);
+      float s2_baseline = id(sensor_2_baseline);
+      
+      // Also check moving target sensors for confirmation
+      bool s1_moving = id(sensor_1_moving_target).state;
+      bool s2_moving = id(sensor_2_moving_target).state;
+      
+      // Adaptive thresholds: detect when energy exceeds baseline + delta
+      // Delta values chosen to distinguish person from environmental noise
+      // Tuned after gate calibration for reliable detection without false triggers
+      float moderate_delta = 20.0;  // Baseline + 20% with movement = person
+      float strong_delta = 30.0;    // Baseline + 30% without movement = definitely person
+      float weak_delta = 12.0;      // Baseline + 12% with movement = catches edge cases
+      
+      bool s1_detected = false;
+      bool s2_detected = false;
+      
+      if (!isnan(s1_energy) && !isnan(s1_baseline)) {
+        float s1_above = s1_energy - s1_baseline;
+        s1_detected = (s1_above > moderate_delta && s1_moving) || 
+                      (s1_above > strong_delta) || 
+                      (s1_moving && s1_above > weak_delta);
+      }
+      
+      if (!isnan(s2_energy) && !isnan(s2_baseline)) {
+        float s2_above = s2_energy - s2_baseline;
+        s2_detected = (s2_above > moderate_delta && s2_moving) || 
+                      (s2_above > strong_delta) || 
+                      (s2_moving && s2_above > weak_delta);
+      }
+      
+      bool result = s1_detected || s2_detected;
+      id(person_detected_prev) = result;  // Store for baseline update logic
+      return result;
+    filters:
+      - delayed_on: 1.5s   # Require sustained signal to filter brief false triggers
+      - delayed_off: 5s    # Keep on for 5s after detection clears
+    on_press:
+      then:
+        - lambda: |-
+            // Log detection events with energy and baseline values for diagnostics
+            // Only logs on transition to ON (not every state update)
+            ESP_LOGI("person_detect", "PERSON DETECTED - S1: %.1f%% (baseline %.1f%%, delta %.1f%%), S2: %.1f%% (baseline %.1f%%, delta %.1f%%)",
+              id(sensor_1_moving_energy_fast).state,
+              id(sensor_1_baseline),
+              id(sensor_1_moving_energy_fast).state - id(sensor_1_baseline),
+              id(sensor_2_moving_energy_fast).state,
+              id(sensor_2_baseline),
+              id(sensor_2_moving_energy_fast).state - id(sensor_2_baseline)
+            );
+
+# Calibration Controls
+number:
+  # Sensor 1 Controls - Basic Settings
+  - platform: ld2410
+    ld2410_id: radar_sensor1
+    max_move_distance_gate:
+      name: "Sensor 1 Max Move Distance Gate"
+    max_still_distance_gate:
+      name: "Sensor 1 Max Still Distance Gate"
+    timeout:
+      name: "Sensor 1 Timeout"
+    # Per-gate motion sensitivity (0-100, higher = less sensitive)
+    g0:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 0"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 0"
+    g1:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 1"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 1"
+    g2:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 2"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 2"
+    g3:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 3"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 3"
+    g4:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 4"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 4"
+    g5:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 5"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 5"
+    g6:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 6"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 6"
+    g7:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 7"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 7"
+    g8:
+      move_threshold:
+        name: "Sensor 1 Motion Energy Gate 8"
+      still_threshold:
+        name: "Sensor 1 Static Energy Gate 8"
+    
+  # Sensor 2 Controls - Basic Settings
+  - platform: ld2410
+    ld2410_id: radar_sensor2
+    max_move_distance_gate:
+      name: "Sensor 2 Max Move Distance Gate"
+    max_still_distance_gate:
+      name: "Sensor 2 Max Still Distance Gate"
+    timeout:
+      name: "Sensor 2 Timeout"
+    # Per-gate motion sensitivity (0-100, higher = less sensitive)
+    g0:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 0"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 0"
+    g1:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 1"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 1"
+    g2:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 2"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 2"
+    g3:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 3"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 3"
+    g4:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 4"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 4"
+    g5:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 5"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 5"
+    g6:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 6"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 6"
+    g7:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 7"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 7"
+    g8:
+      move_threshold:
+        name: "Sensor 2 Motion Energy Gate 8"
+      still_threshold:
+        name: "Sensor 2 Static Energy Gate 8"
+
+button:
+  # Sensor 1 Restart/Reset
+  - platform: ld2410
+    ld2410_id: radar_sensor1
+    restart:
+      name: "Sensor 1 Restart"
+    factory_reset:
+      name: "Sensor 1 Factory Reset"
+  
+  # Sensor 2 Restart/Reset
+  - platform: ld2410
+    ld2410_id: radar_sensor2
+    restart:
+      name: "Sensor 2 Restart"
+    factory_reset:
+      name: "Sensor 2 Factory Reset"
+
+# Template sensor for position tracking
 sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal dB"
+    update_interval: 10s
+
+  # # Memory monitoring sensor
+  # - platform: template
+  #   name: "Free Memory"
+  #   unit_of_measurement: "bytes"
+  #   accuracy_decimals: 0
+  #   icon: "mdi:memory"
+  #   update_interval: 60s
+  #   lambda: |-
+  #     return esp_get_free_heap_size();
+  
+  # Diagnostic sensors for baseline monitoring
+  - platform: template
+    name: "Sensor 1 Baseline"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    icon: "mdi:chart-line"
+    update_interval: 5s
+    lambda: |-
+      return id(sensor_1_baseline);
+  
+  - platform: template
+    name: "Sensor 2 Baseline"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    icon: "mdi:chart-line"
+    update_interval: 5s
+    lambda: |-
+      return id(sensor_2_baseline);
+  
+  # Smoothed energy sensors (1-second moving average for diagnostics)
+  - platform: template
+    name: "Sensor 1 Moving Energy Smoothed"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    icon: "mdi:chart-bell-curve"
+    update_interval: 1s
+    lambda: |-
+      return id(sensor_1_smoothed);
+  
+  - platform: template
+    name: "Sensor 2 Moving Energy Smoothed"
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    icon: "mdi:chart-bell-curve"
+    update_interval: 1s
+    lambda: |-
+      return id(sensor_2_smoothed);
+  
+  # Raw energy sensors (NO filtering - shows actual sensor readings)
+  # Use these to diagnose if the plastic enclosure is blocking signals
+  - platform: template
+    name: "Sensor 1 Moving Energy RAW"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: "mdi:wave"
+    update_interval: 500ms
+    lambda: |-
+      return id(sensor_1_moving_energy_raw);
+  
+  - platform: template
+    name: "Sensor 2 Moving Energy RAW"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: "mdi:wave"
+    update_interval: 500ms
+    lambda: |-
+      return id(sensor_2_moving_energy_raw);
+  
+  # Fast energy sensors for detection (direct from RAW globals - instant response)
+  # These are internal helpers for person detection responsiveness
+  - platform: template
+    name: "Sensor 1 Energy Fast"
+    id: sensor_1_moving_energy_fast
+    internal: true
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 200ms  # Fast updates for responsive detection
+    lambda: |-
+      return id(sensor_1_moving_energy_raw);
+  
+  - platform: template
+    name: "Sensor 2 Energy Fast"
+    id: sensor_2_moving_energy_fast
+    internal: true
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 200ms  # Fast updates for responsive detection
+    lambda: |-
+      return id(sensor_2_moving_energy_raw);
+  
   - platform: ld2410
     ld2410_id: radar_sensor1
     moving_distance:
       name: "Sensor 1 Moving Distance"
+      id: sensor_1_moving_distance
+      filters:
+        - throttle_average: 1s
     still_distance:
       name: "Sensor 1 Still Distance"
+      filters:
+        - throttle_average: 1s
     moving_energy:
       name: "Sensor 1 Moving Energy"
+      id: sensor_1_moving_energy
+      # NO filters - show actual current readings
+      # Smoothing is done in baseline tracking instead
+      on_value:
+        then:
+          - lambda: |- 
+              id(sensor_1_moving_energy_raw) = x;
     still_energy:
       name: "Sensor 1 Still Energy"
+      filters:
+        - throttle_average: 1s
     detection_distance:
       name: "Sensor 1 Detection Distance"
+      filters:
+        - throttle_average: 1s
+    # Per-gate moving energy (0-100%) - COMMENTED OUT: Not supported in current ESPHome/firmware
+    # g0:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 0 Move Energy"
+    # g1:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 1 Move Energy"
+    # g2:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 2 Move Energy"
+    # g3:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 3 Move Energy"
+    # g4:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 4 Move Energy"
+    # g5:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 5 Move Energy"
+    # g6:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 6 Move Energy"
+    # g7:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 7 Move Energy"
+    # g8:
+    #   move_energy:
+    #     name: "Sensor 1 Gate 8 Move Energy"
   
   - platform: ld2410
     ld2410_id: radar_sensor2
     moving_distance:
       name: "Sensor 2 Moving Distance"
+      id: sensor_2_moving_distance
+      filters:
+        - throttle_average: 1s
     still_distance:
       name: "Sensor 2 Still Distance"
+      filters:
+        - throttle_average: 1s
     moving_energy:
       name: "Sensor 2 Moving Energy"
+      id: sensor_2_moving_energy
+      # NO filters - show actual current readings
+      # Smoothing is done in baseline tracking instead
+      on_value:
+        then:
+          - lambda: |- 
+              id(sensor_2_moving_energy_raw) = x;
     still_energy:
       name: "Sensor 2 Still Energy"
+      filters:
+        - throttle_average: 1s
     detection_distance:
       name: "Sensor 2 Detection Distance"
+      filters:
+        - throttle_average: 1s
+    # Per-gate moving energy (0-100%) - COMMENTED OUT: Not supported in current ESPHome/firmware
+    # g0:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 0 Move Energy"
+    # g1:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 1 Move Energy"
+    # g2:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 2 Move Energy"
+    # g3:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 3 Move Energy"
+    # g4:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 4 Move Energy"
+    # g5:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 5 Move Energy"
+    # g6:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 6 Move Energy"
+    # g7:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 7 Move Energy"
+    # g8:
+    #   move_energy:
+    #     name: "Sensor 2 Gate 8 Move Energy"
+
+  # Path position sensor (metres from start of path)
+  # Both sensors are in same box at 8m mark (middle of path), pointing opposite directions
+  # Sensor box is at 8m mark
+  # Sensor 1: position = 8 - distance (points towards 0m end)
+  # Sensor 2: position = 8 + distance (points towards 16m end / door)
+  # Position based on sensor with highest energy
+  - platform: template
+    name: "Path Person Position"
+    id: path_position
+    unit_of_measurement: "m"
+    accuracy_decimals: 1
+    icon: "mdi:map-marker-distance"
+    update_interval: 400ms
+    lambda: |-
+      // Sensors are co-located at 8m midpoint, pointing opposite directions
+      // Use the sensor with stronger/clearer signal, with preference for moving target flag
+      bool s1_moving = id(sensor_1_moving_target).state;
+      bool s2_moving = id(sensor_2_moving_target).state;
+      float s1_energy = id(sensor_1_moving_energy_fast).state;
+      float s2_energy = id(sensor_2_moving_energy_fast).state;
+      float s1_dist_cm = id(sensor_1_moving_distance).state;
+      float s2_dist_cm = id(sensor_2_moving_distance).state;
+
+      // Helper to clamp a value
+      auto clamp = [](float v, float lo, float hi) -> float {
+        if (isnan(v)) return NAN;
+        if (v < lo) return lo;
+        if (v > hi) return hi;
+        return v;
+      };
+
+      // Check if we have valid readings
+      bool s1_valid = !isnan(s1_dist_cm) && s1_dist_cm > 0 && !isnan(s1_energy);
+      bool s2_valid = !isnan(s2_dist_cm) && s2_dist_cm > 0 && !isnan(s2_energy);
+
+      // Strategy: Use the sensor with MUCH higher energy, or the one flagged as moving
+      // This prevents rapid flipping when energies are similar
+      int chosen = 0;
+      
+      // Clear winner: one sensor has moving flag, other doesn't
+      if (s1_moving && !s2_moving && s1_valid) {
+        chosen = 1;
+      } else if (s2_moving && !s1_moving && s2_valid) {
+        chosen = 2;
+      }
+      // Both or neither moving: need significant energy difference to switch
+      else if (s1_valid && s2_valid) {
+        float energy_diff = s1_energy - s2_energy;
+        // Require 20% energy difference to choose a sensor (prevents flipping on noise)
+        if (energy_diff > 20.0) {
+          chosen = 1;
+        } else if (energy_diff < -20.0) {
+          chosen = 2;
+        } else {
+          // Energies too similar - use average position from both sensors
+          float pos1 = 8.0 - clamp(s1_dist_cm / 100.0, 0.0, 8.0);
+          float pos2 = 8.0 + clamp(s2_dist_cm / 100.0, 0.0, 8.0);
+          // Weight by energy (stronger signal = more trustworthy)
+          float total_energy = s1_energy + s2_energy;
+          if (total_energy > 0) {
+            return (pos1 * s1_energy + pos2 * s2_energy) / total_energy;
+          }
+        }
+      }
+      // Only one sensor valid
+      else if (s1_valid && s1_energy > 15.0) {
+        chosen = 1;
+      } else if (s2_valid && s2_energy > 15.0) {
+        chosen = 2;
+      }
+
+      if (chosen == 1) {
+        float d_m = clamp(s1_dist_cm / 100.0, 0.0, 8.0);
+        return 8.0 - d_m;  // sensor 1 looks towards 0m end
+      }
+      if (chosen == 2) {
+        float d_m = clamp(s2_dist_cm / 100.0, 0.0, 8.0);
+        return 8.0 + d_m;  // sensor 2 looks towards 16m/door end
+      }
+
+      return NAN;  // not enough signal yet

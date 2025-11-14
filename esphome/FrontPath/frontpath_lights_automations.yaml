@@ -1,0 +1,124 @@
+# Front Path Lights Automations
+# Controls light.front_porch_local and light.fairy_lights based on:
+# - Sunset schedule (turn on at 10% brightness)
+# - Midnight schedule (turn off)
+# - Person position detection (brighten as approaching door, dim as leaving)
+# - Time-based minimums (10% after sunset, 0% before sunset)
+
+# Required Helper:
+# Create an input_boolean helper called input_boolean.frontpath_evening_mode
+# This tracks the "between sunset and midnight" period
+# Settings → Devices & Services → Helpers → Create Helper → Toggle
+
+automation:
+  # Turn lights on at sunset at 10% brightness
+alias: "Front Path Lights Sunset On"
+description: "Turn on front path lights at 10% brightness at sunset"
+trigger:
+  - platform: sun
+    event: sunset
+    offset: 0
+action:
+  - service: input_boolean.turn_on
+    target:
+      entity_id: input_boolean.frontpath_evening_mode
+  - service: light.turn_on
+    target:
+      entity_id:
+        - light.front_porch_local
+        - light.fairy_lights
+    data:
+      brightness_pct: 10
+      transition: 2
+mode: single
+
+  # Turn lights off at midnight
+alias: "Front Path Lights Midnight Off"
+description: "Turn off front path lights at midnight"
+trigger:
+  - platform: time
+    at: "00:00:00"
+action:
+  - service: input_boolean.turn_off
+    target:
+      entity_id: input_boolean.frontpath_evening_mode
+  - service: light.turn_off
+    target:
+      entity_id:
+        - light.front_porch_local
+        - light.fairy_lights
+mode: single
+
+  # Dynamic brightness based on person position
+alias: "Front Path Lights Dynamic Brightness"
+description: "Adjust brightness based on person position - brighter as approaching door"
+trigger:
+  - platform: state
+    entity_id: sensor.frontpath_path_person_position
+  - platform: state
+    entity_id: binary_sensor.frontpath_path_person_detected
+  - platform: state
+    entity_id: input_boolean.frontpath_evening_mode
+mode: restart
+action:
+  - variables:
+      person_on: "{{ is_state('binary_sensor.frontpath_path_person_detected','on') }}"
+      evening: "{{ is_state('input_boolean.frontpath_evening_mode','on') }}"
+      min_brightness: "{{ 10 if is_state('input_boolean.frontpath_evening_mode','on') else 0 }}"
+  - choose:
+      # Person detected - calculate brightness based on position
+      - conditions:
+          - condition: template
+            value_template: "{{ person_on }}"
+        sequence:
+          - variables:
+              pos_state: "{{ states('sensor.frontpath_path_person_position') }}"
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ pos_state not in ['unknown','unavailable','none','', 'nan'] }}
+                sequence:
+                  - variables:
+                      brightness: >-
+                        {# Linear map of 0..16m → min_b .. 100% #}
+                        {% set min_b = min_brightness | int %}
+                        {% set p = pos_state | float(0) %}
+                        {% set p = [16, [0, p] | max] | min %}
+                        {% set result = min_b + (p / 16) * (100 - min_b) %}
+                        {{ [result | round(0), min_b] | max }}
+                  - service: light.turn_on
+                    target:
+                      entity_id:
+                        - light.front_porch_local
+                        - light.fairy_lights
+                    data:
+                      brightness_pct: "{{ brightness }}"
+                      transition: 2
+            # Default: position unknown → do nothing (hold last brightness)
+            default: []
+    # No person detected
+    default:
+      - delay: "00:00:05"  # Wait before falling back; cancelled if person returns (mode: restart)
+      - choose:
+          # Evening mode - keep at 10%
+          - conditions:
+              - condition: template
+                value_template: "{{ evening }}"
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id:
+                    - light.front_porch_local
+                    - light.fairy_lights
+                data:
+                  brightness_pct: 10
+                  transition: 2
+        # Daytime - turn off
+        default:
+          - service: light.turn_off
+            target:
+              entity_id:
+                - light.front_porch_local
+                - light.fairy_lights
+

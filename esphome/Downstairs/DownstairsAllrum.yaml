@@ -1,0 +1,90 @@
+esphome:
+  name: downstairs-allrum
+  friendly_name: Downstairs Allrum
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "DKmWAYeabDY4DD3EET/dwecpowk8FwbM+UswIpr0t1M="
+
+ota:
+  - platform: esphome
+    password: "aaa56df03d357f54d04150f3711c9c7c"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  reboot_timeout: 5min  # Reboot if WiFi connection lost for 5 mins
+  output_power: 10.5dB
+
+# Bluetooth Proxy (extends HA BLE range)
+bluetooth_proxy:
+  active: true
+
+sensor:
+  # MQ2 Gas Sensor - Raw Analog Voltage
+  - platform: adc
+    name: "MQ2 Gas/Smoke Level - Raw Analog Voltage"
+    pin: GPIO3 #analog input pin on esp32-c3 supermini
+    id: mq2_analog_raw
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: 2s
+    attenuation: 11db  # Allows reading 0-3.3V range
+    internal: true  # Hide raw voltage from HA
+    filters:
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 5
+  
+  # MQ2 Gas Sensor - Percentage (template sensor to avoid device_class conflict)
+  - platform: template
+    name: "MQ2 Gas/Smoke Level"
+    id: mq2_analog
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 2s
+    lambda: |-
+      if (id(mq2_analog_raw).state != NAN) {
+        // Convert voltage (0-3.3V) to percentage (0-100%)
+        float percentage = (id(mq2_analog_raw).state / 3.3) * 100.0;
+        // Clamp between 0-100%
+        if (percentage < 0.0) return 0.0;
+        if (percentage > 100.0) return 100.0;
+        percentage = roundf(percentage * 10.0) / 10.0;
+        return percentage;
+      }
+      return NAN;
+
+binary_sensor:
+  # MQ2 Gas Sensor - Software Alarm (based on analog percentage)
+  # Uses hysteresis to prevent oscillation: triggers at 25%, clears at 20%
+  - platform: template
+    id: mq2_digital
+    name: "MQ2 Smoke/Gas Alarm"
+    device_class: smoke
+    lambda: |-
+      static bool alarm_state = false;
+      if (id(mq2_analog).state != NAN) {
+        if (id(mq2_analog).state >= 25.0) {
+          alarm_state = true;   // Trigger at 25%
+        } else if (id(mq2_analog).state <= 20.0) {
+          alarm_state = false;  // Clear at 20%
+        }
+        // Between 20-25% it maintains previous state (hysteresis)
+      }
+      return alarm_state;
+    filters:
+      - delayed_on: 2s  # Must be high for 2s to trigger (prevents spikes)
+      - delayed_off: 10s  # Stays on for 10s after clearing (latching)
+ 

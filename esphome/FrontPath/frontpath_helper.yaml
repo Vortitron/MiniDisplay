@@ -1,0 +1,16 @@
+# Front Path Lights Helper Configuration
+# Add this to your Home Assistant configuration.yaml or create via UI
+
+# Option 1: Add to configuration.yaml
+input_boolean:
+  frontpath_evening_mode:
+    name: "Front Path Evening Mode"
+    icon: mdi:weather-sunset
+    initial: false
+
+# Option 2: Create via UI (Recommended)
+# Settings → Devices & Services → Helpers → Create Helper → Toggle
+# Name: Front Path Evening Mode
+# Entity ID: frontpath_evening_mode
+# Icon: mdi:weather-sunset
+

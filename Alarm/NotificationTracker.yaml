@@ -1,0 +1,50 @@
+# Template sensor to track persistent notifications
+# This works around HA 2023.6+ removing notifications from states
+
+- trigger:
+  - trigger: persistent_notification
+    update_type:
+      - added
+      - removed
+      - current
+  - trigger: homeassistant
+    event: start
+  sensor:
+  - name: "Persistent Notifications Tracker"
+    unique_id: persistent_notifications_tracker
+    state: >-
+      {{ this.attributes.notifications | default([]) | length }}
+    attributes:
+      notifications: >-
+        {% set current = this.attributes.notifications | default([]) %}
+        {% if trigger.platform == 'persistent_notification' and trigger.notification is defined %}
+          {% set notif = trigger.notification %}
+          {% set notif_id = notif.get('notification_id', '') | string %}
+          
+          {% if notif_id != '' %}
+            {% if trigger.update_type in ['added', 'current'] %}
+              {# Add or update notification - remove any existing with same ID first #}
+              {% set new_notif = {
+                'notification_id': notif_id,
+                'title': notif.get('title', 'Notification') | string,
+                'message': notif.get('message', '') | string,
+                'data': notif.get('data', {})
+              } %}
+              {% set filtered = current | rejectattr('notification_id', 'eq', notif_id) | list %}
+              {{ filtered + [new_notif] }}
+            {% elif trigger.update_type == 'removed' %}
+              {# Remove notification #}
+              {{ current | rejectattr('notification_id', 'eq', notif_id) | list }}
+            {% else %}
+              {{ current }}
+            {% endif %}
+          {% else %}
+            {{ current }}
+          {% endif %}
+        {% elif trigger.platform == 'homeassistant' %}
+          {# Home Assistant start - clear all to resync #}
+          []
+        {% else %}
+          {{ current }}
+        {% endif %}
+

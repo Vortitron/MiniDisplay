@@ -1,0 +1,12 @@
+alias: Notify Alarm - Sync
+description: Sync notifications from tracker to MiniDisplay
+triggers:
+  - trigger: state
+    entity_id: sensor.persistent_notifications_tracker
+  - trigger: homeassistant
+    event: start
+conditions: []
+actions:
+  - action: python_script.update_minidisplay
+    data: {}
+mode: restart

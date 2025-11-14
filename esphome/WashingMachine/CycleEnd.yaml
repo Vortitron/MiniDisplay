@@ -1,0 +1,152 @@
+alias: Washing Machine Finished
+description: ""
+triggers:
+  - trigger: numeric_state
+    entity_id:
+      - sensor.smart_plug_3_power
+    for:
+      hours: 0
+      minutes: 10
+      seconds: 0
+    below: 5
+conditions:
+  - condition: state
+    entity_id: input_boolean.washing_machine_cycle_active
+    state: "on"
+actions:
+  - action: notify.persistent_notification
+    metadata: {}
+    data:
+      message: Washing Machine Finished
+      data:
+        Alarm: 1
+  - action: light.turn_on
+    metadata: {}
+    data:
+      rgb_color:
+        - 255
+        - 0
+        - 0
+    target:
+      device_id: a9cb1ef541feaf3be3fb75ff360c9744
+  - device_id: 911ce9be1f83a09b179821cb2c9c0de6
+    domain: mobile_app
+    type: notify
+    message: Washing Machine Finished
+  - action: input_boolean.turn_off
+    metadata: {}
+    data: {}
+    target:
+      entity_id: input_boolean.washing_machine_cycle_active
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ (now().timestamp() -
+              as_timestamp(states('input_datetime.washing_machine_start_time')))
+              > (25 * 60) }}
+        sequence:
+          - action: calendar.create_event
+            metadata: {}
+            data:
+              summary: >-
+                {% set start_ts =
+                as_timestamp(states('input_datetime.washing_machine_start_time'))
+                %}
+                {% set end_ts = now().timestamp() %}
+                {% set cycle_minutes = ((end_ts - start_ts) / 60) | round(0) %}
+                {% set energy_used = (states('sensor.smart_plug_3_energy') |
+                float - states('input_number.washing_machine_start_power') |
+                float) %}
+                {% set cached_str = states('input_text.nordpool_price_raw_yesterday')
+                %}
+                {% set base_midnight = now().replace(hour=0, minute=0,
+                second=0, microsecond=0) - timedelta(days=1) %}
+                {% set yesterday_ns = namespace(slots=[]) %}
+                {% if cached_str not in ['', 'unknown', 'unavailable', none] %}
+                  {% for pair in cached_str.split(',') %}
+                    {% if ':' in pair %}
+                      {% set pieces = pair.split(':') %}
+                      {% set idx = pieces[0] | int %}
+                      {% set price = (pieces[1] | int) / 100 %}
+                      {% set start_dt = base_midnight + timedelta(minutes=idx * 15)
+                      %}
+                      {% set end_dt = base_midnight + timedelta(minutes=(idx + 1)
+                      * 15) %}
+                      {% set yesterday_ns.slots = yesterday_ns.slots + [{'start':
+                      start_dt.isoformat(), 'end': end_dt.isoformat(), 'value':
+                      price}] %}
+                    {% endif %}
+                  {% endfor %}
+                {% endif %}
+                {% set slots = yesterday_ns.slots +
+                (state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today')
+                or []) + (state_attr('sensor.nordpool_kwh_se4_sek_3_10_025',
+                'raw_tomorrow') or []) %}
+                {% set ns = namespace(total_minutes=0, weighted_price=0) %}
+                {% for slot in slots %}
+                  {% set slot_start = as_timestamp(slot['start']) %}
+                  {% set slot_end = as_timestamp(slot['end']) %}
+                  {% if slot_end > start_ts and slot_start < end_ts %}
+                    {% set overlap_start = [slot_start, start_ts] | max %}
+                    {% set overlap_end = [slot_end, end_ts] | min %}
+                    {% set minutes = (overlap_end - overlap_start) / 60 %}
+                    {% if minutes > 0 %}
+                      {% set ns.total_minutes = ns.total_minutes + minutes %}
+                      {% set ns.weighted_price = ns.weighted_price + minutes *
+                      slot['value'] %}
+                    {% endif %}
+                  {% endif %}
+                {% endfor %}
+                {% set avg_price = ns.weighted_price / ns.total_minutes if
+                ns.total_minutes > 0 else states('sensor.nordpool_kwh_se4_sek_3_10_025') |
+                float %}
+                {% set cost = (energy_used * avg_price) %}
+                {% set cycle_hours = cycle_minutes / 60 %}
+                {% if cycle_hours <= 1.5 %}
+                  {% set sensor_id = 'sensor.nordpool_average_price_1h' %}
+                  {% set sensor_label = '1h' %}
+                {% elif cycle_hours <= 2.5 %}
+                  {% set sensor_id = 'sensor.nordpool_average_price_2h' %}
+                  {% set sensor_label = '2h' %}
+                {% elif cycle_hours <= 3.5 %}
+                  {% set sensor_id = 'sensor.nordpool_average_price_3h' %}
+                  {% set sensor_label = '3h' %}
+                {% elif cycle_hours <= 4.5 %}
+                  {% set sensor_id = 'sensor.nordpool_average_price_4h' %}
+                  {% set sensor_label = '4h' %}
+                {% else %}
+                  {% set sensor_id = 'sensor.nordpool_average_price_5h' %}
+                  {% set sensor_label = '5h' %}
+                {% endif %}
+                {% set sensor_state = states(sensor_id) %}
+                {% if sensor_state in ['unknown', 'unavailable', none] %}
+                  {% set sensor_price = avg_price %}
+                {% else %}
+                  {% set sensor_price = sensor_state | float %}
+                {% endif %}
+                {% set cost_sensor = energy_used * sensor_price %}
+                Empty Washing Machine - Cycle: {{ cycle_minutes }}min, Power:
+                {{ energy_used | round(2) }}kWh, Avg price: {{ avg_price | round(3)
+                }} SEK/kWh, Cost: {{ cost | round(2) }} SEK, {{ sensor_label }}
+                avg: {{ sensor_price | round(3) }} SEK/kWh → {{ cost_sensor |
+                round(2) }} SEK
+              start_date_time: >-
+                {% if now().hour >= 22  %}
+                  {{ (now() + timedelta(days=1)).replace(hour=8, minute=0, second=0) }}
+                {% elif now().hour < 8 %}
+                  {{ (now()).replace(hour=8, minute=0, second=0) }}
+                {% else %}
+                  {{ now() }}
+                {% endif %}
+              end_date_time: >-
+                {% if now().hour >= 22 %}
+                  {{ (now() + timedelta(days=1)).replace(hour=9, minute=0, second=0) }}
+                {% elif now().hour < 8 %}
+                  {{ (now()).replace(hour=9, minute=0, second=0) }}
+                {% else %}
+                  {{ now() + timedelta(minutes=60) }}
+                {% endif %}
+            target:
+              entity_id: calendar.handl_f
+mode: single

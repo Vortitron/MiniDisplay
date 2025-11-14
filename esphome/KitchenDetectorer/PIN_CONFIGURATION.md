@@ -39,36 +39,38 @@ The following pins are available for future expansion:
 **Note**: GPIO4 is now used to power the I2S microphone.
 
 ## Display Screens
-The device cycles through up to 10 screens every 3.5 seconds (some are conditionally skipped):
+The device cycles through up to 11 screens every 3.5 seconds (some are conditionally skipped):
 
 | Screen | Description | Left Display | Right Display | LED Indicator | Condition |
 |--------|-------------|--------------|---------------|---------------|-----------|
-| 0 | Air Fryer Power | "AirW" | Power (whole watts) | LED1 (on when >0W) | Only shown when power > 0 |
-| 1 | Bio Heaters & Temp | on/off | Temperature °C | LED2 (always on) | Always shown |
-| 2 | Hot Water | "hot" | on/off status | - | Always shown |
+| 0 | Air Fryer Power | "AirW" | Power (whole watts) | - | Only shown when power > 0 |
+| 1 | Bio Office Climate | on/off | Current Temp °C | LED2 (always on) | Always shown |
+| 2 | Hot Water | "hot" | Boiler Temp °C | - | Always shown |
 | 3 | Outside Temp | "out" | Temperature °C | - | Always shown |
 | 4 | Inside Temp | "in" | Temperature °C | - | Always shown |
 | 5 | Inside Humidity | "in h" | Humidity (with decimal) | - | Always shown |
-| 6 | Power Price | Price (SEK) | Lo/High indicator | LED3 (always on) | Always shown |
-| 7 | Coffee Beans | beanLo/beanok | Distance (cm) | LED4 (warning when low) | Always shown |
+| 6 | Power Price | Price (SEK) | Lo/High indicator | LED5 (always on) | Always shown |
+| 7 | Coffee Beans | beanLo/beanok | Distance (cm) | - | Always shown |
 | 8 | Date & Time | dd.mm | hh.mm | - | Always shown |
-| 9 | Calendar Alerts | Event name | Time (if applicable) | LED5 | Felix 8am events (from 6pm prior day) or Ridlekis Isolde (Saturdays) |
+| 9 | Calendar Alerts | Event name | Time (if applicable) | - | Felix 8am events or Ridlekis Isolde (Saturdays) |
+| 10 | Manifold Temps | Loop temp | Air temp °C | LED1 (always on) | Only shown when sensor data available |
 
 ## Button Functions
-Buttons 1-4 are configured as toggles. When pressed, they toggle Home Assistant entities and briefly display status. Button 8 is used for calibration.
+Buttons 1-4 turn off all lights in their respective areas and Button 2 also controls climate. Button 8 is used for calibration.
 
-**Button 2 (Bio Office)** has special logic:
-- If **heaters are OFF** → turns **both heaters AND lights ON**
-- If **heaters are ON** → turns **both heaters AND lights OFF**
-- Heater state is the control (light state is ignored)
-- This matches LED2 which indicates Bio Office data on screen 1
+**Button 2 (Bio/Bio Office)** has special logic:
+- **Always** turns off all lights in the **bio** area
+- If **bio_office climate is heating** → turns climate **OFF**
+- If **bio_office climate is OFF** → turns climate to **HEAT** mode
+- Climate state controls heating in bio_office (separate from bio lights)
+- Matches LED2 which indicates Bio Office climate data on screen 1
 
-| Button | TM1638 Key | Function | Home Assistant Entity |
-|--------|------------|----------|----------------------|
-| 1 | Key 0 | Toggle Living Room Lights | light.living_room |
-| 2 | Key 1 | Toggle Bio Office (heaters + lights together) | switch.bio_office_heaters_socket_1, light.bio_office |
-| 3 | Key 2 | Toggle Bedroom Lights | light.bedroom |
-| 4 | Key 3 | Toggle Hot Water | switch.smart_plug_2_socket_1 |
+| Button | TM1638 Key | Function | Area / Entity |
+|--------|------------|----------|---------------|
+| 1 | Key 0 | Turn off Living Room lights | area: living_room |
+| 2 | Key 1 | Turn off Bio lights + toggle Bio Office climate | area: bio + climate.bio_office_heat |
+| 3 | Key 2 | Turn off Bedroom lights | area: bedroom |
+| 4 | Key 3 | Turn off Parent's Bedroom lights | area: parent_s_bedroom |
 | 5-7 | Keys 4-6 | Reserved for future use | - |
 | 8 | Key 7 | Calibration Mode | - |
 
@@ -76,13 +78,24 @@ Buttons 1-4 are configured as toggles. When pressed, they toggle Home Assistant 
 
 | LED | Purpose | Condition |
 |-----|---------|-----------|
-| LED1 | Air Fryer Active | Lights when air fryer power > 0W |
-| LED2 | Bio Office Screen | Lights during Bio Office screen display |
-| LED3 | Power Price Screen | Lights during power price screen display |
-| LED4 | Coffee Bean Warning | Lights when coffee beans are low (on screen 7 only) |
-| LED5 | Calendar Alerts | Lights during calendar event screen display |
-| LED6-7 | Reserved | Available for future features |
+| LED1 | Manifold Screen | Lights during manifold temperature screen display (screen 10) |
+| LED2 | Bio Office Screen | Lights during Bio Office climate screen display (screen 1) |
+| LED3 | Reserved | Available for future use |
+| LED4 | Reserved | Available for future use |
+| LED5 | Power Price Screen | Lights during power price screen display (screen 6) |
+| LED6 | Boiler/Heater Status | Lights when any boiler relay is active |
+| LED7 | Alarm Level | Flashes based on Home Assistant alarm level (see below) |
 | LED8 | Low Beans Alert | **Flashes continuously** when beans are low (any screen) |
+
+### Alarm Level LED Patterns (LED7)
+LED7 syncs with the Home Assistant `input_select.alarm_level` entity and uses the same flashing pattern as MiniDisplay:
+
+| Alarm Level | LED Pattern |
+|-------------|-------------|
+| OK | LED off |
+| Notify | Single 300ms flash every 60 seconds |
+| Take Action | Double flash every 20 seconds |
+| Emergency | Rapid constant flash (200ms on/off) |
 
 ## Home Assistant Integration
 The device subscribes to the following Home Assistant entities:
@@ -94,10 +107,15 @@ The device subscribes to the following Home Assistant entities:
 - `sensor.t_h_sensor_temperature` - Inside temperature
 - `sensor.t_h_sensor_humidity` - Inside humidity
 - `sensor.nordpool_kwh_se4_sek_3_10_025` - Electricity price
+- `sensor.manifoldtemperature_hot_water_boiler_temp` - Hot water boiler temperature
+- `sensor.manifoldtemperature_lowest_loop_return_temp` - Lowest heating loop return temperature
+- `sensor.manifoldtemperature_air_temp` - Manifold air temperature
 
-### Switches
-- `switch.bio_office_heaters_socket_1` - Bio office heaters status
+### Switches & Climate
+- `climate.bio_office_heat` - Bio office heating climate control
 - `switch.smart_plug_2_socket_1` - Hot water switch status
+- `switch.boilercontrol_boiler_relay_1` - Boiler relay 1 status (for LED6)
+- `switch.boilercontrol_boiler_relay_2` - Boiler relay 2 status (for LED6)
 
 ### Binary Sensors
 - `binary_sensor.felix_morning_alert` - Indicates when Felix has a morning activity (custom template helper)
@@ -105,6 +123,7 @@ The device subscribes to the following Home Assistant entities:
 
 ### Calendar & Text Sensors
 - `calendar.handl_f` - Family calendar entity (provides event names for display)
+- `input_select.alarm_level` - Home Assistant alarm level for LED7 flashing pattern
 
 ### Time
 - `homeassistant_time` - Date and time synchronisation
@@ -189,8 +208,17 @@ This provides a clear visual alert that the air fryer needs attention.
 - Humidity displays with one decimal place (e.g., "65.5")
 - Screen 0 (Air Fryer) is automatically skipped when power is 0 or unavailable - only displays when air fryer is active
 - Air fryer power displays as whole watts (e.g., "1500" not "1500.5")
+- Screen 1 (Bio Office) now displays climate.bio_office_heat state and current temperature
+- Screen 2 (Hot Water) displays boiler temperature on the right side
 - Screen 9 (Calendar) is automatically skipped unless there's a relevant Felix or Isolde event
+- Screen 10 (Manifold) combines both loop and air temperatures on one screen with LED1 indicator
+- Screen 10 is automatically skipped unless manifold temperature sensors are available
 - Calibration order has been reversed: start with empty container and fill up (easier than removing beans)
-- Bio temperature now displays with °C suffix on screen 1
-- LED8 flashes continuously (500ms interval) whenever beans are low - provides persistent alert across all screens
-- Button 1 (Key 0) controls Living Room, Button 2 (Key 1) controls Bio Office to match LED2 placement
+- Button 2 turns off all bio area lights and toggles bio_office climate between heat and off
+- All button presses use area-based light.turn_off for better control across multiple devices
+- LED1 indicates manifold temperature screen (screen 10)
+- LED2 indicates Bio Office screen (screen 1) to match Button 2
+- LED5 indicates power price screen (screen 6)
+- LED6 lights up when any boiler heating relay is active
+- LED7 flashes based on Home Assistant alarm level with the same pattern as MiniDisplay
+- LED8 flashes continuously (500ms interval) whenever beans are low

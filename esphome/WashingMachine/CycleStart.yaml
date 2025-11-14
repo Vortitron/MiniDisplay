@@ -1,0 +1,38 @@
+alias: "Washing machine cycle start "
+description: ""
+triggers:
+  - trigger: numeric_state
+    entity_id:
+      - sensor.smart_plug_3_power
+    for:
+      hours: 0
+      minutes: 1
+      seconds: 0
+    above: 55
+conditions:
+  - condition: state
+    entity_id: input_boolean.washing_machine_cycle_active
+    state: "off"
+actions:
+  - device_id: 69eee50106e1110f6540304c57082f6e
+    domain: mobile_app
+    type: notify
+    message: Washing Machine started
+  - action: input_boolean.turn_on
+    metadata: {}
+    data: {}
+    target:
+      entity_id: input_boolean.washing_machine_cycle_active
+  - action: input_datetime.set_datetime
+    metadata: {}
+    data:
+      datetime: "{{ now() }}"
+    target:
+      entity_id: input_datetime.washing_machine_start_time
+  - action: input_number.set_value
+    metadata: {}
+    data:
+      value: "{{ states('sensor.smart_plug_3_energy') | float }}"
+    target:
+      entity_id: input_number.washing_machine_start_power
+mode: single

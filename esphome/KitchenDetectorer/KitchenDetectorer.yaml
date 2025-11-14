@@ -94,11 +94,36 @@ sensor:
     id: power_price
     entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
     internal: true
+  - platform: homeassistant
+    id: hot_water_boiler_temp
+    entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
+    internal: true
+  - platform: homeassistant
+    id: lowest_loop_temp
+    entity_id: sensor.manifoldtemperature_lowest_loop_return_temp
+    internal: true
+  - platform: homeassistant
+    id: manifold_air_temp
+    entity_id: sensor.manifoldtemperature_air_temp
+    internal: true
+  - platform: homeassistant
+    id: bio_office_current_temp
+    entity_id: climate.bio_office_heat
+    attribute: current_temperature
+    internal: true
 
 text_sensor:
   - platform: homeassistant
     id: felix_calendar_event
     entity_id: calendar.handl_f
+    internal: true
+  - platform: homeassistant
+    id: alarm_level_state
+    entity_id: input_select.alarm_level
+    internal: true
+  - platform: homeassistant
+    id: bio_office_hvac_state
+    entity_id: climate.bio_office_heat
     internal: true
 
 # Globals for calibration, display, and button states
@@ -132,6 +157,14 @@ globals:
     restore_value: no
     initial_value: "0"
   - id: button_pressed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: alarm_led_mode
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: alarm_led_state
     type: bool
     restore_value: no
     initial_value: "false"
@@ -169,10 +202,6 @@ binary_sensor:
 
   # Home Assistant binary sensors/switches
   - platform: homeassistant
-    id: bio_heaters
-    entity_id: switch.bio_office_heaters_socket_1
-    internal: true
-  - platform: homeassistant
     id: hot_water
     entity_id: switch.smart_plug_2_socket_1
     internal: true
@@ -189,6 +218,14 @@ binary_sensor:
     id: isolde_morning_alert
     entity_id: binary_sensor.isolde_morning_alert
     internal: true
+  - platform: homeassistant
+    id: boiler_relay_1
+    entity_id: switch.boilercontrol_boiler_relay_1
+    internal: true
+  - platform: homeassistant
+    id: boiler_relay_2
+    entity_id: switch.boilercontrol_boiler_relay_2
+    internal: true
   
   # TM1638 Buttons (Button 1-4 for toggles, 5-8 available for future use)
   - platform: tm1638
@@ -197,68 +234,69 @@ binary_sensor:
     key: 0
     on_press:
       - homeassistant.service:
-          service: light.toggle
+          service: light.turn_off
           data:
-            entity_id: light.living_room
+            area_id: living_room
       - lambda: |-
           id(button_pressed) = true;
           id(button_press_time) = millis();
   
   - platform: tm1638
-    name: "Button 2 - Bio Office"
+    name: "Button 2 - Bio/Bio Office"
     id: button_2
     key: 1
     on_press:
-      # Check heater state and toggle both heaters and lights together
+      # Turn off all lights in bio area (separate from bio_office)
+      - homeassistant.service:
+          service: light.turn_off
+          data:
+            area_id: bio
+      # Toggle bio_office climate heat mode
       - if:
           condition:
-            lambda: 'return id(bio_heaters).state;'
+            lambda: |-
+              return id(bio_office_hvac_state).has_state() && 
+                     (id(bio_office_hvac_state).state == "heat" || id(bio_office_hvac_state).state == "auto");
           then:
-            # Heaters are ON, turn both OFF
+            # Climate is heating, turn OFF
             - homeassistant.service:
-                service: switch.turn_off
+                service: climate.set_hvac_mode
                 data:
-                  entity_id: "switch.bio_office_heaters_socket_1"
-            - homeassistant.service:
-                service: light.turn_off
-                data:
-                  entity_id: "light.bio_office"
+                  entity_id: "climate.bio_office_heat"
+                  hvac_mode: "off"
           else:
-            # Heaters are OFF, turn both ON
+            # Climate is OFF, turn to heat mode
             - homeassistant.service:
-                service: switch.turn_on
+                service: climate.set_hvac_mode
                 data:
-                  entity_id: "switch.bio_office_heaters_socket_1"
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: "light.bio_office"
+                  entity_id: "climate.bio_office_heat"
+                  hvac_mode: "heat"
       - lambda: |-
           id(button_pressed) = true;
           id(button_press_time) = millis();
   
   - platform: tm1638
-    name: "Button 3"
+    name: "Button 3 - Bedroom"
     id: button_3
     key: 2
     on_press:
       - homeassistant.service:
-          service: light.toggle
+          service: light.turn_off
           data:
-            entity_id: light.bedroom
+            area_id: bedroom
       - lambda: |-
           id(button_pressed) = true;
           id(button_press_time) = millis();
   
   - platform: tm1638
-    name: "Button 4"
+    name: "Button 4 - Parent's Bedroom"
     id: button_4
     key: 3
     on_press:
       - homeassistant.service:
-          service: switch.toggle
+          service: light.turn_off
           data:
-            entity_id: switch.smart_plug_2_socket_1
+            area_id: parent_s_bedroom
       - lambda: |-
           id(button_pressed) = true;
           id(button_press_time) = millis();
@@ -338,13 +376,61 @@ display:
         return;
       }
       
+      // Update alarm LED mode from Home Assistant state
+      static unsigned long last_alarm_check = 0;
+      if (millis() - last_alarm_check > 1000) {  // Check every second
+        if (id(alarm_level_state).has_state()) {
+          std::string level = id(alarm_level_state).state;
+          int mode = 0;
+          if (level == "Notify") {
+            mode = 1;
+          } else if (level == "Take Action") {
+            mode = 2;
+          } else if (level == "Emergency") {
+            mode = 3;
+          }
+          id(alarm_led_mode) = mode;
+        }
+        last_alarm_check = millis();
+      }
+      
+      // Calculate alarm LED state based on mode (same as MiniDisplay)
+      const uint32_t now = millis();
+      bool alarm_led_on = false;
+      switch (id(alarm_led_mode)) {
+        case 0:  // OK - LED off
+          alarm_led_on = false;
+          break;
+        case 1:  // Notify - single 300ms flash every 60 seconds
+          alarm_led_on = (now % 60000u) < 300u;
+          break;
+        case 2: {  // Take Action - double flash every 20 seconds
+          const uint32_t phase = now % 20000u;
+          alarm_led_on = (phase < 200u) || (phase >= 300u && phase < 500u);
+          break;
+        }
+        case 3:  // Emergency - constant quick flash (200ms on/off)
+          alarm_led_on = (now % 400u) < 200u;
+          break;
+        default:
+          alarm_led_on = false;
+          break;
+      }
+      id(alarm_led_state) = alarm_led_on;
+      
       // Screen auto-cycling every 3.5 seconds
       if (millis() - id(last_screen_change) > 3500) {
-        id(current_screen) = (id(current_screen) + 1) % 10;  // 0-9 screens (added calendar)
+        id(current_screen) = (id(current_screen) + 1) % 11;  // 0-10 screens
         // Skip air fryer screen (0) if power is 0 or unavailable
         if (id(current_screen) == 0) {
           if (!id(airfryer_power).has_state() || id(airfryer_power).state <= 0) {
             id(current_screen) = 1;  // Skip to next screen
+          }
+        }
+        // Skip manifold screen (10) if temperatures unavailable
+        if (id(current_screen) == 10) {
+          if (!id(lowest_loop_temp).has_state() && !id(manifold_air_temp).has_state()) {
+            id(current_screen) = 0;  // Skip if no manifold data
           }
         }
         // Skip calendar screen (9) if no relevant events
@@ -373,6 +459,24 @@ display:
         it.set_led(i, false);
       }
       
+      // LED7: Alarm level indicator (always active based on alarm state)
+      it.set_led(6, id(alarm_led_state));
+      
+      // LED6: Boiler connected or heater relays active
+      bool boiler_or_heater = false;
+      if (id(boiler_relay_1).has_state() && id(boiler_relay_1).state) {
+        boiler_or_heater = true;
+      }
+      if (id(boiler_relay_2).has_state() && id(boiler_relay_2).state) {
+        boiler_or_heater = true;
+      }
+      it.set_led(5, boiler_or_heater);
+      
+      // LED5: Power price screen indicator
+      if (id(current_screen) == 6) {
+        it.set_led(4, true);
+      }
+      
       // Check if beans are low and flash LED8
       float bean_threshold = id(full_dist) + (id(empty_dist) - id(full_dist)) * 0.2;
       static unsigned long last_bean_flash = 0;
@@ -390,37 +494,43 @@ display:
       
       // Display based on current screen
       if (id(current_screen) == 0) {
-        // Screen 0: Air Fryer Power (LED1 when >0, only shown when power > 0)
+        // Screen 0: Air Fryer Power (only shown when power > 0)
         it.print("AirW");
         if (id(airfryer_power).has_state()) {
           int power = (int)id(airfryer_power).state;  // Display whole watts only
           it.printf(4, "%d", power);
-          if (power > 0) {
-            it.set_led(0, true);  // LED1
-          }
         } else {
           it.print(4, " --");
         }
       } else if (id(current_screen) == 1) {
-        // Screen 1: Bio Office - heater status on left, temperature on right, LED2 on
-        it.set_led(1, true);  // LED2
-        if (id(bio_heaters).has_state() && id(bio_heaters).state) {
-          it.print(" on ");
+        // Screen 1: Bio Office - climate mode on left, current temperature on right, LED2 on
+        it.set_led(1, true);  // LED2 (matches Button 2)
+        if (id(bio_office_hvac_state).has_state()) {
+          std::string hvac_state = id(bio_office_hvac_state).state;
+          if (hvac_state == "heat" || hvac_state == "auto") {
+            it.print(" on ");
+          } else {
+            it.print(" off");
+          }
         } else {
-          it.print(" off");
+          it.print(" ---");
         }
-        if (id(bio_temp).has_state()) {
-          it.printf(4, "%.1fC", id(bio_temp).state);
+        if (id(bio_office_current_temp).has_state()) {
+          it.printf(4, "%.1fC", id(bio_office_current_temp).state);
         } else {
           it.print(4, " ---");
         }
       } else if (id(current_screen) == 2) {
-        // Screen 2: Hot Water Status
+        // Screen 2: Hot Water Status with Boiler Temperature
         it.print("hot ");
         if (id(hot_water).has_state() && id(hot_water).state) {
           it.printf(4, " on ");
         } else {
           it.printf(4, " off");
+        }
+        // Override right side with boiler temp if available
+        if (id(hot_water_boiler_temp).has_state()) {
+          it.printf(4, "%.1fC", id(hot_water_boiler_temp).state);
         }
       } else if (id(current_screen) == 3) {
         // Screen 3: Outside Temperature
@@ -447,8 +557,8 @@ display:
           it.print(4, " --");
         }
       } else if (id(current_screen) == 6) {
-        // Screen 6: Power Price (LED3 on, show price on left, Lo/High on right)
-        it.set_led(2, true);  // LED3
+        // Screen 6: Power Price (LED5 on, show price on left, Lo/High on right)
+        // LED already set above
         if (id(power_price).has_state()) {
           it.printf("%.2f", id(power_price).state);
           if (id(power_price_is_low).has_state() && id(power_price_is_low).state) {
@@ -460,11 +570,10 @@ display:
           it.print(" ---");
         }
       } else if (id(current_screen) == 7) {
-        // Screen 7: Coffee Bean Level
+        // Screen 7: Coffee Bean Level (no LED, LED8 flashes for low beans)
         float threshold = id(full_dist) + (id(empty_dist) - id(full_dist)) * 0.2;
         if (id(espresso_bean_level).state > threshold && id(espresso_bean_level).state > 0) {
           it.print("beanLo");
-          it.set_led(3, true);  // Warning LED
         } else {
           it.print("beanok");
         }
@@ -479,9 +588,7 @@ display:
           it.print("--.--.--");
         }
       } else if (id(current_screen) == 9) {
-        // Screen 9: Calendar Events (Felix activities, Isolde riding)
-        // Binary sensors determine if we should show, calendar entity provides the actual event name
-        it.set_led(4, true);  // LED5 for calendar alerts
+        // Screen 9: Calendar Events (Felix activities, Isolde riding) - no specific LED
         
         bool felix_alert = id(felix_morning_alert).has_state() && id(felix_morning_alert).state;
         bool isolde_alert = id(isolde_morning_alert).has_state() && id(isolde_morning_alert).state;
@@ -511,6 +618,20 @@ display:
         } else {
           // Shouldn't get here, but fallback
           it.print("Event");
+        }
+      } else if (id(current_screen) == 10) {
+        // Screen 10: Manifold Temperatures (Loop & Air) with LED indicator
+        it.set_led(0, true);  // LED1 for manifold screen
+        // Show loop temp on left half (3 chars), air temp on right half (5 chars with "C")
+        if (id(lowest_loop_temp).has_state()) {
+          it.printf("%.1f", id(lowest_loop_temp).state);
+        } else {
+          it.print(" --");
+        }
+        if (id(manifold_air_temp).has_state()) {
+          it.printf(4, "%.1fC", id(manifold_air_temp).state);
+        } else {
+          it.print(4, " --C");
         }
       }
 

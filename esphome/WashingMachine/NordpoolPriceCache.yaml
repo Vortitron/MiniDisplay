@@ -1,0 +1,40 @@
+alias: Cache Nordpool Raw Prices
+description: Store the current day's Nordpool slot data for reuse after midnight
+triggers:
+  - trigger: time
+    at: "23:55:00"
+  - trigger: time
+    at: "23:59:00"
+  - trigger: state
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+    attribute: raw_today
+conditions: []
+actions:
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.nordpool_price_raw_yesterday
+    data:
+      value: >-
+        {% set raw_today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025',
+        'raw_today') or [] %}
+        {% if raw_today | length > 0 %}
+          {% set midnight = now().replace(hour=0, minute=0, second=0,
+          microsecond=0) %}
+          {% set midnight_ts = as_timestamp(midnight) %}
+          {% set cutoff_ts = midnight_ts + (18 * 3600) %}
+          {% set ns = namespace(parts=[]) %}
+          {% for slot in raw_today %}
+            {% set slot_start_ts = as_timestamp(slot['start']) %}
+            {% if slot_start_ts >= cutoff_ts %}
+              {% set index = ((slot_start_ts - midnight_ts) / 900) | int %}
+              {% set price = (slot['value'] * 100) | round(0) | int %}
+              {% set entry = '%02d:%03d' | format(index, price) %}
+              {% set ns.parts = ns.parts + [entry] %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.parts | join(',') }}
+        {% else %}
+          {{ '' }}
+        {% endif %}
+mode: single
+

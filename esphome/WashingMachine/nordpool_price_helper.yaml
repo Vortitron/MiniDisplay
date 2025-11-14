@@ -1,0 +1,6 @@
+input_text:
+  nordpool_price_raw_yesterday:
+    name: "Nordpool Price Raw Yesterday"
+    max: 255
+    initial: "[]"
+

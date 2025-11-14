@@ -1,0 +1,240 @@
+- trigger:
+    - platform: time_pattern
+      minutes: "/5"
+  sensor:
+    - name: "Nordpool Average Price 1h"
+      unique_id: nordpool_average_price_1h
+      unit_of_measurement: "SEK/kWh"
+      icon: mdi:cash-clock
+      state: >-
+        {% macro average(window_minutes) -%}
+          {% set cached = states('input_text.nordpool_price_raw_yesterday') %}
+          {% set base_midnight = now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1) %}
+          {% set yesterday_ns = namespace(slots=[]) %}
+          {% if cached not in ['', 'unknown', 'unavailable', none] %}
+            {% for pair in cached.split(',') %}
+              {% if ':' in pair %}
+                {% set pieces = pair.split(':') %}
+                {% set idx = pieces[0] | int %}
+                {% set price = (pieces[1] | int) / 100 %}
+                {% set start_dt = base_midnight + timedelta(minutes=idx * 15) %}
+                {% set end_dt = base_midnight + timedelta(minutes=(idx + 1) * 15) %}
+                {% set yesterday_ns.slots = yesterday_ns.slots + [{'start': start_dt.isoformat(), 'end': end_dt.isoformat(), 'value': price}] %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
+          {% set tomorrow = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_tomorrow') or [] %}
+          {% set slots = yesterday_ns.slots + today + tomorrow %}
+          {% set end_ts = now().timestamp() %}
+          {% set start_ts = end_ts - (window_minutes * 60) %}
+          {% set ns = namespace(total=0, minutes=0) %}
+          {% for slot in slots %}
+            {% set slot_start = as_timestamp(slot['start']) %}
+            {% set slot_end = as_timestamp(slot['end']) %}
+            {% if slot_end > start_ts and slot_start < end_ts %}
+              {% set overlap_start = [slot_start, start_ts] | max %}
+              {% set overlap_end = [slot_end, end_ts] | min %}
+              {% set minutes = (overlap_end - overlap_start) / 60 %}
+              {% if minutes > 0 %}
+                {% set ns.minutes = ns.minutes + minutes %}
+                {% set ns.total = ns.total + minutes * slot['value'] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.minutes > 0 %}
+            {{ (ns.total / ns.minutes) | round(3) }}
+          {% else %}
+            {{ states('sensor.nordpool_kwh_se4_sek_3_10_025') | float }}
+          {% endif %}
+        {%- endmacro %}
+        {{ average(60) }}
+    - name: "Nordpool Average Price 2h"
+      unique_id: nordpool_average_price_2h
+      unit_of_measurement: "SEK/kWh"
+      icon: mdi:cash-clock
+      state: >-
+        {% macro average(window_minutes) -%}
+          {% set cached = states('input_text.nordpool_price_raw_yesterday') %}
+          {% set base_midnight = now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1) %}
+          {% set yesterday_ns = namespace(slots=[]) %}
+          {% if cached not in ['', 'unknown', 'unavailable', none] %}
+            {% for pair in cached.split(',') %}
+              {% if ':' in pair %}
+                {% set pieces = pair.split(':') %}
+                {% set idx = pieces[0] | int %}
+                {% set price = (pieces[1] | int) / 100 %}
+                {% set start_dt = base_midnight + timedelta(minutes=idx * 15) %}
+                {% set end_dt = base_midnight + timedelta(minutes=(idx + 1) * 15) %}
+                {% set yesterday_ns.slots = yesterday_ns.slots + [{'start': start_dt.isoformat(), 'end': end_dt.isoformat(), 'value': price}] %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
+          {% set tomorrow = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_tomorrow') or [] %}
+          {% set slots = yesterday_ns.slots + today + tomorrow %}
+          {% set end_ts = now().timestamp() %}
+          {% set start_ts = end_ts - (window_minutes * 60) %}
+          {% set ns = namespace(total=0, minutes=0) %}
+          {% for slot in slots %}
+            {% set slot_start = as_timestamp(slot['start']) %}
+            {% set slot_end = as_timestamp(slot['end']) %}
+            {% if slot_end > start_ts and slot_start < end_ts %}
+              {% set overlap_start = [slot_start, start_ts] | max %}
+              {% set overlap_end = [slot_end, end_ts] | min %}
+              {% set minutes = (overlap_end - overlap_start) / 60 %}
+              {% if minutes > 0 %}
+                {% set ns.minutes = ns.minutes + minutes %}
+                {% set ns.total = ns.total + minutes * slot['value'] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.minutes > 0 %}
+            {{ (ns.total / ns.minutes) | round(3) }}
+          {% else %}
+            {{ states('sensor.nordpool_kwh_se4_sek_3_10_025') | float }}
+          {% endif %}
+        {%- endmacro %}
+        {{ average(120) }}
+    - name: "Nordpool Average Price 3h"
+      unique_id: nordpool_average_price_3h
+      unit_of_measurement: "SEK/kWh"
+      icon: mdi:cash-clock
+      state: >-
+        {% macro average(window_minutes) -%}
+          {% set cached = states('input_text.nordpool_price_raw_yesterday') %}
+          {% set base_midnight = now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1) %}
+          {% set yesterday_ns = namespace(slots=[]) %}
+          {% if cached not in ['', 'unknown', 'unavailable', none] %}
+            {% for pair in cached.split(',') %}
+              {% if ':' in pair %}
+                {% set pieces = pair.split(':') %}
+                {% set idx = pieces[0] | int %}
+                {% set price = (pieces[1] | int) / 100 %}
+                {% set start_dt = base_midnight + timedelta(minutes=idx * 15) %}
+                {% set end_dt = base_midnight + timedelta(minutes=(idx + 1) * 15) %}
+                {% set yesterday_ns.slots = yesterday_ns.slots + [{'start': start_dt.isoformat(), 'end': end_dt.isoformat(), 'value': price}] %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
+          {% set tomorrow = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_tomorrow') or [] %}
+          {% set slots = yesterday_ns.slots + today + tomorrow %}
+          {% set end_ts = now().timestamp() %}
+          {% set start_ts = end_ts - (window_minutes * 60) %}
+          {% set ns = namespace(total=0, minutes=0) %}
+          {% for slot in slots %}
+            {% set slot_start = as_timestamp(slot['start']) %}
+            {% set slot_end = as_timestamp(slot['end']) %}
+            {% if slot_end > start_ts and slot_start < end_ts %}
+              {% set overlap_start = [slot_start, start_ts] | max %}
+              {% set overlap_end = [slot_end, end_ts] | min %}
+              {% set minutes = (overlap_end - overlap_start) / 60 %}
+              {% if minutes > 0 %}
+                {% set ns.minutes = ns.minutes + minutes %}
+                {% set ns.total = ns.total + minutes * slot['value'] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.minutes > 0 %}
+            {{ (ns.total / ns.minutes) | round(3) }}
+          {% else %}
+            {{ states('sensor.nordpool_kwh_se4_sek_3_10_025') | float }}
+          {% endif %}
+        {%- endmacro %}
+        {{ average(180) }}
+    - name: "Nordpool Average Price 4h"
+      unique_id: nordpool_average_price_4h
+      unit_of_measurement: "SEK/kWh"
+      icon: mdi:cash-clock
+      state: >-
+        {% macro average(window_minutes) -%}
+          {% set cached = states('input_text.nordpool_price_raw_yesterday') %}
+          {% set base_midnight = now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1) %}
+          {% set yesterday_ns = namespace(slots=[]) %}
+          {% if cached not in ['', 'unknown', 'unavailable', none] %}
+            {% for pair in cached.split(',') %}
+              {% if ':' in pair %}
+                {% set pieces = pair.split(':') %}
+                {% set idx = pieces[0] | int %}
+                {% set price = (pieces[1] | int) / 100 %}
+                {% set start_dt = base_midnight + timedelta(minutes=idx * 15) %}
+                {% set end_dt = base_midnight + timedelta(minutes=(idx + 1) * 15) %}
+                {% set yesterday_ns.slots = yesterday_ns.slots + [{'start': start_dt.isoformat(), 'end': end_dt.isoformat(), 'value': price}] %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
+          {% set tomorrow = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_tomorrow') or [] %}
+          {% set slots = yesterday_ns.slots + today + tomorrow %}
+          {% set end_ts = now().timestamp() %}
+          {% set start_ts = end_ts - (window_minutes * 60) %}
+          {% set ns = namespace(total=0, minutes=0) %}
+          {% for slot in slots %}
+            {% set slot_start = as_timestamp(slot['start']) %}
+            {% set slot_end = as_timestamp(slot['end']) %}
+            {% if slot_end > start_ts and slot_start < end_ts %}
+              {% set overlap_start = [slot_start, start_ts] | max %}
+              {% set overlap_end = [slot_end, end_ts] | min %}
+              {% set minutes = (overlap_end - overlap_start) / 60 %}
+              {% if minutes > 0 %}
+                {% set ns.minutes = ns.minutes + minutes %}
+                {% set ns.total = ns.total + minutes * slot['value'] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.minutes > 0 %}
+            {{ (ns.total / ns.minutes) | round(3) }}
+          {% else %}
+            {{ states('sensor.nordpool_kwh_se4_sek_3_10_025') | float }}
+          {% endif %}
+        {%- endmacro %}
+        {{ average(240) }}
+    - name: "Nordpool Average Price 5h"
+      unique_id: nordpool_average_price_5h
+      unit_of_measurement: "SEK/kWh"
+      icon: mdi:cash-clock
+      state: >-
+        {% macro average(window_minutes) -%}
+          {% set cached = states('input_text.nordpool_price_raw_yesterday') %}
+          {% set base_midnight = now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1) %}
+          {% set yesterday_ns = namespace(slots=[]) %}
+          {% if cached not in ['', 'unknown', 'unavailable', none] %}
+            {% for pair in cached.split(',') %}
+              {% if ':' in pair %}
+                {% set pieces = pair.split(':') %}
+                {% set idx = pieces[0] | int %}
+                {% set price = (pieces[1] | int) / 100 %}
+                {% set start_dt = base_midnight + timedelta(minutes=idx * 15) %}
+                {% set end_dt = base_midnight + timedelta(minutes=(idx + 1) * 15) %}
+                {% set yesterday_ns.slots = yesterday_ns.slots + [{'start': start_dt.isoformat(), 'end': end_dt.isoformat(), 'value': price}] %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
+          {% set tomorrow = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_tomorrow') or [] %}
+          {% set slots = yesterday_ns.slots + today + tomorrow %}
+          {% set end_ts = now().timestamp() %}
+          {% set start_ts = end_ts - (window_minutes * 60) %}
+          {% set ns = namespace(total=0, minutes=0) %}
+          {% for slot in slots %}
+            {% set slot_start = as_timestamp(slot['start']) %}
+            {% set slot_end = as_timestamp(slot['end']) %}
+            {% if slot_end > start_ts and slot_start < end_ts %}
+              {% set overlap_start = [slot_start, start_ts] | max %}
+              {% set overlap_end = [slot_end, end_ts] | min %}
+              {% set minutes = (overlap_end - overlap_start) / 60 %}
+              {% if minutes > 0 %}
+                {% set ns.minutes = ns.minutes + minutes %}
+                {% set ns.total = ns.total + minutes * slot['value'] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.minutes > 0 %}
+            {{ (ns.total / ns.minutes) | round(3) }}
+          {% else %}
+            {{ states('sensor.nordpool_kwh_se4_sek_3_10_025') | float }}
+          {% endif %}
+        {%- endmacro %}
+        {{ average(300) }}
+

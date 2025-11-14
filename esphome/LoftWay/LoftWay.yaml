@@ -1,0 +1,587 @@
+esphome:
+  name: loftway
+  friendly_name: LoftWay
+  on_boot:
+    priority: -100
+    then:
+      - light.turn_on:
+          id: display_backlight
+          brightness: 100%
+      - lambda: |-
+          ESP_LOGI("boot", "=== LoftWay TFT Display Boot Complete ===");
+          ESP_LOGI("boot", "Backlight should be ON at 100%%");
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  level: INFO
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "bbPqKzlRqaDwTVSkjY4EQ7Qk2b4abgkozeDiwwEWI5w="
+
+ota:
+  - platform: esphome
+    password: "629ce264867a48aca47fe3655f629c81"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  reboot_timeout: 15min  # Reboot if WiFi connection lost for 15 mins
+  output_power: 8.5dB
+
+# Bluetooth Proxy (extends HA BLE range)
+bluetooth_proxy:
+  active: true
+
+# SPI for TFT Display
+spi:
+  clk_pin: GPIO2
+  mosi_pin: GPIO7
+
+# Colors for TFT
+color:
+  - id: color_white
+    white: 100%
+  - id: color_black
+    red: 0%
+    green: 0%
+    blue: 0%
+  - id: color_blue
+    red: 0%
+    green: 50%
+    blue: 100%
+  - id: color_red
+    red: 100%
+    green: 0%
+    blue: 0%
+  - id: color_green
+    red: 0%
+    green: 100%
+    blue: 0%
+  - id: color_yellow
+    red: 100%
+    green: 100%
+    blue: 0%
+  - id: color_orange
+    red: 100%
+    green: 65%
+    blue: 0%
+  - id: color_grey
+    red: 50%
+    green: 50%
+    blue: 50%
+
+# Backlight for TFT
+output:
+  - platform: ledc
+    pin: GPIO8
+    id: backlight_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    id: display_backlight
+    name: "Display Backlight"
+    default_transition_length: 0.3s
+    restore_mode: RESTORE_DEFAULT_OFF
+
+# Fonts for TFT - minimal for now
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 16
+  - file: "gfonts://Roboto"
+    id: font_medium
+    size: 20
+
+# TFT Display (ST7789)
+display:
+  - platform: st7789v
+    model: Custom
+    height: 240
+    width: 240
+    offset_height: 0
+    offset_width: 0
+    cs_pin: GPIO10
+    dc_pin: GPIO6
+    reset_pin: GPIO5
+    rotation: 0
+    update_interval: 1s
+    lambda: |-
+      // MINIMAL TEST - Just fill screen and draw simple text
+      it.fill(id(color_white));
+      it.print(10, 10, id(font_medium), id(color_black), "LoftWay");
+      it.print(10, 40, id(font_small), id(color_blue), "Screen Test");
+      return;
+      
+      // Determine which screen and mode
+      int screen_mode = id(current_screen);
+      bool detail_mode = id(detail_view_active);
+      const int notification_count = id(notifications_count);
+      
+      // Screen 0: Notifications
+      if (screen_mode == 0 && notification_count > 0) {
+        if (!detail_mode) {
+          // Summary view
+          int target = id(current_notification_index);
+          if (target >= 0 && target < static_cast<int>(id(notification_titles).size())) {
+            it.printf(10, 10, id(font_title), id(color_red), "🔔 Alert %d/%d", target + 1, notification_count);
+            it.printf(10, 50, id(font_medium), id(color_yellow), id(notification_titles)[target].c_str());
+            it.printf(10, 90, id(font_small), id(color_white), id(notification_messages)[target].c_str());
+          }
+        } else {
+          // Detail view - same for now
+          it.print(10, 10, id(font_title), id(color_red), "Notifications");
+          int y = 50;
+          for (size_t i = 0; i < id(notification_titles).size() && i < 5; i++) {
+            it.printf(10, y, id(font_small), id(color_white), "%s", id(notification_titles)[i].c_str());
+            y += 30;
+          }
+        }
+      }
+      // Screen 1: Weather
+      else if (screen_mode == 1) {
+        if (!detail_mode) {
+          // Summary view with AI image placeholder
+          it.print(10, 10, id(font_title), id(color_blue), "Weather");
+          if (id(weather_condition).has_state()) {
+            it.printf(10, 50, id(font_medium), id(color_white), id(weather_condition).state.c_str());
+          }
+          if (id(weather_temp).has_state()) {
+            it.printf(10, 85, id(font_large), id(color_orange), "%.1f°C", id(weather_temp).state);
+          }
+          // TODO: Display AI-generated weather image
+          it.rectangle(width - 90, 10, 80, 80, id(color_grey));
+          it.print(width - 85, 40, id(font_small), id(color_white), "AI IMG");
+        } else {
+          // Detail view - hourly forecast
+          it.print(10, 10, id(font_title), id(color_blue), "Hourly Forecast");
+          // TODO: Show hourly predictions
+          it.print(10, 50, id(font_small), id(color_white), "Hourly data...");
+        }
+      }
+      // Screen 2: Power
+      else if (screen_mode == 2) {
+        if (!detail_mode) {
+          // Summary view
+          it.print(10, 10, id(font_title), id(color_green), "Power");
+          if (id(nordpool_price).has_state()) {
+            it.printf(10, 50, id(font_large), id(color_yellow), "%.2f SEK/kWh", id(nordpool_price).state);
+          }
+        } else {
+          // Detail view - show all power sensors
+          it.print(10, 10, id(font_medium), id(color_green), "Power Details");
+          int y = 50;
+          if (id(bio_power_l1).has_state()) {
+            it.printf(10, y, id(font_small), id(color_white), "Bio L1: %.0fW", id(bio_power_l1).state);
+            y += 25;
+          }
+          if (id(bio_power_l2).has_state()) {
+            it.printf(10, y, id(font_small), id(color_white), "Bio L2: %.0fW", id(bio_power_l2).state);
+            y += 25;
+          }
+          if (id(bio_power_l3).has_state()) {
+            it.printf(10, y, id(font_small), id(color_white), "Bio L3: %.0fW", id(bio_power_l3).state);
+            y += 25;
+          }
+          if (id(hem_power_l1).has_state()) {
+            it.printf(10, y, id(font_small), id(color_white), "HEM L1: %.0fW", id(hem_power_l1).state);
+            y += 25;
+          }
+          if (id(hem_power_l2).has_state()) {
+            it.printf(10, y, id(font_small), id(color_white), "HEM L2: %.0fW", id(hem_power_l2).state);
+            y += 25;
+          }
+          if (id(hem_power_l3).has_state()) {
+            it.printf(10, y, id(font_small), id(color_white), "HEM L3: %.0fW", id(hem_power_l3).state);
+          }
+        }
+      }
+      // Screen 3: Calendar
+      else if (screen_mode == 3) {
+        if (!detail_mode) {
+          // Summary view with AI image
+          it.print(10, 10, id(font_title), id(color_yellow), "Calendar");
+          if (id(calendar_next_event).has_state()) {
+            it.printf(10, 50, id(font_medium), id(color_white), id(calendar_next_event).state.c_str());
+          }
+          // TODO: Display AI-generated calendar image
+          it.rectangle(width - 90, 10, 80, 80, id(color_grey));
+          it.print(width - 85, 40, id(font_small), id(color_white), "AI IMG");
+        } else {
+          // Detail view - upcoming events
+          it.print(10, 10, id(font_medium), id(color_yellow), "Upcoming Events");
+          // TODO: List calendar events with scrolling
+          it.print(10, 50, id(font_small), id(color_white), "Event list...");
+        }
+      }
+
+# Rotary Encoder (EC11) - TEMPORARILY DISABLED FOR TESTING
+# sensor:
+#   - platform: rotary_encoder
+#     id: main_rotary_encoder
+#     pin_a:
+#       number: GPIO20
+#       mode:
+#         input: true
+#         pullup: true
+#     pin_b:
+#       number: GPIO21
+#       mode:
+#         input: true
+#         pullup: true
+#     resolution: 1
+#     on_value:
+#       then:
+#         - lambda: |-
+#             int current_value = id(main_rotary_encoder).state;
+#             static int last_value = 0;
+#             int change = current_value - last_value;
+#             last_value = current_value;
+#             
+#             if (change != 0) {
+#               id(display_backlight).turn_on();
+#               id(last_activity_time) = millis();
+#               id(handle_encoder_rotation).execute(change);
+#             }
+
+sensor:
+  # MQ2 Gas Sensor - Raw Analog Voltage
+  - platform: adc
+    name: "MQ2 Gas/Smoke Level - Raw Analog Voltage"
+    pin: GPIO3  # Analog input pin on ESP32-C3 SuperMini
+    id: mq2_analog_raw
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: 2s
+    attenuation: 11db  # Allows reading 0-3.3V range
+    internal: true  # Hide raw voltage from HA
+    filters:
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 5
+  
+  # MQ2 Gas Sensor - Percentage
+  - platform: template
+    name: "MQ2 Gas/Smoke Level"
+    id: mq2_analog
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 2s
+    lambda: |-
+      if (id(mq2_analog_raw).state != NAN) {
+        // Convert voltage (0-3.3V) to percentage (0-100%)
+        float percentage = (id(mq2_analog_raw).state / 3.3) * 100.0;
+        // Clamp between 0-100%
+        if (percentage < 0.0) return 0.0;
+        if (percentage > 100.0) return 100.0;
+        percentage = roundf(percentage * 10.0) / 10.0;
+        return percentage;
+      }
+      return NAN;
+
+  # HOME ASSISTANT SENSORS - TEMPORARILY DISABLED FOR TESTING
+  # - platform: homeassistant
+  #   id: nordpool_price
+  #   entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+
+  # - platform: homeassistant
+  #   id: weather_temp
+  #   entity_id: weather.openweathermap
+  #   attribute: temperature
+
+# Binary Sensors
+binary_sensor:
+  # MQ2 Gas Sensor - Software Alarm
+  - platform: template
+    id: mq2_digital
+    name: "MQ2 Smoke/Gas Alarm"
+    device_class: smoke
+    lambda: |-
+      static bool alarm_state = false;
+      if (id(mq2_analog).state != NAN) {
+        if (id(mq2_analog).state >= 25.0) {
+          alarm_state = true;   // Trigger at 25%
+        } else if (id(mq2_analog).state <= 20.0) {
+          alarm_state = false;  // Clear at 20%
+        }
+      }
+      return alarm_state;
+    filters:
+      - delayed_on: 2s
+      - delayed_off: 10s
+
+  # BUTTONS TEMPORARILY DISABLED FOR TESTING
+  # # Rotary Encoder Push Button
+  # - platform: gpio
+  #   pin:
+  #     number: GPIO1
+  #     mode:
+  #       input: true
+  #       pullup: true
+  #     inverted: true
+  #   id: encoder_push
+  #   name: "Encoder Push"
+
+  # # KEYO Button (back button)
+  # - platform: gpio
+  #   pin:
+  #     number: GPIO9
+  #     mode:
+  #       input: true
+  #       pullup: true
+  #     inverted: true
+  #   id: keyo_button
+  #   name: "KEYO Button"
+
+# Text Sensors - TEMPORARILY DISABLED FOR TESTING
+# text_sensor:
+#   - platform: homeassistant
+#     id: weather_condition
+#     entity_id: weather.openweathermap
+
+# # Calendar
+#   - platform: homeassistant
+#     id: calendar_next_event
+#     entity_id: calendar.handl_f
+
+#   - platform: homeassistant
+#     id: minidisplay_notification_ids
+#     entity_id: input_text.minidisplay_notification_ids
+#     on_value:
+      then:
+        - lambda: |-
+            std::string ids_str = id(minidisplay_notification_ids).state;
+            id(notification_ids).clear();
+            
+            if (ids_str.empty()) {
+              id(notifications_count) = 0;
+            } else {
+              size_t start = 0;
+              while (start < ids_str.size()) {
+                size_t comma = ids_str.find(',', start);
+                std::string id_part = (comma == std::string::npos) 
+                  ? ids_str.substr(start) 
+                  : ids_str.substr(start, comma - start);
+                
+                size_t first = id_part.find_first_not_of(" \t\r\n");
+                size_t last = id_part.find_last_not_of(" \t\r\n");
+                if (first != std::string::npos && last != std::string::npos) {
+                  id_part = id_part.substr(first, last - first + 1);
+                  if (!id_part.empty()) {
+                    id(notification_ids).push_back(id_part);
+                  }
+                }
+                
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+              }
+              
+              int old_count = id(notifications_count);
+              id(notifications_count) = id(notification_ids).size();
+              
+              // Turn on backlight if new notification arrived
+              if (id(notifications_count) > old_count && id(notifications_count) > 0) {
+                id(display_backlight).turn_on();
+                id(current_screen) = 0;  // Jump to notification screen
+                id(current_notification_index) = 0;
+                id(last_activity_time) = millis();
+              }
+            }
+            ESP_LOGI("loftway", "Notifications: %d active", id(notifications_count));
+
+  - platform: homeassistant
+    id: minidisplay_notification_titles
+    entity_id: input_text.minidisplay_notification_titles
+    on_value:
+      then:
+        - lambda: |-
+            std::string titles_str = id(minidisplay_notification_titles).state;
+            id(notification_titles).clear();
+            
+            if (!titles_str.empty()) {
+              size_t start = 0;
+              while (start < titles_str.size()) {
+                size_t pipe = titles_str.find('|', start);
+                std::string title = (pipe == std::string::npos) 
+                  ? titles_str.substr(start) 
+                  : titles_str.substr(start, pipe - start);
+                id(notification_titles).push_back(title);
+                if (pipe == std::string::npos) break;
+                start = pipe + 1;
+              }
+            }
+
+  - platform: homeassistant
+    id: minidisplay_notification_messages
+    entity_id: input_text.minidisplay_notification_messages
+    on_value:
+      then:
+        - lambda: |-
+            std::string messages_str = id(minidisplay_notification_messages).state;
+            id(notification_messages).clear();
+            
+            if (!messages_str.empty()) {
+              size_t start = 0;
+              while (start < messages_str.size()) {
+                size_t pipe = messages_str.find('|', start);
+                std::string message = (pipe == std::string::npos) 
+                  ? messages_str.substr(start) 
+                  : messages_str.substr(start, pipe - start);
+                id(notification_messages).push_back(message);
+                if (pipe == std::string::npos) break;
+                start = pipe + 1;
+              }
+            }
+
+# Time component for graph
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+# Global variables
+globals:
+  - id: current_screen
+    type: int
+    restore_value: yes
+    initial_value: '1'  # 0=notifications, 1=weather, 2=power, 3=calendar
+
+  - id: detail_view_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: notifications_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: current_notification_index
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: notification_ids
+    type: std::vector<std::string>
+    restore_value: no
+
+  - id: notification_titles
+    type: std::vector<std::string>
+    restore_value: no
+
+  - id: notification_messages
+    type: std::vector<std::string>
+    restore_value: no
+
+  - id: last_activity_time
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+
+# Interval for backlight timeout
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          unsigned long now = millis();
+          // Turn off backlight after 30 seconds of inactivity
+          if (id(display_backlight).current_values.get_state() > 0 && 
+              id(last_activity_time) > 0 && 
+              (now - id(last_activity_time)) > 30000) {
+            ESP_LOGI("loftway", "Backlight timeout - turning off");
+            id(display_backlight).turn_off().perform();
+          }
+
+# Scripts
+script:
+  # Handle rotary encoder rotation
+  - id: handle_encoder_rotation
+    parameters:
+      change: int
+    then:
+      - lambda: |-
+          ESP_LOGI("loftway", "Encoder rotated: %d", change);
+          
+          // If in detail view, handle detail navigation
+          if (id(detail_view_active)) {
+            // TODO: Scroll through detail items
+            ESP_LOGI("loftway", "Detail view scrolling not yet implemented");
+            return;
+          }
+          
+          // Otherwise, rotate through screens
+          int max_screen = 3;  // 0=notifications, 1=weather, 2=power, 3=calendar
+          int new_screen = id(current_screen) + change;
+          
+          // Wrap around
+          while (new_screen < 0) new_screen += (max_screen + 1);
+          while (new_screen > max_screen) new_screen -= (max_screen + 1);
+          
+          // Skip notifications screen if no notifications
+          if (new_screen == 0 && id(notifications_count) == 0) {
+            new_screen = (change > 0) ? 1 : max_screen;
+          }
+          
+          id(current_screen) = new_screen;
+          ESP_LOGI("loftway", "Switched to screen %d", new_screen);
+
+  # Handle back button
+  - id: handle_back_button
+    then:
+      - lambda: |-
+          ESP_LOGI("loftway", "Back button pressed");
+          id(last_activity_time) = millis();
+          id(display_backlight).turn_on();
+          
+          // Exit detail view if active
+          if (id(detail_view_active)) {
+            id(detail_view_active) = false;
+            ESP_LOGI("loftway", "Exited detail view");
+          }
+
+  # Handle long press - turn off downstairs, turn on loft
+  - id: handle_long_press
+    then:
+      - lambda: |-
+          ESP_LOGI("loftway", "Long press detected - toggling lights");
+          id(last_activity_time) = millis();
+      # Turn off downstairs lights
+      - homeassistant.service:
+          service: light.turn_off
+          data:
+            entity_id: light.gold_light
+      - homeassistant.service:
+          service: light.turn_off
+          data:
+            entity_id: light.bio_floodlight
+      - homeassistant.service:
+          service: light.turn_off
+          data:
+            entity_id: light.led_flood_light
+      - homeassistant.service:
+          service: light.turn_off
+          data:
+            entity_id: light.living_office_stand
+      - homeassistant.service:
+          service: light.turn_off
+          data:
+            entity_id: light.isp_ba4bb8_4bb8
+      # Turn on loft lights
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: light.isp_1a3c38_3c38
+      - homeassistant.service:
+          service: light.turn_on
+          data:
+            entity_id: light.loft_lights
+      - light.turn_on: display_backlight

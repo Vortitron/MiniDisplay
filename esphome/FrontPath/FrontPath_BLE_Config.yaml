@@ -1,0 +1,74 @@
+esphome:
+  name: frontpath
+  friendly_name: FrontPath BLE Config Mode
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+  level: INFO
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "2RwJ1P/hXAYM+mPPS68KUxQLqYy4ONzj/YgyVhjEdQk="
+
+ota:
+  - platform: esphome
+    password: "8db97f33b277385c2ab325b44c38aa92"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  output_power: 10.5dB
+
+
+# Bluetooth Proxy (extends HA BLE range)
+# With UART disabled, the LD2410 sensors will broadcast BLE and be accessible via HLKRadarTool app
+bluetooth_proxy:
+  active: true
+
+# UART and LD2410 configuration COMPLETELY DISABLED
+# This allows the LD2410 sensors to broadcast BLE advertisements
+# Use the HLKRadarTool Android app to configure the sensors
+
+# Instructions:
+# 1. Flash this configuration to the ESP32
+# 2. The LD2410 sensors will start broadcasting BLE (they're still powered via the ESP32)
+# 3. Open HLKRadarTool app on your Android phone
+# 4. Connect to each sensor via BLE
+# 5. Configure:
+#    - Max Move Distance Gate: 6-8 (for ~4.5-6m range)
+#    - Max Still Distance Gate: 3-4 (still targets unreliable outdoors)
+#    - Timeout: 3-5 seconds
+#    - Per-gate sensitivity thresholds as needed
+# 6. Save settings to sensor (they're stored in sensor's non-volatile memory)
+# 7. Flash the full FrontPath.yaml configuration to restore UART operation
+# 8. Settings will persist - no need to reconfigure
+
+# Status indicator
+text_sensor:
+  - platform: template
+    name: "FrontPath Mode"
+    id: mode_status
+    icon: "mdi:bluetooth"
+    update_interval: 5s
+    lambda: |-
+      return {"BLE Configuration Mode - UART Disabled"};
+
+# Memory monitoring
+sensor:
+  - platform: template
+    name: "Free Memory"
+    unit_of_measurement: "bytes"
+    accuracy_decimals: 0
+    icon: "mdi:memory"
+    update_interval: 10s
+    lambda: |-
+      return esp_get_free_heap_size();
+

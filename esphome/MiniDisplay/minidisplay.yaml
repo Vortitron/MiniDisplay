@@ -6,10 +6,12 @@ esphome:
     priority: 600
     then:
       - output.turn_on: status_led
+      - lambda: 'id(status_led_is_on) = true;'
       - logger.log: "MiniDisplay Controller booted, LED should be ON"
   on_shutdown:
     then:
       - output.turn_off: status_led
+      - lambda: 'id(status_led_is_on) = false;'
       - logger.log: "MiniDisplay Controller shutting down"
 
 esp32:
@@ -30,11 +32,19 @@ api:
   on_client_connected:
     then:
       - output.turn_on: status_led
+      - lambda: 'id(status_led_is_on) = true;'
       - logger.log: "Home Assistant API connected - ready for service calls"
   on_client_disconnected:
     then:
       - output.turn_off: status_led
+      - lambda: 'id(status_led_is_on) = false;'
       - logger.log: "Home Assistant API disconnected - service calls will fail"
+
+# Time component for timestamps
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Stockholm
 
 # OTA updates
 ota:
@@ -88,17 +98,99 @@ display:
     model: "SSD1306 128x64"
     address: 0x3C
     lambda: |-
-      // Simple ESPHome display
+      const int base_count = id(base_entity_count);
+      const int notification_count = id(notifications_count);
+      const int current_index = id(current_entity_index);
+
       static const char* entity_names[] = {
         "Gold Light", "LED Flood", "Bio Flood", "Living Office Stand", "LG TV", "Sam HVAC", "Hot Water", "Isolde's Bed"
       };
-      
-      // Display current entity name
-      if (id(current_entity_index) >= 0 && id(current_entity_index) < 8) {
-        it.print(0, 0, id(default_font), entity_names[id(current_entity_index)]);
-      } else {
-        it.print(0, 0, id(default_font), "Unknown Entity");
+
+      if (current_index >= base_count && notification_count > 0) {
+        int target = current_index - base_count;
+        
+        if (target < 0 || target >= static_cast<int>(id(notification_ids).size())) {
+          it.print(0, 0, id(default_font), "Invalid notification");
+          return;
+        }
+        
+        std::string notif_id = id(notification_ids)[target];
+        
+        // Build display content from stored notification data
+        std::string title = "Notification";
+        std::string message = notif_id;
+        
+        // Look up cached notification data
+        if (target < static_cast<int>(id(notification_titles).size())) {
+          title = id(notification_titles)[target];
+        }
+        if (target < static_cast<int>(id(notification_messages).size())) {
+          message = id(notification_messages)[target];
+        }
+        
+        // Get current time for display
+        auto time = id(sntp_time).now();
+        char time_str[20];
+        snprintf(time_str, sizeof(time_str), "%02d:%02d", time.hour, time.minute);
+        
+        it.printf(0, 0, id(default_font), "Alert %d/%d  %s", target + 1, notification_count, time_str);
+        
+        int y_offset = 16;
+        
+        // Display title only if not empty/default
+        bool has_title = !title.empty() && title != "Notification" && title != "None";
+        if (has_title) {
+          if (title.length() > 21) {
+            it.print(0, y_offset, id(default_font), (title.substr(0, 18) + "...").c_str());
+          } else {
+            it.print(0, y_offset, id(default_font), title.c_str());
+          }
+          y_offset += 12;
+        }
+        
+        // Word-wrap message into remaining lines (3 lines if no title, 2 lines with title)
+        auto wrap_text = [&](const std::string &text, size_t max_chars) -> std::vector<std::string> {
+          std::vector<std::string> lines;
+          std::string remaining = text;
+          size_t max_lines = has_title ? 2 : 3;
+          while (!remaining.empty() && lines.size() < max_lines) {
+            size_t split = remaining.size() <= max_chars ? remaining.size() : max_chars;
+            if (split < remaining.size()) {
+              size_t space = remaining.rfind(' ', split);
+              if (space != std::string::npos && space > 0) {
+                split = space;
+              }
+            }
+            if (split == 0) {
+              split = std::min(max_chars, remaining.size());
+            }
+            lines.push_back(remaining.substr(0, split));
+            if (split >= remaining.size()) {
+              remaining.clear();
+            } else {
+              remaining.erase(0, split);
+              while (!remaining.empty() && remaining.front() == ' ') {
+                remaining.erase(0, 1);
+              }
+            }
+          }
+          return lines;
+        };
+        
+        auto lines = wrap_text(message, 20);
+        for (const auto &segment : lines) {
+          it.print(0, y_offset, id(default_font), segment.c_str());
+          y_offset += 12;
+        }
+        return;
       }
+
+      if (current_index < 0 || current_index >= base_count) {
+        it.print(0, 0, id(default_font), "Unknown Entity");
+        return;
+      }
+
+      it.print(0, 0, id(default_font), entity_names[current_index]);
       
       // Display real state info from Home Assistant (string sensors)
       auto state_str = std::string("unknown");
@@ -269,6 +361,18 @@ display:
           snprintf(buf, sizeof(buf), "In: %.1fC %.0f%%", indoor_temp, humidity);
           it.print(0, 50, id(default_font), buf);  // Moved up 4 pixels
         }
+      } else if (id(current_entity_index) == 6) {
+        // Hot Water - show boiler temperature and energy price
+        if (id(hot_water_boiler_temp).has_state()) {
+          float boiler_temp = id(hot_water_boiler_temp).state;
+          snprintf(buf, sizeof(buf), "Boiler: %.1fC", boiler_temp);
+          it.print(0, 26, id(default_font), buf);
+        }
+        if (id(nordpool_price).has_state()) {
+          float energy_price = id(nordpool_price).state;
+          snprintf(buf, sizeof(buf), "Price: %.2f SEK", energy_price);
+          it.print(0, 38, id(default_font), buf);
+        }
       }
 
 # Rotary encoder
@@ -363,12 +467,12 @@ sensor:
     attribute: color_temp
   - platform: homeassistant
     id: office_color_temp
-    entity_id: light.wifi_smart_bulb
+    entity_id: light.living_office_stand
     attribute: color_temp
 
   - platform: homeassistant
     id: living_office_brightness
-    entity_id: light.wifi_smart_bulb
+    entity_id: light.living_office_stand
     attribute: brightness
     on_value:
       then:
@@ -440,6 +544,14 @@ sensor:
     id: hot_water_state_sensor
     entity_id: switch.smart_plug_2_socket_1
 
+  - platform: homeassistant
+    id: hot_water_boiler_temp
+    entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
+
+  - platform: homeassistant
+    id: nordpool_price
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+
 # Binary sensors for reading entity on/off states (hardware buttons)
 binary_sensor:
   # Hardware buttons (keep existing ones)
@@ -509,7 +621,7 @@ text_sensor:
     entity_id: light.bio_floodlight
   - platform: homeassistant
     id: living_office_state
-    entity_id: light.wifi_smart_bulb
+    entity_id: light.living_office_stand
   # Light color attribute text_sensors
   - platform: homeassistant
     id: gold_light_color_mode
@@ -537,7 +649,7 @@ text_sensor:
     attribute: hs_color
   - platform: homeassistant
     id: office_color_mode
-    entity_id: light.wifi_smart_bulb
+    entity_id: light.living_office_stand
     attribute: color_mode
   - platform: homeassistant
     id: isolde_bed_state
@@ -559,6 +671,127 @@ text_sensor:
   - platform: homeassistant
     id: hot_water_state
     entity_id: switch.smart_plug_2_socket_1
+
+  - platform: homeassistant
+    id: minidisplay_notification_ids
+    entity_id: input_text.minidisplay_notification_ids
+    on_value:
+      then:
+        - lambda: |-
+            std::string ids_str = id(minidisplay_notification_ids).state;
+            id(notification_ids).clear();
+            
+            if (ids_str.empty()) {
+              id(notifications_count) = 0;
+            } else {
+              size_t start = 0;
+              while (start < ids_str.size()) {
+                size_t comma = ids_str.find(',', start);
+                std::string id_part = (comma == std::string::npos) 
+                  ? ids_str.substr(start) 
+                  : ids_str.substr(start, comma - start);
+                
+                // Trim whitespace
+                size_t first = id_part.find_first_not_of(" \t\r\n");
+                size_t last = id_part.find_last_not_of(" \t\r\n");
+                if (first != std::string::npos && last != std::string::npos) {
+                  id_part = id_part.substr(first, last - first + 1);
+                  if (!id_part.empty()) {
+                    id(notification_ids).push_back(id_part);
+                  }
+                }
+                
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+              }
+              int old_count = id(notifications_count);
+              id(notifications_count) = id(notification_ids).size();
+              
+              // Jump to first notification if count increased
+              if (id(notifications_count) > old_count && id(notifications_count) > 0) {
+                int base = id(base_entity_count);
+                id(current_entity_index) = base;
+                ESP_LOGI("script", "New notification arrived, jumping to notification screen");
+              }
+            }
+            
+            int base = id(base_entity_count);
+            int total = base + id(notifications_count);
+            if (total <= 0) total = base;
+            if (total <= 0) total = 1;
+            if (id(current_entity_index) >= total) {
+              id(current_entity_index) = total - 1;
+            }
+            ESP_LOGI("script", "Notification IDs updated, %d active", id(notifications_count));
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: minidisplay_notification_titles
+    entity_id: input_text.minidisplay_notification_titles
+    on_value:
+      then:
+        - lambda: |-
+            std::string titles_str = id(minidisplay_notification_titles).state;
+            id(notification_titles).clear();
+            
+            if (!titles_str.empty()) {
+              size_t start = 0;
+              while (start < titles_str.size()) {
+                size_t pipe = titles_str.find('|', start);
+                std::string title = (pipe == std::string::npos) 
+                  ? titles_str.substr(start) 
+                  : titles_str.substr(start, pipe - start);
+                id(notification_titles).push_back(title);
+                if (pipe == std::string::npos) break;
+                start = pipe + 1;
+              }
+            }
+            ESP_LOGI("script", "Notification titles updated, %d entries", id(notification_titles).size());
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: minidisplay_notification_messages
+    entity_id: input_text.minidisplay_notification_messages
+    on_value:
+      then:
+        - lambda: |-
+            std::string messages_str = id(minidisplay_notification_messages).state;
+            id(notification_messages).clear();
+            
+            if (!messages_str.empty()) {
+              size_t start = 0;
+              while (start < messages_str.size()) {
+                size_t pipe = messages_str.find('|', start);
+                std::string message = (pipe == std::string::npos) 
+                  ? messages_str.substr(start) 
+                  : messages_str.substr(start, pipe - start);
+                id(notification_messages).push_back(message);
+                if (pipe == std::string::npos) break;
+                start = pipe + 1;
+              }
+            }
+            ESP_LOGI("script", "Notification messages updated, %d entries", id(notification_messages).size());
+        - script.execute: update_display
+
+  - platform: homeassistant
+    id: alarm_level_state
+    entity_id: input_select.alarm_level
+    on_value:
+      then:
+        - lambda: |-
+            std::string level = id(alarm_level_state).state;
+            int mode = 0;
+            if (level == "Notify") {
+              mode = 1;
+            } else if (level == "Take Action") {
+              mode = 2;
+            } else if (level == "Emergency") {
+              mode = 3;
+            }
+            if (id(alarm_led_mode) != mode) {
+              ESP_LOGI("script", "Alarm level updated to %s (mode %d)", level.c_str(), mode);
+              id(alarm_led_mode) = mode;
+            }
 
 # Global variables for state tracking
 globals:
@@ -623,6 +856,74 @@ globals:
     restore_value: no
     initial_value: '-1.0'  # -1 means no pending value
 
+  - id: base_entity_count
+    type: int
+    restore_value: no
+    initial_value: '8'
+
+  - id: notification_ids
+    type: std::vector<std::string>
+    restore_value: no
+
+  - id: notification_titles
+    type: std::vector<std::string>
+    restore_value: no
+
+  - id: notification_messages
+    type: std::vector<std::string>
+    restore_value: no
+
+  - id: notifications_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: alarm_led_mode
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: status_led_is_on
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+
+interval:
+  - interval: 100ms
+    then:
+      - lambda: |-
+          const int mode = id(alarm_led_mode);
+          bool led_on = false;
+          const uint32_t now = millis();
+          switch (mode) {
+            case 0:  // OK - LED off
+              led_on = false;
+              break;
+            case 1:  // Notify - single 300ms flash every 60 seconds
+              led_on = (now % 60000u) < 300u;
+              break;
+            case 2: {  // Take Action - double flash every 20 seconds
+              const uint32_t phase = now % 20000u;
+              led_on = (phase < 200u) || (phase >= 300u && phase < 500u);
+              break;
+            }
+            case 3:  // Emergency - constant quick flash (200ms on/off)
+              led_on = (now % 400u) < 200u;
+              break;
+            default:
+              led_on = false;
+              break;
+          }
+
+          if (led_on != id(status_led_is_on)) {
+            if (led_on) {
+              id(status_led).turn_on();
+            } else {
+              id(status_led).turn_off();
+            }
+            id(status_led_is_on) = led_on;
+          }
+
 # Scripts for entity control and display management
 script:
   - id: update_display
@@ -636,9 +937,22 @@ script:
       entity_index: int
     then:
       - lambda: |-
+          int base = id(base_entity_count);
+          int total = base + id(notifications_count);
+          if (total <= 0) {
+            total = base;
+          }
+          if (total <= 0) {
+            total = 1;
+          }
+          if (entity_index < 0) {
+            entity_index = 0;
+          } else if (entity_index >= total) {
+            entity_index = total - 1;
+          }
           id(current_entity_index) = entity_index;
-          id(update_display).execute();
-          ESP_LOGI("script", "Switched to entity %d", entity_index);
+          ESP_LOGI("script", "Switched to entity %d (total available %d)", entity_index, total);
+      - script.execute: update_display
 
   - id: toggle_entity_ha
     then:
@@ -679,7 +993,7 @@ script:
             - homeassistant.service:
                 service: light.toggle
                 data:
-                  entity_id: light.wifi_smart_bulb
+                  entity_id: light.living_office_stand
       - if:
           condition:
             lambda: 'return id(current_entity_index) == 4;'
@@ -715,6 +1029,39 @@ script:
                 data:
                   entity_id: light.isp_ba4bb8_4bb8
       - delay: 500ms  # Give HA time to update
+      - script.execute: update_display
+
+  - id: dismiss_current_notification
+    then:
+      - lambda: |-
+          const int base = id(base_entity_count);
+          const int count = id(notifications_count);
+          int index = id(current_entity_index);
+          
+          if (count <= 0 || index < base) {
+            ESP_LOGI("script", "Dismiss requested but no notification selected (index %d, count %d)", index, count);
+            return;
+          }
+
+          const int target = index - base;
+          if (target < 0 || target >= static_cast<int>(id(notification_ids).size())) {
+            ESP_LOGW("script", "Notification index %d out of range", target);
+            return;
+          }
+          
+          std::string notif_id = id(notification_ids)[target];
+          ESP_LOGI("script", "Dismissing notification %s (index %d)", notif_id.c_str(), target);
+      - homeassistant.service:
+          service: persistent_notification.dismiss
+          data:
+            notification_id: !lambda |-
+              const int base = id(base_entity_count);
+              const int target = id(current_entity_index) - base;
+              if (target >= 0 && target < static_cast<int>(id(notification_ids).size())) {
+                return id(notification_ids)[target];
+              }
+              return std::string("");
+      - delay: 100ms
       - script.execute: update_display
 
   - id: adjust_brightness
@@ -816,7 +1163,7 @@ script:
             - homeassistant.service:
                 service: light.turn_on
                 data:
-                  entity_id: light.wifi_smart_bulb
+                  entity_id: light.living_office_stand
                   brightness: !lambda |-
                     auto& pending_brightness_vec = id(pending_brightness);
                     int pending = pending_brightness_vec[3];
@@ -1304,7 +1651,7 @@ script:
             - homeassistant.service:
                 service: light.turn_on
                 data:
-                  entity_id: light.wifi_smart_bulb
+                  entity_id: light.living_office_stand
                   color_temp: "454"
       - if:
           condition:
@@ -1313,7 +1660,7 @@ script:
             - homeassistant.service:
                 service: light.turn_on
                 data:
-                  entity_id: light.wifi_smart_bulb
+                  entity_id: light.living_office_stand
                   color_temp: "250"
       - if:
           condition:
@@ -1322,7 +1669,7 @@ script:
             - homeassistant.service:
                 service: light.turn_on
                 data:
-                  entity_id: light.wifi_smart_bulb
+                  entity_id: light.living_office_stand
                   color_temp: "153"
       - if:
           condition:
@@ -1331,7 +1678,7 @@ script:
             - homeassistant.service:
                 service: light.turn_on
                 data:
-                  entity_id: light.wifi_smart_bulb
+                  entity_id: light.living_office_stand
                   color_temp: "370"
 
   - id: apply_isolde_bed_color
@@ -1498,7 +1845,14 @@ script:
       - lambda: |-
           ESP_LOGI("script", "Confirm button pressed");
           // Short press: cycle entities; long-press handled separately
-          int next_entity = (id(current_entity_index) + 1) % 8;  // 8 total entities (0-7)
+          int total = id(base_entity_count) + id(notifications_count);
+          if (total <= 0) {
+            total = id(base_entity_count);
+          }
+          if (total <= 0) {
+            total = 1;
+          }
+          int next_entity = (id(current_entity_index) + 1) % total;
           id(switch_entity).execute(next_entity);
 
   - id: handle_confirm_hold_start
@@ -1516,9 +1870,15 @@ script:
   - id: handle_encoder_push
     then:
       - lambda: |-
-          ESP_LOGI("script", "Encoder push pressed for entity %d", id(current_entity_index));
-          // Encoder push toggles entity state (on/off)
-          id(toggle_entity_ha).execute();
+          int index = id(current_entity_index);
+          int base = id(base_entity_count);
+          ESP_LOGI("script", "Encoder push pressed for entity %d", index);
+          if (index >= base && id(notifications_count) > 0) {
+            id(dismiss_current_notification).execute();
+          } else {
+            // Encoder push toggles entity state (on/off)
+            id(toggle_entity_ha).execute();
+          }
 
   - id: handle_encoder_change
     parameters:
@@ -1527,13 +1887,29 @@ script:
       - lambda: |-
           ESP_LOGI("script", "Encoder value changed by %d for entity %d", change, id(current_entity_index));
           // Encoder rotation adjusts values based on entity type
+          int base = id(base_entity_count);
+          int total = base + id(notifications_count);
+          if (total <= 0) {
+            total = base;
+          }
+          if (total <= 0) {
+            total = 1;
+          }
           if (id(entity_scroll_mode)) {
-            // In scroll mode, jump by 2 entities per step for faster cycling
-            int step = (change > 0) ? 2 : -2;
-            int next = id(current_entity_index) + step;
-            if (next < 0) next = 7;
-            if (next > 7) next = 0;
+            // In scroll mode, move one entity per encoder click
+            int next = id(current_entity_index) + change;
+            while (next < 0) {
+              next += total;
+            }
+            while (next >= total) {
+              next -= total;
+            }
             id(switch_entity).execute(next);
+            return;
+          }
+
+          if (id(current_entity_index) >= base) {
+            // Notifications do not respond to encoder rotation
             return;
           } else if ((id(current_entity_index) >= 0 && id(current_entity_index) <= 3) || id(current_entity_index) == 7) {
             // Light entities - adjust brightness

@@ -73,9 +73,10 @@ This device serves as a central monitoring station for:
 | Function | ESP32 Pin | Notes |
 |----------|-----------|-------|
 | Analog Output (AO) | GPIO34 | ADC1_CH6, 0-3.3V input |
-| Digital Output (DO) | GPIO35 | ADC1_CH7, threshold alarm |
+| Digital Output (DO) | GPIO35 | ADC1_CH7, threshold alarm (active LOW) |
 
-**MQ2 Power**: 5V (VCC), GND
+**MQ2 Power**: 5V (VCC), GND  
+**Digital Output**: Active LOW (LOW = gas detected, HIGH = safe) - automatically inverted in firmware
 
 ### Power
 - **ESP32**: 5V via USB or Vin pin
@@ -191,11 +192,43 @@ The device uses **Ethernet only** (no WiFi) for reliability in a critical heatin
 - Check power supply to TM1638 (5V)
 - Verify correct pin assignments
 
-### MQ2 False Alarms
-- Allow 24-48 hour burn-in period
-- Adjust threshold potentiometer on MQ2 module
-- Check placement away from cooking fumes/steam
-- Verify power supply stability
+### MQ2 Gas Sensor Issues
+
+#### Initial Setup & Calibration
+The MQ2 sensor requires proper calibration for reliable operation:
+
+1. **Warm-up Period**: 
+   - Initial burn-in: 24-48 hours of continuous operation
+   - Readings will stabilise after this period
+   - Fresh sensors may show elevated readings (10-20%) initially
+   
+2. **Clean Air Calibration**:
+   - Place sensor in clean, well-ventilated area
+   - Allow to warm up for at least 30 minutes
+   - Note the "baseline" percentage reading (typically 5-15% in clean air)
+   - Significant increases from baseline indicate gas/smoke presence
+
+3. **Digital Threshold Adjustment**:
+   - The MQ2 module has an onboard potentiometer (usually blue trim pot)
+   - Adjust clockwise to increase sensitivity (triggers at lower concentrations)
+   - Adjust anti-clockwise to decrease sensitivity (triggers at higher concentrations)
+   - Set threshold slightly above your baseline reading to avoid false alarms
+   - Test by introducing small amount of gas (lighter, alcohol) to verify detection
+
+#### Reading Interpretation
+- **0-10%**: Normal clean air (baseline varies by sensor)
+- **10-20%**: Possible slight contamination or sensor warming up
+- **20-40%**: Moderate gas/smoke detection
+- **40%+**: Significant gas/smoke presence - investigate immediately
+
+#### Common Issues
+- **Stuck at 11% with "detected"**: 
+  - Likely threshold set too low - adjust potentiometer anti-clockwise
+  - Or sensor still stabilising (wait full 24-48 hours)
+  - Or actual low-level gas present (check for leaks, pilot lights, etc.)
+- **Fluctuating readings**: Normal during warm-up period
+- **Always shows 0%**: Check wiring, power supply, or sensor may be faulty
+- **Erratic behaviour**: Check 5V power supply stability, electromagnetic interference
 
 ## Firmware Updates
 

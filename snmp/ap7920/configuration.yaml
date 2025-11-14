@@ -1,0 +1,324 @@
+# APC AP7920 PDU Configuration for Home Assistant
+# Device IP: 192.168.1.28
+# SNMP Version: v1
+# Community: 5stream
+# Device Label: cAPC3
+
+# Base OID Reference:
+# APC Enterprise: .1.3.6.1.4.1.318
+# MasterSwitch: .1.3.6.1.4.1.318.1.1.4
+# OutletControl: .1.3.6.1.4.1.318.1.1.4.4
+# OutletConfig: .1.3.6.1.4.1.318.1.1.4.5
+
+sensor:
+  # PDU Identification
+  - platform: snmp
+    name: "cAPC3 Hardware Revision"
+    unique_id: apc_pdu_capc3_hardware_revision
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.1.1.0
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Firmware Revision"
+    unique_id: apc_pdu_capc3_firmware_revision
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.1.2.0
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Model Number"
+    unique_id: apc_pdu_capc3_model_number
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.1.4.0
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Serial Number"
+    unique_id: apc_pdu_capc3_serial_number
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.1.5.0
+    version: "1"
+
+  # Number of outlets
+  - platform: snmp
+    name: "cAPC3 Outlet Count"
+    unique_id: apc_pdu_capc3_outlet_count
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.1.0
+    version: "1"
+
+  # Outlet 1 Status
+  - platform: snmp
+    name: "cAPC3 Outlet 1 Name"
+    unique_id: apc_pdu_capc3_outlet_1_name
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.4.1
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Outlet 1 Status"
+    unique_id: apc_pdu_capc3_outlet_1_status
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.1
+    version: "1"
+    value_template: >
+      {% if value == '1' %}On
+      {% elif value == '2' %}Off
+      {% elif value == '3' %}Rebooting
+      {% else %}Unknown{% endif %}
+
+  # Outlet 2 Status
+  - platform: snmp
+    name: "cAPC3 Outlet 2 Name"
+    unique_id: apc_pdu_capc3_outlet_2_name
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.4.2
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Outlet 2 Status"
+    unique_id: apc_pdu_capc3_outlet_2_status
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.2
+    version: "1"
+    value_template: >
+      {% if value == '1' %}On
+      {% elif value == '2' %}Off
+      {% elif value == '3' %}Rebooting
+      {% else %}Unknown{% endif %}
+
+  # Outlet 3 Status
+  - platform: snmp
+    name: "cAPC3 Outlet 3 Name"
+    unique_id: apc_pdu_capc3_outlet_3_name
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.4.3
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Outlet 3 Status"
+    unique_id: apc_pdu_capc3_outlet_3_status
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.3
+    version: "1"
+    value_template: >
+      {% if value == '1' %}On
+      {% elif value == '2' %}Off
+      {% elif value == '3' %}Rebooting
+      {% else %}Unknown{% endif %}
+
+  # Outlet 4 Status
+  - platform: snmp
+    name: "cAPC3 Outlet 4 Name"
+    unique_id: apc_pdu_capc3_outlet_4_name
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.4.4
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Outlet 4 Status"
+    unique_id: apc_pdu_capc3_outlet_4_status
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.4
+    version: "1"
+    value_template: >
+      {% if value == '1' %}On
+      {% elif value == '2' %}Off
+      {% elif value == '3' %}Rebooting
+      {% else %}Unknown{% endif %}
+
+  # Outlet 5 Status
+  - platform: snmp
+    name: "cAPC3 Outlet 5 Name"
+    unique_id: apc_pdu_capc3_outlet_5_name
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.4.5
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Outlet 5 Status"
+    unique_id: apc_pdu_capc3_outlet_5_status
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.5
+    version: "1"
+    value_template: >
+      {% if value == '1' %}On
+      {% elif value == '2' %}Off
+      {% elif value == '3' %}Rebooting
+      {% else %}Unknown{% endif %}
+
+  # Outlet 6 Status
+  - platform: snmp
+    name: "cAPC3 Outlet 6 Name"
+    unique_id: apc_pdu_capc3_outlet_6_name
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.4.6
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Outlet 6 Status"
+    unique_id: apc_pdu_capc3_outlet_6_status
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.6
+    version: "1"
+    value_template: >
+      {% if value == '1' %}On
+      {% elif value == '2' %}Off
+      {% elif value == '3' %}Rebooting
+      {% else %}Unknown{% endif %}
+
+  # Outlet 7 Status
+  - platform: snmp
+    name: "cAPC3 Outlet 7 Name"
+    unique_id: apc_pdu_capc3_outlet_7_name
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.4.7
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Outlet 7 Status"
+    unique_id: apc_pdu_capc3_outlet_7_status
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.7
+    version: "1"
+    value_template: >
+      {% if value == '1' %}On
+      {% elif value == '2' %}Off
+      {% elif value == '3' %}Rebooting
+      {% else %}Unknown{% endif %}
+
+  # Outlet 8 Status
+  - platform: snmp
+    name: "cAPC3 Outlet 8 Name"
+    unique_id: apc_pdu_capc3_outlet_8_name
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.4.8
+    version: "1"
+    
+  - platform: snmp
+    name: "cAPC3 Outlet 8 Status"
+    unique_id: apc_pdu_capc3_outlet_8_status
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.8
+    version: "1"
+    value_template: >
+      {% if value == '1' %}On
+      {% elif value == '2' %}Off
+      {% elif value == '3' %}Rebooting
+      {% else %}Unknown{% endif %}
+
+# Outlet Control Switches
+switch:
+  # Outlet 1 Control
+  - platform: snmp
+    name: "cAPC3 Outlet 1"
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.1
+    version: "1"
+    payload_on: 1
+    payload_off: 2
+    
+  # Outlet 2 Control
+  - platform: snmp
+    name: "cAPC3 Outlet 2"
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.2
+    version: "1"
+    payload_on: 1
+    payload_off: 2
+    
+  # Outlet 3 Control
+  - platform: snmp
+    name: "cAPC3 Outlet 3"
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.3
+    version: "1"
+    payload_on: 1
+    payload_off: 2
+    
+  # Outlet 4 Control
+  - platform: snmp
+    name: "cAPC3 Outlet 4"
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.4
+    version: "1"
+    payload_on: 1
+    payload_off: 2
+    
+  # Outlet 5 Control
+  - platform: snmp
+    name: "cAPC3 Outlet 5"
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.5
+    version: "1"
+    payload_on: 1
+    payload_off: 2
+    
+  # Outlet 6 Control
+  - platform: snmp
+    name: "cAPC3 Outlet 6"
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.6
+    version: "1"
+    payload_on: 1
+    payload_off: 2
+    
+  # Outlet 7 Control
+  - platform: snmp
+    name: "cAPC3 Outlet 7"
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.7
+    version: "1"
+    payload_on: 1
+    payload_off: 2
+    
+  # Outlet 8 Control
+  - platform: snmp
+    name: "cAPC3 Outlet 8"
+    host: 192.168.1.28
+    community: 5stream
+    baseoid: .1.3.6.1.4.1.318.1.1.4.4.2.1.3.8
+    version: "1"
+    payload_on: 1
+    payload_off: 2
+
+# Master Control Button (for all outlets)
+# Note: You can create automations to use OID .1.3.6.1.4.1.318.1.1.4.2.1.0
+# Values: 1=turnAllOnNow, 2=turnAllOnSequence, 3=turnAllOffNow, 
+#         4=rebootAllNow, 5=rebootAllSequence
+
+# IMPORTANT NOTES:
+# 1. The AP7920 with this MIB version does not support individual outlet power metering
+# 2. If your PDU has fewer or more than 8 outlets, adjust the configuration accordingly
+# 3. First check how many outlets you have by querying: .1.3.6.1.4.1.318.1.1.4.4.1.0
+# 4. For power metering, you may need a newer PDU model (AP79xx series with metering)
+#    or check if there's a firmware update that adds power monitoring OIDs

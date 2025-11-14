@@ -1,0 +1,48 @@
+alias: Cheap Electricity Indicator
+description: Toggle cheap_leccy helper when price is <= 50% of average
+triggers:
+  - trigger: state
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+  - trigger: state
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+    attribute: raw_today
+  - trigger: state
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+    attribute: raw_tomorrow
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025',
+              'raw_today') or [] %}
+              {% set tomorrow = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025',
+              'raw_tomorrow') or [] %}
+              {% set slots = today + tomorrow %}
+              {% set ns = namespace(total=0, count=0) %}
+              {% for slot in slots %}
+                {% if slot is mapping and 'value' in slot %}
+                  {% set price = slot['value'] | float(0) %}
+                  {% set ns.total = ns.total + price %}
+                  {% set ns.count = ns.count + 1 %}
+                {% endif %}
+              {% endfor %}
+              {% if ns.count == 0 %}
+                {{ false }}
+              {% else %}
+                {% set avg_price = ns.total / ns.count %}
+                {% set current = states('sensor.nordpool_kwh_se4_sek_3_10_025') |
+                float(0) %}
+                {{ current <= (avg_price / 2) }}
+              {% endif %}
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.cheap_leccy
+    default:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.cheap_leccy
+mode: single
+

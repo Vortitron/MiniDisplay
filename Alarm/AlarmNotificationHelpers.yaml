@@ -1,0 +1,18 @@
+input_text:
+  minidisplay_notification_registry:
+    name: MiniDisplay Notification Registry
+    icon: mdi:database
+    max: 255
+  minidisplay_notification_ids:
+    name: MiniDisplay Notification IDs
+    icon: mdi:alarm-light
+    max: 255
+  minidisplay_notification_titles:
+    name: MiniDisplay Notification Titles
+    icon: mdi:alarm-light
+    max: 255
+  minidisplay_notification_messages:
+    name: MiniDisplay Notification Messages
+    icon: mdi:alarm-light
+    max: 255
+

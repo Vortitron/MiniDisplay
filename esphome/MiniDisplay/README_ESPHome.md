@@ -103,12 +103,19 @@ esphome run minidisplay.yaml
 - Supports up to 2 simultaneous connections
 - Enables control of BTLE devices through Home Assistant
 
+### Alarm Notifications and LED Alerts
+- Active Home Assistant persistent notifications appear as individual screens after the standard entity list.
+- Each notification is queried directly from Home Assistant, so title and message are always current.
+- Rotate to choose a notification; push the encoder to dismiss it immediately.
+- `input_select.alarm_level` drives the onboard LED behaviour: steady on (OK), single 300 ms flash every minute (Notify), double flash every 15 seconds (Take Action), and continuous quick flashing (Emergency).
+- Notification IDs flow through `input_text.minidisplay_notification_ids` (comma-separated list, 255 char limit).
+
 ## Control Mapping
 
 | Control | Function |
 |---------|----------|
 | **Rotary Encoder** | Adjust brightness (lights) / volume (media) / temperature (climate) |
-| **Encoder Push** | Toggle entity on/off |
+| **Encoder Push** | Toggle entity on/off or dismiss the selected notification |
 | **Button** | Adjust values in larger increments |
 | **Back Button** | Cycle colors (lights) / cycle TV sources (media) / toggle (hot water) |
 | **Left Button** | Switch between entities |
