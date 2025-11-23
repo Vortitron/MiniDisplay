@@ -1,0 +1,77 @@
+alias: Mama Bedroom Smart Heating
+description: Dynamic heating based on time, occupancy (media player), and electricity prices
+triggers:
+  - trigger: state
+    entity_id: input_number.electricity_price_rank
+  - trigger: state
+    entity_id: media_player.ceol_piccolo
+  - trigger: time
+    at: "04:00:00"
+    id: morning_preheat
+  - trigger: time
+    at: "09:00:00"
+    id: daytime_start
+  - trigger: time
+    at: "22:00:00"
+    id: night_start
+  - trigger: homeassistant
+    event: start
+conditions: []
+actions:
+  - variables:
+      # Check if media player is on (someone is in the room)
+      media_playing: >-
+        {{ states('media_player.ceol_piccolo') in ['playing', 'on', 'idle'] }}
+      # Current hour for time-based logic
+      current_hour: "{{ now().hour }}"
+      # Electricity price rank (0=cheapest, 4=most expensive)
+      price_rank: "{{ states('input_number.electricity_price_rank') | int(99) }}"
+      # Calculate target temperature
+      target_temp: >-
+        {% set hour = now().hour %}
+        {% set media_on = states('media_player.ceol_piccolo') in ['playing', 'on', 'idle'] %}
+        {% set rank = states('input_number.electricity_price_rank') | int(99) %}
+        
+        {# Night period (22:00-04:00): Base 16C #}
+        {% if hour >= 22 or hour < 4 %}
+          16
+        
+        {# Morning preheat (04:00-09:00): 22C base, drop with price rank #}
+        {% elif hour >= 4 and hour < 9 %}
+          {% if rank == 0 %}
+            22
+          {% elif rank == 1 %}
+            21
+          {% elif rank == 2 %}
+            20
+          {% elif rank == 3 %}
+            19
+          {% else %}
+            18
+          {% endif %}
+        
+        {# Daytime (09:00-22:00): 14C base, boost if media playing #}
+        {% else %}
+          {% if media_on %}
+            {# Someone in room - at least 17C, higher if cheap #}
+            {% if rank == 0 %}
+              20
+            {% elif rank == 1 %}
+              19
+            {% elif rank == 2 %}
+              18
+            {% else %}
+              17
+            {% endif %}
+          {% else %}
+            {# Empty room during day #}
+            14
+          {% endif %}
+        {% endif %}
+  - action: climate.set_temperature
+    target:
+      entity_id: climate.mama_bedroom_thermostat
+    data:
+      temperature: "{{ target_temp }}"
+mode: restart
+

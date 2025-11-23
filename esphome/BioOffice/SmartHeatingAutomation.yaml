@@ -1,0 +1,145 @@
+alias: Bio Office Smart Heating
+description: Dynamic heating based on schedule, occupancy, and electricity prices
+triggers:
+  - trigger: state
+    entity_id: input_number.electricity_price_rank
+  - trigger: state
+    entity_id: input_datetime.bio_office_occupancy_time
+  - trigger: event
+    event_type: esphome.bio_office_occupancy_button_pressed
+  - trigger: time
+    at: "17:00:00"
+    id: end_daytime_occupancy
+  - trigger: time
+    at: "23:00:00"
+    id: end_evening_occupancy
+  - trigger: state
+    entity_id: sensor.lyeklint_hancock_felix_needs_preparation_today_2
+    attribute: needs_preparation
+  - trigger: homeassistant
+    event: start
+conditions: []
+actions:
+  - variables:
+      # Determine if today is a "weekend" (actual weekend or no prep needed)
+      is_weekend: >-
+        {% set day_of_week = now().weekday() %}
+        {% set needs_prep = state_attr('sensor.lyeklint_hancock_felix_needs_preparation_today_2', 'needs_preparation') %}
+        {{ day_of_week >= 5 or needs_prep == false }}
+      # Base temperature: 16C weekend, 10C weekday
+      base_temp: >-
+        {% set day_of_week = now().weekday() %}
+        {% set needs_prep = state_attr('sensor.lyeklint_hancock_felix_needs_preparation_today_2', 'needs_preparation') %}
+        {% if day_of_week >= 5 or needs_prep == false %}
+          16
+        {% else %}
+          10
+        {% endif %}
+      # Check if currently in occupancy period
+      occupancy_active: >-
+        {% set press_time = states('input_datetime.bio_office_occupancy_time') %}
+        {% if press_time in ['unknown', 'unavailable', ''] %}
+          false
+        {% else %}
+          {% set pressed = as_timestamp(press_time) %}
+          {% if pressed is none %}
+            false
+          {% else %}
+            {% set now_ts = as_timestamp(now()) %}
+            {% set press_day = pressed | timestamp_custom('%Y-%m-%d', True) %}
+            {% set current_day = now_ts | timestamp_custom('%Y-%m-%d', True) %}
+            {% if press_day != current_day %}
+              false
+            {% else %}
+              {% set press_hour = pressed | timestamp_custom('%H') | int %}
+              
+              {# Pressed before 17:00 - stay until 17:00 #}
+              {% if press_hour < 17 %}
+                {% set end_time = today_at('17:00') | as_timestamp %}
+                {{ now_ts < end_time and (now_ts - pressed) < 86400 }}
+              
+              {# Pressed 17:00-22:59 - stay until 23:00 #}
+              {% elif press_hour < 23 %}
+                {% set end_time = today_at('23:00') | as_timestamp %}
+                {{ now_ts < end_time and (now_ts - pressed) < 43200 }}
+              
+              {# Pressed after 23:00 - continue normal cycle (no occupancy hold) #}
+              {% else %}
+                false
+              {% endif %}
+            {% endif %}
+          {% endif %}
+        {% endif %}
+      # Calculate temperature with price rank boost
+      target_temp: >-
+        {% set day_of_week = now().weekday() %}
+        {% set needs_prep = state_attr('sensor.lyeklint_hancock_felix_needs_preparation_today_2', 'needs_preparation') %}
+        {% if day_of_week >= 5 or needs_prep == false %}
+          {% set base = 16 %}
+        {% else %}
+          {% set base = 10 %}
+        {% endif %}
+        
+        {% set press_time = states('input_datetime.bio_office_occupancy_time') %}
+        {% set occupied = false %}
+        {% if press_time not in ['unknown', 'unavailable', ''] %}
+          {% set pressed = as_timestamp(press_time) %}
+          {% if pressed is not none %}
+            {% set now_ts = as_timestamp(now()) %}
+            {% set press_day = pressed | timestamp_custom('%Y-%m-%d', True) %}
+            {% set current_day = now_ts | timestamp_custom('%Y-%m-%d', True) %}
+            {% if press_day == current_day %}
+              {% set press_hour = pressed | timestamp_custom('%H') | int %}
+              
+              {% if press_hour < 17 %}
+                {% set end_time = today_at('17:00') | as_timestamp %}
+                {% set occupied = now_ts < end_time and (now_ts - pressed) < 86400 %}
+              {% elif press_hour < 23 %}
+                {% set end_time = today_at('23:00') | as_timestamp %}
+                {% set occupied = now_ts < end_time and (now_ts - pressed) < 43200 %}
+              {% endif %}
+            {% endif %}
+          {% endif %}
+        {% endif %}
+        
+        {% set current_hour = now().hour %}
+        
+        {% if occupied %}
+          19
+        {% elif current_hour >= 17 %}
+          10
+        {% else %}
+          {% set rank = states('input_number.electricity_price_rank') | int(99) %}
+          {% if rank == 0 %}
+            {{ base + 4 }}
+          {% elif rank == 1 %}
+            {{ base + 3 }}
+          {% elif rank == 2 %}
+            {{ base + 2 }}
+          {% elif rank == 3 %}
+            {{ base + 1 }}
+          {% else %}
+            {{ base }}
+          {% endif %}
+        {% endif %}
+  - action: climate.set_temperature
+    target:
+      entity_id: climate.bio_office_heat
+    data:
+      temperature: "{{ target_temp }}"
+  - choose:
+      # LED ON when NOT at 19C
+      - conditions:
+          - condition: template
+            value_template: "{{ target_temp | int != 19 }}"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: light.bioofficec3_occupancy_status_led
+    default:
+      # LED OFF when at 19C
+      - action: light.turn_off
+        target:
+          entity_id: light.bioofficec3_occupancy_status_led
+mode: single
+

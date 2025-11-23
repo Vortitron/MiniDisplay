@@ -39,8 +39,15 @@ Both sensors are mounted in the same box at the path's midpoint, pointing in opp
 |-------------|--------------|----------|
 | VCC         | 5V           | Power (5V) |
 | GND         | GND          | Ground |
-| TX          | GPIO9        | Data from sensor to ESP32 |
-| RX          | GPIO8        | Data from ESP32 to sensor |
+| TX          | GPIO7        | Data from sensor to ESP32 |
+| RX          | GPIO6        | Data from ESP32 to sensor |
+
+### TEMT6000 Light Sensor Connections
+| TEMT6000 Pin | ESP32-C3 Pin | Function |
+|--------------|--------------|----------|
+| VCC          | 5V           | Power (5V) |
+| GND          | GND          | Ground |
+| OUT (SIG)    | GPIO0        | Analog output to ESP32 |
 
 ## Important Notes
 
@@ -50,10 +57,14 @@ Both sensors are mounted in the same box at the path's midpoint, pointing in opp
 
 3. **Pin Usage**: 
    - GPIO20/21: Sensor 1 (UART0)
-   - GPIO8/9: Sensor 2 (UART1)
-   - These pins are now dedicated to the sensors and cannot be used for other purposes.
+   - GPIO6/7: Sensor 2 (UART1)
+   - GPIO0: TEMT6000 light sensor (ADC)
+   - GPIO8: Onboard blue LED (person indicator)
+   - GPIO2/4/5/9/10 remain available for expansion
 
 4. **Bluetooth Proxy**: The Bluetooth proxy feature is still active and will work alongside the sensors.
+
+5. **Onboard LED person indicator**: The blue LED on the ESP32-C3-DevKitM-1 (GPIO8) automatically lights when `Path Person Detected` is active, giving you a quick visual confirmation that the sensors are working.
 
 ## Features
 
@@ -139,6 +150,22 @@ This means:
 - Updates every 15 seconds when no person is detected
 - Uses smoothed values (not raw) to avoid chasing spikes
 - Visible in Home Assistant as "Sensor 1/2 Baseline" sensors
+
+### Light sensing & darkness trigger
+
+- TEMT6000 module feeds a raw voltage sensor (`Light Level Voltage`) so you can confirm whether the ADC ever leaves 3.3 V or is saturating.
+- A derived template sensor (`Light Level`) converts that value into 0‑100 % which feeds the `Path Is Dark` binary sensor.
+- The **Darkness Threshold** helper now works in percentages (0‑100 %) and still persists across reboots, making it easier to tune dusk/dawn behaviour.
+- Raw readings are logged at debug level (`light_sensor` tag) every two seconds to help diagnose wiring or saturation issues.
+
+### Automatic gate calibration
+
+- **Purpose:** keeps all nine motion-gate thresholds per sensor just above the current background energy so you can run maximum sensitivity without babysitting the sliders.
+- **How it runs now:** the scheduler checks every 20 minutes. It only proceeds if no live targets are detected, the rolling **Detection Activity Score** exceeds the **Gate Activity Threshold** (defaults: score ≥ 6 events), or it has been at least four hours since the last successful run. This means windy/rainy bursts trigger quick recalibration, while quiet nights leave the gates untouched.
+- **Step limiting:** every gate change is clamped by **Gate Max Step** (default 5 pp) so even if calibration runs while someone is on the path, the firmware only nudges the LD2410 thresholds a few percent and converges gradually.
+- **Adjustments:** the **Gate Sensitivity Margin**, **Gate Activity Threshold**, and **Gate Max Step** numbers in Home Assistant expose all the tuning knobs. Set a lower activity threshold if you want recalibrations to happen with fewer spurious detections, or lower the step limit for ultra-conservative adjustments.
+- **Visibility:** `sensor.frontpath_detection_activity_score` mirrors the internal score (increments per detection, decays every 30 s) so you can see why a calibration did or didn’t fire. Logs announce whether a run was skipped (movement/quiet) or capped by the step limiter.
+- **Scope:** only the *Motion Energy Gate 0–8* numbers are auto-tuned so you still retain manual control of static thresholds if you need them extra conservative outdoors. The existing **Recalibrate Gate Thresholds** button still forces an immediate run irrespective of the activity score.
 
 **Detection logic** (adaptive thresholds above baseline):
 - **Energy > baseline + 30%**: Immediate detection (strong spike = definitely person)

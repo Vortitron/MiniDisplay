@@ -1,0 +1,844 @@
+esphome:
+  name: bedroomlights
+  friendly_name: BedroomLights
+  on_boot:
+    priority: -100
+    then:
+      - output.turn_off: button_led_output
+      - lambda: |-
+          id(led_pulse_active) = false;
+          id(sensors_ready) = false;
+      - script.stop: pulse_led
+      - logger.log: "Boot complete, LED disabled until sensors ready"
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "R5ce2+sAWu+P64UfkenRwn2nVHHSHXP5v4hd8oSQ2Ao="
+  on_client_connected:
+    - delay: 3s
+    - lambda: |-
+        ESP_LOGD("api", "Marking sensors as ready");
+        id(sensors_ready) = true;
+    - script.execute: update_button_led_smart
+
+ota:
+  - platform: esphome
+    password: "3743fce26550feb4b84274ac957685ca"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  reboot_timeout: 0s
+  manual_ip:
+    static_ip: 192.168.1.38
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+  output_power: 8.5dB
+
+# Bluetooth Proxy (extends HA BLE range)
+bluetooth_proxy:
+  active: true
+
+# Time component for sunrise/sunset
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# GPIO Button Configuration
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO8
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Light Control Button"
+    id: light_button
+    filters:
+      - delayed_on: 40ms
+      - delayed_off: 40ms
+    on_press:
+      then:
+        - lambda: |-
+            id(button_press_time) = millis();
+            ESP_LOGD("button", "Button pressed at %u ms", id(button_press_time));
+        - script.execute: start_hold_dim
+    on_release:
+      then:
+        - lambda: |-
+            uint32_t press_duration = millis() - id(button_press_time);
+            ESP_LOGD("button", "Button released after %u ms", press_duration);
+            
+            if (press_duration >= 600) {
+              // Long press - handle hold action
+              ESP_LOGD("button", "Hold action");
+            } else {
+              // Short press - handle based on phase
+              if (id(control_phase)) {
+                // Control phase tap - detection handled in script
+                ESP_LOGD("button", "Tap in control phase");
+              } else {
+                // Selection phase - single press cycles lights
+                ESP_LOGD("button", "Single press in selection phase");
+                id(last_press_time) = 0;  // Not used in selection phase
+              }
+            }
+        - if:
+            condition:
+              lambda: 'return (millis() - id(button_press_time)) >= 600;'
+            then:
+              - logger.log: "Hold end - no tap action"
+            else:
+              - if:
+                  condition:
+                    lambda: 'return id(control_phase);'
+                  then:
+                    - script.execute: handle_control_phase_press
+                  else:
+                    - script.execute: handle_selection_phase_press
+  
+  # Home Assistant sensors for smart LED features
+  - platform: homeassistant
+    id: mama_mobile_charging
+    entity_id: binary_sensor.mama_s_mobile_is_charging
+    internal: true
+    on_state:
+      - script.execute: update_button_led_smart
+
+sensor:
+  - platform: homeassistant
+    id: mama_notification_count
+    entity_id: sensor.mama_s_mobile_active_notification_count
+    internal: true
+    on_value_range:
+      - above: 0.5
+        then:
+          - script.execute: update_button_led_smart
+      - below: 0.5
+        then:
+          - script.execute: update_button_led_smart
+
+# Button LED with PWM dimming
+output:
+  - platform: ledc
+    pin: GPIO9
+    id: button_led_output
+    frequency: 1000Hz
+
+# Global variables to track state
+globals:
+  - id: press_sequence_state
+    type: int
+    restore_value: no
+    initial_value: '0'  # 0=both off, 1=stand only, 2=both on, 3=bedroom_light only
+  - id: brightness_level
+    type: int
+    restore_value: no
+    initial_value: '0'  # 0=low, 1=medium, 2=high
+  - id: colour_index
+    type: int
+    restore_value: no
+    initial_value: '0'  # Tracks current colour (0-9: 4 kelvin + 6 RGB)
+  - id: led_pulse_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'  # Whether LED should pulse for notifications
+  - id: led_target_brightness
+    type: float
+    restore_value: no
+    initial_value: '0.1'  # Target brightness for LED
+  - id: sensors_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'  # Prevent LED updates until sensors are ready
+  - id: control_phase
+    type: bool
+    restore_value: no
+    initial_value: 'false'  # false=selection phase, true=control phase
+  - id: last_press_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'  # For double-tap detection in control phase
+  - id: button_press_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'  # Track when button was pressed
+  - id: hold_brightness
+    type: int
+    restore_value: no
+    initial_value: '170'  # Start mid brightness for holds
+  - id: dim_increasing
+    type: bool
+    restore_value: no
+    initial_value: 'true'  # Hold ramp direction
+
+script:
+  # Start hold dimming after 600ms if still pressed
+  - id: start_hold_dim
+    mode: restart
+    then:
+      - delay: 600ms
+      - if:
+          condition:
+            binary_sensor.is_on: light_button
+          then:
+            - script.execute: hold_dim_loop
+
+  # Continuous dim loop while button is held (smooth ramp up/down)
+  - id: hold_dim_loop
+    mode: restart
+    then:
+      - while:
+          condition:
+            binary_sensor.is_on: light_button
+          then:
+            - lambda: |-
+                // Adjust brightness
+                const int step = 10;           // step size (0-255)
+                const int min_b = 10;          // avoid complete off
+                const int max_b = 255;
+
+                int b = id(hold_brightness);
+                if (id(dim_increasing)) {
+                  b += step;
+                  if (b >= max_b) { b = max_b; id(dim_increasing) = false; }
+                } else {
+                  b -= step;
+                  if (b <= min_b) { b = min_b; id(dim_increasing) = true; }
+                }
+                id(hold_brightness) = b;
+                ESP_LOGD("button", "Hold dim brightness -> %d", b);
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 2 || id(press_sequence_state) == 3;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        brightness: !lambda 'return id(hold_brightness);'
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 1 || id(press_sequence_state) == 2;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        brightness: !lambda 'return id(hold_brightness);'
+            - delay: 120ms
+  # Selection phase: cycle through light states
+  - id: handle_selection_phase_press
+    then:
+      - lambda: |-
+          int state = id(press_sequence_state);
+          id(press_sequence_state) = (state + 1) % 4;
+          ESP_LOGD("button", "Selection phase: cycling to state %d", id(press_sequence_state));
+      - if:
+          condition:
+            lambda: 'return id(press_sequence_state) == 1;'
+          then:
+            - logger.log: "Turning ON light.bedroom_light_stand"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light_stand
+      - if:
+          condition:
+            lambda: 'return id(press_sequence_state) == 2;'
+          then:
+            - logger.log: "Turning ON light.bedroom_light"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light
+      - if:
+          condition:
+            lambda: 'return id(press_sequence_state) == 3;'
+          then:
+            - logger.log: "Turning OFF light.bedroom_light_stand"
+            - homeassistant.service:
+                service: light.turn_off
+                data:
+                  entity_id: light.bedroom_light_stand
+      - if:
+          condition:
+            lambda: 'return id(press_sequence_state) == 0;'
+          then:
+            - logger.log: "Turning OFF light.bedroom_light"
+            - homeassistant.service:
+                service: light.turn_off
+                data:
+                  entity_id: light.bedroom_light
+      # Set LED to full bright and restart 3-second timer
+      - script.stop: pulse_led
+      - lambda: |-
+          id(led_pulse_active) = false;
+      - output.set_level:
+          id: button_led_output
+          level: 100%
+      - script.execute: start_control_phase_timer
+  
+  # Control phase: handle press with double-tap detection  
+  - id: handle_control_phase_press
+    mode: restart
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          uint32_t time_since_last = now - id(last_press_time);
+          bool is_double_tap = (time_since_last < 1200 && id(last_press_time) > 0);
+          
+          ESP_LOGD("button", "Control phase press: time_since_last=%u, is_double_tap=%d", time_since_last, is_double_tap);
+          
+          if (is_double_tap) {
+            // Double tap detected - execute colour change immediately
+            ESP_LOGD("button", "Double tap confirmed!");
+            id(last_press_time) = 0;  // Reset
+          } else {
+            // First tap - mark the time
+            id(last_press_time) = now;
+          }
+      - if:
+          condition:
+            lambda: 'return id(last_press_time) == 0;'  # Was just reset = double tap
+          then:
+            # Double tap - change colour
+            - logger.log: "Double tap action - cycling colour"
+            - script.execute: cycle_bedroom_light_colour
+          else:
+            # Wait 1.2s to see if another press comes (this script will restart if it does)
+            - delay: 1200ms
+            # If we're still here, it was a single tap
+            - logger.log: "Single tap action - turning off all lights"
+            - logger.log: "Turning OFF light.bedroom_light (control phase)"
+            - homeassistant.service:
+                service: light.turn_off
+                data:
+                  entity_id: light.bedroom_light
+            - logger.log: "Turning OFF light.bedroom_light_stand (control phase)"
+            - homeassistant.service:
+                service: light.turn_off
+                data:
+                  entity_id: light.bedroom_light_stand
+            - lambda: |-
+                id(press_sequence_state) = 0;
+                id(control_phase) = false;
+                id(last_press_time) = 0;
+            - script.execute: update_button_led
+
+  # Timer to enter control phase after 3 seconds
+  - id: start_control_phase_timer
+    mode: restart
+    then:
+      - delay: 3s
+      - lambda: |-
+          ESP_LOGD("button", "Entering control phase");
+          id(control_phase) = true;
+          id(last_press_time) = 0;
+      - script.execute: update_button_led
+  
+  # Handle hold action (fade/dim)
+  - id: handle_hold
+    then:
+      - logger.log: "Hold action - cycling brightness"
+      - script.execute: cycle_brightness
+
+  # Cycle brightness for lights that are on
+  - id: cycle_brightness
+    mode: restart
+    then:
+      - lambda: |-
+          id(brightness_level) = (id(brightness_level) + 1) % 3;
+          int brightness = 85;  // Low
+          if (id(brightness_level) == 1) {
+            brightness = 170;  // Medium
+          } else if (id(brightness_level) == 2) {
+            brightness = 255;  // High
+          }
+          ESP_LOGD("button", "Setting brightness to %d", brightness);
+      - if:
+          condition:
+            lambda: 'return id(press_sequence_state) == 2 || id(press_sequence_state) == 3;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light
+                  brightness: !lambda 'return id(brightness_level) == 0 ? 85 : (id(brightness_level) == 1 ? 170 : 255);'
+      - if:
+          condition:
+            lambda: 'return id(press_sequence_state) == 1 || id(press_sequence_state) == 2;'
+          then:
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light_stand
+                  brightness: !lambda 'return id(brightness_level) == 0 ? 85 : (id(brightness_level) == 1 ? 170 : 255);'
+      # Continue holding cycles brightness
+      - while:
+          condition:
+            binary_sensor.is_on: light_button
+          then:
+            - delay: 1s
+            - if:
+                condition:
+                  binary_sensor.is_on: light_button
+                then:
+                  - lambda: |-
+                      id(brightness_level) = (id(brightness_level) + 1) % 3;
+                      int brightness = 85;
+                      if (id(brightness_level) == 1) {
+                        brightness = 170;
+                      } else if (id(brightness_level) == 2) {
+                        brightness = 255;
+                      }
+                      ESP_LOGD("button", "Cycling brightness to %d", brightness);
+                  - if:
+                      condition:
+                        lambda: 'return id(press_sequence_state) == 2 || id(press_sequence_state) == 3;'
+                      then:
+                        - homeassistant.service:
+                            service: light.turn_on
+                            data:
+                              entity_id: light.bedroom_light
+                              brightness: !lambda 'return id(brightness_level) == 0 ? 85 : (id(brightness_level) == 1 ? 170 : 255);'
+                  - if:
+                      condition:
+                        lambda: 'return id(press_sequence_state) == 1 || id(press_sequence_state) == 2;'
+                      then:
+                        - homeassistant.service:
+                            service: light.turn_on
+                            data:
+                              entity_id: light.bedroom_light_stand
+                              brightness: !lambda 'return id(brightness_level) == 0 ? 85 : (id(brightness_level) == 1 ? 170 : 255);'
+
+  # Cycle colour for bedroom lights (smart syncing)
+  - id: cycle_bedroom_light_colour
+    then:
+      - lambda: |-
+          int state = id(press_sequence_state);
+          // State 1: only stand is on (cycle kelvin only: 0-3)
+          // State 2: both on (cycle kelvin only: 0-3, stand stays in sync)
+          // State 3: only bedroom_light on (cycle all: 0-3 kelvin + 4-9 RGB)
+          if (state == 1 || state == 2) {
+            // Stand on or both on - cycle kelvin only (0-3)
+            id(colour_index) = (id(colour_index) + 1) % 4;
+          } else if (state == 3) {
+            // Only bedroom_light on - cycle full range including RGB
+            id(colour_index) = (id(colour_index) + 1) % 10;
+          }
+          ESP_LOGD("button", "Cycling to colour index %d (state=%d)", id(colour_index), state);
+      # Colour 0: Candle (1900K) - All states
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 0;'
+          then:
+            - logger.log: "Color 0: Candle 1900K"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 1;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        kelvin: "1900"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 2;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        kelvin: "1900"
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        kelvin: "1900"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 3;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        kelvin: "1900"
+      # Colour 1: Warm White (2700K) - All states
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 1;'
+          then:
+            - logger.log: "Color 1: Warm White 2700K"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 1;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        kelvin: "2700"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 2;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        kelvin: "2700"
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        kelvin: "2700"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 3;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        kelvin: "2700"
+      # Colour 2: Neutral (3500K) - All states
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 2;'
+          then:
+            - logger.log: "Color 2: Neutral 3500K"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 1;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        kelvin: "3500"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 2;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        kelvin: "3500"
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        kelvin: "3500"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 3;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        kelvin: "3500"
+      # Colour 3: Daylight (6500K) - All states
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 3;'
+          then:
+            - logger.log: "Color 3: Daylight 6500K"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 1;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        kelvin: "6500"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 2;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        kelvin: "6500"
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light_stand
+                        kelvin: "6500"
+            - if:
+                condition:
+                  lambda: 'return id(press_sequence_state) == 3;'
+                then:
+                  - homeassistant.service:
+                      service: light.turn_on
+                      data:
+                        entity_id: light.bedroom_light
+                        kelvin: "6500"
+      # Colour 4: Red (RGB - State 3 only)
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 4 && id(press_sequence_state) == 3;'
+          then:
+            - logger.log: "Color 4: Red"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light
+                  color_name: red
+      # Colour 5: Orange (RGB - State 3 only)
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 5 && id(press_sequence_state) == 3;'
+          then:
+            - logger.log: "Color 5: Orange"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light
+                  color_name: orange
+      # Colour 6: Purple (RGB - State 3 only)
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 6 && id(press_sequence_state) == 3;'
+          then:
+            - logger.log: "Color 6: Purple"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light
+                  color_name: purple
+      # Colour 7: Blue (RGB - State 3 only)
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 7 && id(press_sequence_state) == 3;'
+          then:
+            - logger.log: "Color 7: Blue"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light
+                  color_name: blue
+      # Colour 8: Green (RGB - State 3 only)
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 8 && id(press_sequence_state) == 3;'
+          then:
+            - logger.log: "Color 8: Green"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light
+                  color_name: green
+      # Colour 9: Pink (RGB - State 3 only)
+      - if:
+          condition:
+            lambda: 'return id(colour_index) == 9 && id(press_sequence_state) == 3;'
+          then:
+            - logger.log: "Color 9: Pink"
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  entity_id: light.bedroom_light
+                  color_name: pink
+
+  # Update button LED brightness based on light states
+  - id: update_button_led
+    then:
+      - script.execute: update_button_led_smart
+  
+  # Smart LED update with phone charging and notification logic
+  - id: update_button_led_smart
+    mode: restart
+    then:
+      - lambda: |-
+          // Don't update LED until sensors are ready
+          if (!id(sensors_ready)) {
+            ESP_LOGD("led", "Sensors not ready yet, skipping LED update");
+            return;
+          }
+          
+          // If we're in selection phase (not control phase), LED stays at 100%
+          if (!id(control_phase)) {
+            ESP_LOGD("led", "Selection phase - LED locked at 100%%");
+            return;
+          }
+          
+          int state = id(press_sequence_state);
+          float base_brightness = 0.0;
+          
+          // Calculate base brightness from light states
+          if (state == 0) {
+            base_brightness = 0.1;  // Both lights off
+          } else if (state == 1 || state == 3) {
+            base_brightness = 0.3;  // One light on
+          } else if (state == 2) {
+            base_brightness = 0.6;  // Both lights on
+          }
+          
+          // Check if it's after sunset and phone is charging (bedtime mode)
+          bool is_bedtime = false;
+          if (id(mama_mobile_charging).state) {
+            auto time = id(ha_time).now();
+            if (time.is_valid()) {
+              int hour = time.hour;
+              // Consider bedtime as 8pm onwards or before 5am
+              if (hour >= 20 || hour < 5) {
+                is_bedtime = true;
+                base_brightness = base_brightness * 0.3;  // Reduce to 30% for bedtime
+                ESP_LOGD("led", "Bedtime mode - phone charging after 8pm");
+              }
+            }
+          }
+          
+          // Check for notifications (but not before 5am)
+          bool has_notifications = false;
+          float notification_value = id(mama_notification_count).state;
+          if (!isnan(notification_value) && notification_value > 0) {
+            auto time = id(ha_time).now();
+            if (time.is_valid() && time.hour >= 5) {
+              has_notifications = true;
+              ESP_LOGD("led", "Notifications detected: %.0f", notification_value);
+            }
+          }
+          
+          // Store the target brightness for pulsing or steady
+          id(led_target_brightness) = base_brightness;
+          
+          if (has_notifications) {
+            // Start pulsing for notifications
+            if (!id(led_pulse_active)) {
+              id(led_pulse_active) = true;
+              ESP_LOGD("led", "Starting notification pulse");
+            }
+          } else {
+            // Stop pulsing and set steady brightness
+            bool was_pulsing = id(led_pulse_active);
+            id(led_pulse_active) = false;
+            if (was_pulsing) {
+              ESP_LOGD("led", "Stopping notification pulse");
+            }
+            id(button_led_output).set_level(base_brightness);
+            ESP_LOGD("led", "Button LED brightness set to %.2f", base_brightness);
+          }
+      - if:
+          condition:
+            lambda: 'return id(led_pulse_active) && id(sensors_ready);'
+          then:
+            - script.execute: pulse_led
+          else:
+            - script.stop: pulse_led
+  
+  # Pulse LED for notifications
+  - id: pulse_led
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(sensors_ready);'
+          then:
+            - logger.log: "Pulse script called before sensors ready - ignoring"
+            - script.stop: pulse_led
+      - while:
+          condition:
+            lambda: 'return id(led_pulse_active) && id(sensors_ready);'
+          then:
+            # Fade up in steps
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.1;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.2;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.3;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.4;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.5;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.6;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.7;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.8;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.9;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 1.0;'
+            - delay: 80ms
+            # Fade down in steps
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.9;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.8;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.7;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.6;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.5;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.4;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.3;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.2;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.1;'
+            - delay: 80ms
+            - output.set_level:
+                id: button_led_output
+                level: !lambda 'return id(led_target_brightness) * 0.0;'
+            - delay: 400ms

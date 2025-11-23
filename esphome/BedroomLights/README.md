@@ -7,6 +7,13 @@ ESP32-C3 SuperMini button controller for bedroom lights with smart LED feedback.
 - **Board**: ESP32-C3 SuperMini
 - **Button**: GPIO8 (switch connects GPIO8 to GND)
 - **LED**: GPIO9 → LED (with resistor) → GND
+- **Environmental sensor (optional)**: AHT20 + BMP280 combo board wired to the I²C bus  
+  - Pin order on sensor (flipped): VDD, SDA, GND, SCL  
+  - `VDD` → 3V3 on the SuperMini (right-hand side)
+  - `SDA` → GPIO21 (right-hand "5-21" side)  
+  - `GND` → jumper wire to any GND pad  
+  - `SCL` → GPIO20 (right-hand "5-21" side)  
+  - **Note**: GPIO0/GPIO1 cannot be used - they're strapping pins that prevent WiFi from initialising
 
 ## Controlled Lights
 
@@ -52,6 +59,12 @@ After 3 seconds of no activity, automatically enters Control Phase where:
 7. **Soft Green** - bedroom_light only, stand stays warm white
 8. **Pink** - bedroom_light only, stand stays warm white
 
+### Per-Light Colour Memory
+
+- `bedroom_light` and `bedroom_light_stand` now persist their most recent colour index (stored in `bedroom_colour_index` / `stand_colour_index` with `restore_value: true`), so toggling a light off/on via the latching switches restores the last hue or kelvin without resetting to 2700K.
+- When both lights are on, the stand automatically holds **Warm White** whilst the RGB light cycles through colour indices 4-9, keeping the room lighting balanced.
+- Cycling colours whilst a light is off leaves its stored index untouched, so you can park `bedroom_light` on pink, turn it off, adjust the stand, and when you next enable the RGB light it will still come back on in pink.
+
 ## Smart LED Feedback
 
 ### Phase-Based Brightness
@@ -77,6 +90,24 @@ When `sensor.mama_s_mobile_active_notification_count` > 0 AND time is after 5am:
 - Respects bedtime dimming if active
 - Stops automatically when notification count returns to 0
 
+### Preconnect Pulse (Disabled)
+
+- The earlier boot/reconnect LED pulsing routine has been removed because it occasionally latched “on” when Home Assistant lagged, leading to distracting flashes.
+- On boot we now simply wait for the usual HA state callbacks; the switches, LEDs and momentary button remain immediately usable.
+
+### Dusk-Friendly Brightness Cap
+
+- `switch_led_day_on_level` sets the maximum indicator brightness (default `1.0` → 100% PWM).
+- Between 18:00 and 06:00 the cap automatically halves to `switch_led_night_on_level` (default `0.5`) so the hallway isn’t flooded with light overnight.
+- Update the substitutions at the top of `BedroomLights.yaml` if you’d like a different day cap or deeper night dimming.
+
+### Pending Command Pulse
+
+- Whenever a latching switch is pressed or released, the firmware compares the requested light state with the latest Home Assistant state.
+- If HA hasn’t reflected the change yet, the corresponding switch LED pulses between `switch_led_pending_low_ratio` (default 35% of the active cap) and the full cap to show that the command is queued.
+- The pulse stops automatically once HA confirms the light has moved, and it also suspends manual LED overrides so the feedback stays truthful.
+- Fast visual feedback reduces the temptation to spam the switches if the light or network takes a moment to respond.
+
 ## Network Configuration
 
 - **Static IP**: 192.168.1.38
@@ -89,6 +120,10 @@ When `sensor.mama_s_mobile_active_notification_count` > 0 AND time is after 5am:
 The device exposes:
 - `binary_sensor.light_control_button` - Button state
 - `light.button_led` - Manual LED control (can override smart behaviour)
+- `sensor.bedroomlights_temperature` (AHT20)
+- `sensor.bedroomlights_humidity` (AHT20)
+- `sensor.bedroomlights_barometric_temperature` (BMP280)
+- `sensor.bedroomlights_pressure` (BMP280)
 
 It subscribes to:
 - `binary_sensor.mama_s_mobile_is_charging` - For bedtime detection
@@ -101,4 +136,11 @@ It subscribes to:
 - LED can be manually controlled via Home Assistant if needed
 - Logging enabled for debugging button behaviour
 - Uses ESP-IDF framework for C3 compatibility
+
+## Switch Reliability Guard
+
+- Both latching switches now route through `command_stand_light` / `command_bedroom_light` scripts so stale commands are dropped instead of being queued.
+- Each switch interaction launches a `guard_*_switch_alignment` script which, for `8 × 500 ms` (currently 4 s), re-checks the Home Assistant light state and re-sends the command if it drifted; both values live in the new `switch_guard_iterations` / `switch_guard_interval` substitutions.
+- Guard activity is logged under the `switch_guard` tag, making it easy to correlate with any observed bounce in the ESPHome logs.
+- Adjust the guard timing via the `substitutions` block at the top of `BedroomLights.yaml` if the hardware ever needs a longer or shorter stabilisation window.
 

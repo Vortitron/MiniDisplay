@@ -1,0 +1,79 @@
+esphome:
+  name: bioofficec3
+  friendly_name: BioOfficeC3
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "rhTI7o9zy213PHa0gn7uSRPnlihPsG+JjhxI2kzE8W0="
+
+ota:
+  - platform: esphome
+    password: "0b8de384f640b091defa00ed3cf3615b"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  reboot_timeout: 0s
+  manual_ip:
+    static_ip: 192.168.1.33
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+  output_power: 8.5dB
+
+# Bluetooth Proxy (extends HA BLE range)
+bluetooth_proxy:
+  active: true
+
+# DHT22 Temperature/Humidity Sensor
+sensor:
+  - platform: dht
+    pin:
+      number: GPIO4
+      mode: INPUT_PULLUP  # Internal pull-up
+    model: DHT11
+    temperature:
+      name: "Room Temperature"
+      id: room_temp
+    humidity:
+      name: "Room Humidity"
+    update_interval: 60s
+
+# Status LED (on when NOT at 19C)
+output:
+  - platform: gpio
+    pin: GPIO6
+    id: status_led_output
+
+light:
+  - platform: binary
+    name: "Occupancy Status LED"
+    id: status_led
+    output: status_led_output
+
+# Occupancy Button
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+      inverted: true
+    name: "Occupancy Button"
+    id: occupancy_button
+    filters:
+      - delayed_on: 50ms  # Debounce
+    on_press:
+      - homeassistant.event:
+          event: esphome.bio_office_occupancy_button_pressed
+          data:
+            device: bioofficec3

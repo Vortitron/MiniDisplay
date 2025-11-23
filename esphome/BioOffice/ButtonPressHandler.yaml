@@ -1,0 +1,14 @@
+alias: Bio Office Button Press Handler
+description: Record button press time when occupancy button is pressed
+triggers:
+  - trigger: event
+    event_type: esphome.bio_office_occupancy_button_pressed
+conditions: []
+actions:
+  - action: input_datetime.set_datetime
+    target:
+      entity_id: input_datetime.bio_office_occupancy_time
+    data:
+      datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+mode: single
+

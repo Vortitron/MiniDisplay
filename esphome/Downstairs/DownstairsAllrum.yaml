@@ -31,6 +31,116 @@ wifi:
 bluetooth_proxy:
   active: true
 
+globals:
+  - id: ld2410_last_seen_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: ld2410_was_missing
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+esp32_ble_tracker:
+  on_ble_advertise:
+    - mac_address: 23:69:7C:F1:5F:83
+      then:
+        - lambda: |-
+            const char *TAG = "ld2410_keepalive";
+            uint32_t now = millis();
+            uint32_t previous = id(ld2410_last_seen_ms);
+            id(ld2410_last_seen_ms) = now;
+            
+            if (id(ld2410_was_missing)) {
+              float minutes_missing = previous == 0 ? 0.0f : (now - previous) / 60000.0f;
+              ESP_LOGI(TAG, "LD2410 (23:69:7C:F1:5F:83) has reconnected after %.1f minutes", minutes_missing);
+              id(ld2410_was_missing) = false;
+              id(ld2410_connected).publish_state(true);
+            }
+
+text_sensor:
+  - platform: template
+    name: "LD2410 Connection Status"
+    id: ld2410_status
+    icon: "mdi:bluetooth"
+
+binary_sensor:
+  - platform: template
+    name: "LD2410 Connected"
+    id: ld2410_connected
+    device_class: connectivity
+    lambda: |-
+      uint32_t last_seen = id(ld2410_last_seen_ms);
+      if (last_seen == 0) {
+        return false;  // Never seen yet
+      }
+      uint32_t elapsed = millis() - last_seen;
+      return elapsed < 180000;  // Connected if seen in last 3 minutes
+
+  # MQ2 Gas Sensor - Software Alarm (based on analog percentage)
+  # Uses hysteresis to prevent oscillation: triggers at 25%, clears at 20%
+  - platform: template
+    id: mq2_digital
+    name: "MQ2 Smoke/Gas Alarm"
+    device_class: smoke
+    lambda: |-
+      static bool alarm_state = false;
+      if (id(mq2_analog).state != NAN) {
+        if (id(mq2_analog).state >= 25.0) {
+          alarm_state = true;   // Trigger at 25%
+        } else if (id(mq2_analog).state <= 20.0) {
+          alarm_state = false;  // Clear at 20%
+        }
+        // Between 20-25% it maintains previous state (hysteresis)
+      }
+      return alarm_state;
+    filters:
+      - delayed_on: 2s  # Must be high for 2s to trigger (prevents spikes)
+      - delayed_off: 10s  # Stays on for 10s after clearing (latching)
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          const uint32_t WARNING_TIMEOUT_MS = 180000;  // Warn after 3 minutes
+          const uint32_t STALE_TIMEOUT_MS = 600000;    // Mark stale after 10 minutes
+          const char *TAG = "ld2410_keepalive";
+
+          uint32_t last_seen = id(ld2410_last_seen_ms);
+          if (last_seen == 0) {
+            // Never seen the LD2410 yet - might be powered off or out of range
+            id(ld2410_status).publish_state("Never seen");
+            return;
+          }
+
+          uint32_t now = millis();
+          uint32_t elapsed = now - last_seen;
+          float minutes = elapsed / 60000.0f;
+
+          if (elapsed < WARNING_TIMEOUT_MS) {
+            // All good - seen recently
+            id(ld2410_status).publish_state("Connected");
+            id(ld2410_connected).publish_state(true);
+            id(ld2410_was_missing) = false;
+          } else if (elapsed < STALE_TIMEOUT_MS) {
+            // Missing but not stale yet - warn user
+            if (!id(ld2410_was_missing)) {
+              ESP_LOGW(TAG, "LD2410 (23:69:7C:F1:5F:83) not seen for %.1f minutes - may need HA integration reload", minutes);
+              id(ld2410_was_missing) = true;
+              id(ld2410_connected).publish_state(false);
+            }
+            char status_msg[64];
+            snprintf(status_msg, sizeof(status_msg), "Missing %.0f min", minutes);
+            id(ld2410_status).publish_state(status_msg);
+          } else {
+            // Very stale - probably needs manual intervention
+            char status_msg[64];
+            snprintf(status_msg, sizeof(status_msg), "Stale %.0f min", minutes);
+            id(ld2410_status).publish_state(status_msg);
+            id(ld2410_connected).publish_state(false);
+          }
+
 sensor:
   # MQ2 Gas Sensor - Raw Analog Voltage
   - platform: adc
@@ -65,26 +175,3 @@ sensor:
         return percentage;
       }
       return NAN;
-
-binary_sensor:
-  # MQ2 Gas Sensor - Software Alarm (based on analog percentage)
-  # Uses hysteresis to prevent oscillation: triggers at 25%, clears at 20%
-  - platform: template
-    id: mq2_digital
-    name: "MQ2 Smoke/Gas Alarm"
-    device_class: smoke
-    lambda: |-
-      static bool alarm_state = false;
-      if (id(mq2_analog).state != NAN) {
-        if (id(mq2_analog).state >= 25.0) {
-          alarm_state = true;   // Trigger at 25%
-        } else if (id(mq2_analog).state <= 20.0) {
-          alarm_state = false;  // Clear at 20%
-        }
-        // Between 20-25% it maintains previous state (hysteresis)
-      }
-      return alarm_state;
-    filters:
-      - delayed_on: 2s  # Must be high for 2s to trigger (prevents spikes)
-      - delayed_off: 10s  # Stays on for 10s after clearing (latching)
- 

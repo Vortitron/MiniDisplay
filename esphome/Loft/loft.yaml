@@ -1,7 +1,7 @@
 # LoftWay TFT Display Controller - ESP32-WROOM
 esphome:
   name: loft
-  friendly_name: Loft
+  friendly_name: LoftC3
   on_boot:
     priority: -100
     then:

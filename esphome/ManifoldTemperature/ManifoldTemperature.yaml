@@ -48,6 +48,21 @@ one_wire:
   - platform: gpio
     pin: GPIO4
 
+# Temperature offset slider for loop sensors
+number:
+  - platform: template
+    name: "Loop Temperature Offset"
+    id: loop_temp_offset
+    optimistic: true
+    restore_value: yes
+    min_value: 0
+    max_value: 10
+    initial_value: 5.0
+    step: 0.1
+    unit_of_measurement: "°C"
+    mode: slider
+    icon: "mdi:thermometer-minus"
+
 # Define sensors
 sensor:
   - platform: dallas_temp
@@ -65,6 +80,7 @@ sensor:
     update_interval: 33s   # 66/2=33, next prime is 37
     filters:
       - filter_out: nan
+      - lambda: return x - id(loop_temp_offset).state;
       - timeout: 5min
   - platform: dallas_temp
     id: loop_2_return_temp
@@ -73,6 +89,7 @@ sensor:
     update_interval: 37s   # 72/2=36, next prime is 37
     filters:
       - filter_out: nan
+      - lambda: return x - id(loop_temp_offset).state;
       - timeout: 5min
   - platform: dallas_temp
     id: loop_3_return_temp
@@ -81,6 +98,7 @@ sensor:
     update_interval: 41s   # 78/2=39, next prime is 41
     filters:
       - filter_out: nan
+      - lambda: return x - id(loop_temp_offset).state;
       - timeout: 5min
   - platform: dallas_temp
     id: loop_4_return_temp
@@ -89,6 +107,7 @@ sensor:
     update_interval: 43s   # 84/2=42, next prime is 43
     filters:
       - filter_out: nan
+      - lambda: return x - id(loop_temp_offset).state;
       - timeout: 5min
   - platform: dallas_temp
     id: loop_5_return_temp
@@ -97,6 +116,7 @@ sensor:
     update_interval: 29s   # 90/2=45, next prime is 47
     filters:
       - filter_out: nan
+      - lambda: return x - id(loop_temp_offset).state;
       - timeout: 5min
   - platform: dallas_temp
     id: loop_6_return_temp
@@ -105,6 +125,7 @@ sensor:
     update_interval: 31s   # 96/2=48, prev prime is 47
     filters:
       - filter_out: nan
+      - lambda: return x - id(loop_temp_offset).state;
       - timeout: 5min
   - platform: dallas_temp
     id: loop_7_return_temp
@@ -113,6 +134,7 @@ sensor:
     update_interval: 32s   # 102/2=51, next prime is 53
     filters:
       - filter_out: nan
+      - lambda: return x - id(loop_temp_offset).state;
       - timeout: 5min
   - platform: dallas_temp
     id: loop_8_return_temp
@@ -121,6 +143,7 @@ sensor:
     update_interval: 33s   # 108/2=54, prev prime is 53
     filters:
       - filter_out: nan
+      - lambda: return x - id(loop_temp_offset).state;
       - timeout: 5min
   - platform: dallas_temp
     id: air_temp
