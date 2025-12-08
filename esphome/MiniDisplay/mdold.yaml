@@ -5,12 +5,10 @@ esphome:
   on_boot:
     priority: 600
     then:
-      - output.turn_on: ds18b20_power
       - logger.log: "MiniDisplay Controller booted, LED controlled by alarm mode"
   on_shutdown:
     then:
       - output.turn_off: status_led
-      - output.turn_off: ds18b20_power
       - lambda: 'id(status_led_is_on) = false;'
       - logger.log: "MiniDisplay Controller shutting down"
 
@@ -27,7 +25,7 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: !secret minidisplay_encryption_key
+    key: "yvY99rlLAA8Xsa1wX4aVqYtBJrv3NovUoy61MOzH1Lo="
   reboot_timeout: 0s
   on_client_connected:
     then:
@@ -38,9 +36,6 @@ api:
 
 # Time component for timestamps
 time:
-  - platform: homeassistant
-    id: ha_time
-    timezone: Europe/Stockholm
   - platform: sntp
     id: sntp_time
     timezone: Europe/Stockholm
@@ -48,7 +43,7 @@ time:
 # OTA updates
 ota:
   platform: esphome
-  password: !secret minidisplay_ota_password
+  password: "6702401779ea71ccf3a1fb2b93113405"
 
 # WiFi configuration
 wifi:
@@ -70,29 +65,19 @@ output:
   - platform: gpio
     pin: GPIO2
     id: status_led
-    inverted: false
+    inverted: true
 
   - platform: gpio
     pin: GPIO5
     id: button_led
     inverted: true
 
-  # GPIO16 as 3.3V power source for DS18B20 (always HIGH)
-  - platform: gpio
-    pin: GPIO16
-    id: ds18b20_power
-    inverted: false
 
 # I2C for OLED display
 i2c:
   sda: GPIO21
   scl: GPIO22
   scan: true
-
-# 1-Wire bus for DS18B20 temperature sensor
-one_wire:
-  - platform: gpio
-    pin: GPIO4
 
 # Font for display
 font:
@@ -115,59 +100,6 @@ display:
         "Gold Light", "LED Flood", "Bio Flood", "Living Office Stand", "LG TV", "Sam HVAC", "Hot Water", "Isolde's Bed"
       };
 
-      // Only show screensaver if there are no active notifications
-      if (id(screensaver_active) && notification_count == 0) {
-        auto time = id(ha_time).now();
-        if (!time.is_valid()) {
-          time = id(sntp_time).now();
-        }
-        char time_str[20];
-        snprintf(time_str, sizeof(time_str), "%02d:%02d", time.hour, time.minute);
-        it.printf(0, 0, id(default_font), "Prices %s", time_str);
-
-        int y_offset = 16;
-        char line_buf[32];
-        
-        // Line 2: Now: [price] [rank/24]
-        if (id(nordpool_price).has_state() && id(electricity_price_rank).has_state()) {
-          snprintf(line_buf, sizeof(line_buf), "Now: %.2f  %2d/24", id(nordpool_price).state, (int)id(electricity_price_rank).state);
-        } else if (id(nordpool_price).has_state()) {
-          snprintf(line_buf, sizeof(line_buf), "Now: %.2f  --/24", id(nordpool_price).state);
-        } else {
-          snprintf(line_buf, sizeof(line_buf), "Now: --     --/24");
-        }
-        it.print(0, y_offset, id(default_font), line_buf);
-        y_offset += 12;
-
-        // Line 3: 4h: [avg_price] [rank/24]
-        if (id(nordpool_average_price_4h).has_state() && id(electricity_price_rank_4h).has_state()) {
-          snprintf(line_buf, sizeof(line_buf), "4h:  %.2f  %2d/24", id(nordpool_average_price_4h).state, (int)id(electricity_price_rank_4h).state);
-        } else if (id(nordpool_average_price_4h).has_state()) {
-          snprintf(line_buf, sizeof(line_buf), "4h:  %.2f  --/24", id(nordpool_average_price_4h).state);
-        } else {
-          snprintf(line_buf, sizeof(line_buf), "4h:  --     --/24");
-        }
-        it.print(0, y_offset, id(default_font), line_buf);
-        y_offset += 12;
-
-        // Line 4: Night or Day info (only show day rank if < 12)
-        int hour = time.hour;
-        if (hour < 6 || hour >= 22) {
-          it.print(0, y_offset, id(default_font), "Night");
-        } else if (id(electricity_price_rank_daytime).has_state() && id(electricity_price_rank_daytime).state < 12.0f) {
-          // Day time with good rank - show rank and school status
-          int day_rank = (int)id(electricity_price_rank_daytime).state;
-          bool is_school_day = id(school_day).state;
-          if (is_school_day) {
-            snprintf(line_buf, sizeof(line_buf), "Day %2d/12 School", day_rank);
-          } else {
-            snprintf(line_buf, sizeof(line_buf), "Day %2d/12", day_rank);
-          }
-          it.print(0, y_offset, id(default_font), line_buf);
-        }
-        return;
-      }
-
       if (current_index >= base_count && notification_count > 0) {
         int target = current_index - base_count;
         
@@ -181,7 +113,6 @@ display:
         // Build display content from stored notification data
         std::string title = "Notification";
         std::string message = notif_id;
-        int alarm_level = 0;
         
         // Look up cached notification data
         if (target < static_cast<int>(id(notification_titles).size())) {
@@ -190,31 +121,18 @@ display:
         if (target < static_cast<int>(id(notification_messages).size())) {
           message = id(notification_messages)[target];
         }
-        if (target < static_cast<int>(id(notification_alarm_levels).size())) {
-          int stored_level = id(notification_alarm_levels)[target];
-          if (stored_level < 0) stored_level = 0;
-          if (stored_level > 3) stored_level = 3;
-          alarm_level = stored_level;
-        }
         
         // Get current time for display
-        auto time = id(ha_time).now();
-        if (!time.is_valid()) {
-          time = id(sntp_time).now();
-        }
+        auto time = id(sntp_time).now();
         char time_str[20];
         snprintf(time_str, sizeof(time_str), "%02d:%02d", time.hour, time.minute);
         
-        static const char* alarm_labels[] = {"OK", "NTF", "ACT", "EMG"};
-        const char* label = alarm_labels[(alarm_level >=0 && alarm_level < 4) ? alarm_level : 0];
-        it.printf(0, 0, id(default_font), "Alert %d/%d %s %s", target + 1, notification_count, time_str, label);
+        it.printf(0, 0, id(default_font), "Alert %d/%d  %s", target + 1, notification_count, time_str);
         
         int y_offset = 16;
         
-        // Display title only if not empty/default/none
-        std::string title_lower = title;
-        for (auto &c : title_lower) c = tolower(c);
-        bool has_title = !title.empty() && title != "Notification" && title_lower != "none";
+        // Display title only if not empty/default
+        bool has_title = !title.empty() && title != "Notification" && title != "None";
         if (has_title) {
           if (title.length() > 21) {
             it.print(0, y_offset, id(default_font), (title.substr(0, 18) + "...").c_str());
@@ -482,46 +400,6 @@ sensor:
     name: "WiFi Signal dB"
     update_interval: 60s
 
-  # MQ2 Gas Sensor - Raw Analog Voltage (ADC on GPIO34)
-  - platform: adc
-    name: "MQ2 Gas/Smoke Level - Raw Analog Voltage"
-    pin: GPIO34
-    id: mq2_analog_raw
-    unit_of_measurement: "V"
-    accuracy_decimals: 3
-    update_interval: 2s
-    attenuation: 12db
-    internal: true
-    filters:
-      - sliding_window_moving_average:
-          window_size: 15
-          send_every: 5
-
-  # MQ2 Gas Sensor - Percentage
-  - platform: template
-    name: "MQ2 Gas/Smoke Level"
-    id: mq2_analog
-    unit_of_measurement: "%"
-    accuracy_decimals: 1
-    update_interval: 2s
-    lambda: |-
-      if (id(mq2_analog_raw).state != NAN) {
-        float percentage = (id(mq2_analog_raw).state / 3.3) * 100.0;
-        if (percentage < 0.0) return 0.0;
-        if (percentage > 100.0) return 100.0;
-        percentage = roundf(percentage * 10.0f) / 10.0f;
-        return percentage;
-      }
-      return NAN;
-
-  # DS18B20 temperature sensor (first found on the 1-Wire bus)
-  - platform: dallas_temp
-    name: "Fish Tank Temperature"
-    id: ambient_temperature
-    filters:
-      - filter_out: nan
-    update_interval: 30s
-
 # Home Assistant sensors to read entity states
   - platform: homeassistant
     id: gold_light_brightness
@@ -668,31 +546,8 @@ sensor:
     id: nordpool_price
     entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
 
-  - platform: homeassistant
-    id: nordpool_average_price_4h
-    entity_id: sensor.nordpool_average_price_4h
-
-  - platform: homeassistant
-    id: electricity_price_rank
-    entity_id: input_number.electricity_price_rank
-
-  - platform: homeassistant
-    id: electricity_price_rank_4h
-    entity_id: input_number.electricity_price_rank_4h
-
-  - platform: homeassistant
-    id: electricity_price_rank_daytime
-    entity_id: input_number.electricity_price_rank_daytime
-
-  - platform: homeassistant
-    id: electricity_price_rank_4h_avg
-    entity_id: input_number.electricity_price_rank_4h_avg
-
 # Binary sensors for reading entity on/off states (hardware buttons)
 binary_sensor:
-  - platform: homeassistant
-    id: school_day
-    entity_id: input_boolean.school_day
   # Hardware buttons (keep existing ones)
   - platform: gpio
     pin:
@@ -716,16 +571,11 @@ binary_sensor:
       inverted: true
     id: back_button
     name: "Back Button"
-    on_multi_click:
-      - timing:
-          - ON for at least 800ms
-        then:
-          - script.execute: handle_back_button_hold
-      - timing:
-          - ON for at most 750ms
-          - OFF for at least 20ms
-        then:
-          - script.execute: handle_back_button
+    on_click:
+      min_length: 10ms
+      max_length: 750ms
+      then:
+        - script.execute: handle_back_button
 
   - platform: gpio
     pin:
@@ -752,146 +602,7 @@ binary_sensor:
               else:
                 - script.execute: handle_confirm_button
 
-  # MQ2 Gas Sensor - Software Alarm (hysteresis)
-  - platform: template
-    name: "MQ2 Smoke/Gas Alarm"
-    id: mq2_alarm
-    device_class: smoke
-    lambda: |-
-      static bool alarm_state = false;
-      if (id(mq2_analog).state != NAN) {
-        if (id(mq2_analog).state >= 50.0f) {
-          alarm_state = true;
-        } else if (id(mq2_analog).state <= 40.0f) {
-          alarm_state = false;
-        }
-      }
-      return alarm_state;
-    filters:
-      - delayed_on: 2s
-      - delayed_off: 10s
-
 text_sensor:
-  # Home Assistant notification registry (includes alarm level and ordering)
-  - platform: homeassistant
-    id: minidisplay_notification_registry
-    entity_id: input_text.minidisplay_notification_registry
-    on_value:
-      then:
-        - lambda: |-
-            std::string registry = id(minidisplay_notification_registry).state;
-            id(notification_ids).clear();
-            id(notification_titles).clear();
-            id(notification_messages).clear();
-            id(notification_alarm_levels).clear();
-
-            struct Entry {
-              int alarm;
-              int idx;
-              std::string id;
-              std::string title;
-              std::string message;
-            };
-            std::vector<Entry> parsed;
-
-            if (!registry.empty()) {
-              size_t start = 0;
-              int entry_idx = 0;
-              while (start < registry.size()) {
-                size_t delim = registry.find("||", start);
-                std::string part = (delim == std::string::npos)
-                  ? registry.substr(start)
-                  : registry.substr(start, delim - start);
-
-                if (!part.empty()) {
-                  size_t p1 = part.find('|');
-                  size_t p2 = (p1 != std::string::npos) ? part.find('|', p1 + 1) : std::string::npos;
-                  size_t p3 = (p2 != std::string::npos) ? part.find('|', p2 + 1) : std::string::npos;
-                  size_t p4 = (p3 != std::string::npos) ? part.find('|', p3 + 1) : std::string::npos;
-
-                  if (p1 != std::string::npos && p2 != std::string::npos && p3 != std::string::npos) {
-                    std::string id_str = part.substr(0, p1);
-                    std::string title_str = part.substr(p1 + 1, p2 - p1 - 1);
-                    std::string msg_str = part.substr(p2 + 1, p3 - p2 - 1);
-                    std::string alarm_str = (p4 == std::string::npos)
-                      ? part.substr(p3 + 1)
-                      : part.substr(p3 + 1, p4 - p3 - 1);
-
-                    auto trim = [](std::string &s) {
-                      const char* whitespace = " \t\r\n";
-                      size_t first = s.find_first_not_of(whitespace);
-                      size_t last = s.find_last_not_of(whitespace);
-                      if (first == std::string::npos || last == std::string::npos) {
-                        s.clear();
-                      } else {
-                        s = s.substr(first, last - first + 1);
-                      }
-                    };
-                    auto parse_alarm = [](const std::string &s) -> int {
-                      if (s.empty()) return 0;
-                      char *end = nullptr;
-                      long val = std::strtol(s.c_str(), &end, 10);
-                      if (end == s.c_str()) return 0;  // no digits parsed
-                      if (val < 0) val = 0;
-                      if (val > 3) val = 3;
-                      return static_cast<int>(val);
-                    };
-                    trim(id_str);
-                    trim(title_str);
-                    trim(msg_str);
-                    trim(alarm_str);
-
-                    int alarm_val = parse_alarm(alarm_str);
-
-                    parsed.push_back(Entry{alarm_val, entry_idx, id_str, title_str, msg_str});
-                    entry_idx++;
-                  }
-                }
-
-                if (delim == std::string::npos) {
-                  break;
-                }
-                start = delim + 2;
-              }
-            }
-
-            if (!parsed.empty()) {
-              std::sort(parsed.begin(), parsed.end(), [](const Entry &a, const Entry &b) {
-                if (a.alarm != b.alarm) return a.alarm > b.alarm;  // higher alarm first
-                return a.idx > b.idx;  // newer first within same alarm
-              });
-            }
-
-            for (const auto &e : parsed) {
-              if (!e.id.empty()) {
-                id(notification_ids).push_back(e.id);
-                id(notification_titles).push_back(e.title);
-                id(notification_messages).push_back(e.message);
-                id(notification_alarm_levels).push_back(e.alarm);
-              }
-            }
-
-            int old_count = id(notifications_count);
-            id(notifications_count) = id(notification_ids).size();
-
-            if (id(notifications_count) > old_count && id(notifications_count) > 0) {
-              int base = id(base_entity_count);
-              id(current_entity_index) = base;
-              id(screensaver_active) = false;  // Disable screensaver when notification arrives
-              id(last_interaction_ms) = millis();  // Reset idle timer
-              ESP_LOGI("script", "New notification via registry, jumping to notification screen");
-            }
-
-            int base = id(base_entity_count);
-            int total = base + id(notifications_count);
-            if (total <= 0) total = base;
-            if (total <= 0) total = 1;
-            if (id(current_entity_index) >= total) {
-              id(current_entity_index) = total - 1;
-            }
-            ESP_LOGI("script", "Registry parsed: %d notifications (sorted by alarm)", id(notifications_count));
-        - script.execute: update_display
-
   # Home Assistant entity states as strings
   - platform: homeassistant
     id: gold_light_state
@@ -994,8 +705,6 @@ text_sensor:
               if (id(notifications_count) > old_count && id(notifications_count) > 0) {
                 int base = id(base_entity_count);
                 id(current_entity_index) = base;
-                id(screensaver_active) = false;  // Disable screensaver when notification arrives
-                id(last_interaction_ms) = millis();  // Reset idle timer
                 ESP_LOGI("script", "New notification arrived, jumping to notification screen");
               }
             }
@@ -1158,42 +867,8 @@ globals:
     type: std::vector<std::string>
     restore_value: no
 
-  - id: notification_alarm_levels
-    type: std::vector<int>
-    restore_value: no
-
   - id: notifications_count
     type: int
-    restore_value: no
-    initial_value: '0'
-
-  - id: screensaver_active
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-
-  - id: screensaver_idle_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: '30000'
-
-  - id: screensaver_refresh_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: '60000'
-
-  - id: last_interaction_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-
-  - id: last_screensaver_update_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-
-  - id: screensaver_exit_ignore_until_ms
-    type: uint32_t
     restore_value: no
     initial_value: '0'
 
@@ -1243,37 +918,8 @@ interval:
             id(status_led_is_on) = led_on;
           }
 
-          // Screensaver activation and refresh
-          if (id(last_interaction_ms) == 0u) {
-            id(last_interaction_ms) = now;
-          }
-          const uint32_t idle_ms = id(screensaver_idle_ms);
-          const uint32_t refresh_ms = id(screensaver_refresh_ms);
-          if (!id(screensaver_active) && (now - id(last_interaction_ms)) >= idle_ms) {
-            id(screensaver_active) = true;
-            id(last_screensaver_update_ms) = now;
-            ESP_LOGI("script", "Screensaver activated after %u ms idle", idle_ms);
-            id(update_display).execute();
-          } else if (id(screensaver_active) && (now - id(last_screensaver_update_ms)) >= refresh_ms) {
-            id(last_screensaver_update_ms) = now;
-            id(update_display).execute();
-          }
-
 # Scripts for entity control and display management
 script:
-  - id: mark_activity
-    then:
-      - lambda: |-
-          const uint32_t now_ms = millis();
-          id(last_interaction_ms) = now_ms;
-          id(last_screensaver_update_ms) = 0u;
-          if (id(screensaver_active)) {
-            id(screensaver_active) = false;
-            id(screensaver_exit_ignore_until_ms) = now_ms + 1000u;  // Ignore inputs for 1000ms after exit
-            ESP_LOGI("script", "Screensaver deactivated by user input");
-            id(update_display).execute();
-          }
-
   - id: update_display
     then:
       - lambda: |-
@@ -2148,14 +1794,7 @@ script:
   # Button handler scripts
   - id: handle_back_button
     then:
-      - script.execute: mark_activity
       - lambda: |-
-          // Ignore button presses briefly after exiting screensaver
-          uint32_t now = millis();
-          if (now < id(screensaver_exit_ignore_until_ms)) {
-            ESP_LOGD("script", "Ignoring back button (screensaver exit delay)");
-            return;
-          }
           ESP_LOGI("script", "Back button pressed for entity %d", id(current_entity_index));
       - if:
           condition:
@@ -2195,74 +1834,9 @@ script:
                             then:
                               - script.execute: toggle_entity_ha
 
-  - id: handle_back_button_hold
-    then:
-      - script.execute: mark_activity
-      - lambda: |-
-          ESP_LOGI("script", "Back button held for entity %d - setting to 100%% white", id(current_entity_index));
-      - if:
-          condition:
-            lambda: 'return id(current_entity_index) == 0;'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.gold_light
-                  brightness_pct: "100"
-                  color_temp: "250"
-      - if:
-          condition:
-            lambda: 'return id(current_entity_index) == 1;'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.led_flood_light
-                  brightness_pct: "100"
-                  color_temp: "250"
-      - if:
-          condition:
-            lambda: 'return id(current_entity_index) == 2;'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.bio_floodlight
-                  brightness_pct: "100"
-                  color_temp: "250"
-      - if:
-          condition:
-            lambda: 'return id(current_entity_index) == 3;'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.living_office_stand
-                  brightness_pct: "100"
-                  color_temp: "250"
-      - if:
-          condition:
-            lambda: 'return id(current_entity_index) == 7;'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.isp_ba4bb8_4bb8
-                  brightness_pct: "100"
-                  color_temp: "250"
-      - delay: 500ms
-      - script.execute: update_display
-
   - id: handle_confirm_button
     then:
-      - script.execute: mark_activity
       - lambda: |-
-          // Ignore button presses briefly after exiting screensaver
-          uint32_t now = millis();
-          if (now < id(screensaver_exit_ignore_until_ms)) {
-            ESP_LOGD("script", "Ignoring confirm button (screensaver exit delay)");
-            return;
-          }
           ESP_LOGI("script", "Confirm button pressed");
           // Short press: cycle entities; long-press handled separately
           int total = id(base_entity_count) + id(notifications_count);
@@ -2277,28 +1851,19 @@ script:
 
   - id: handle_confirm_hold_start
     then:
-      - script.execute: mark_activity
       - lambda: |-
           id(entity_scroll_mode) = true;
           ESP_LOGI("script", "Entity scroll mode enabled");
 
   - id: handle_confirm_hold_end
     then:
-      - script.execute: mark_activity
       - lambda: |-
           id(entity_scroll_mode) = false;
           ESP_LOGI("script", "Entity scroll mode disabled");
 
   - id: handle_encoder_push
     then:
-      - script.execute: mark_activity
       - lambda: |-
-          // Ignore encoder push briefly after exiting screensaver
-          uint32_t now = millis();
-          if (now < id(screensaver_exit_ignore_until_ms)) {
-            ESP_LOGD("script", "Ignoring encoder push (screensaver exit delay)");
-            return;
-          }
           int index = id(current_entity_index);
           int base = id(base_entity_count);
           ESP_LOGI("script", "Encoder push pressed for entity %d", index);
@@ -2313,15 +1878,7 @@ script:
     parameters:
       change: int
     then:
-      - script.execute: mark_activity
       - lambda: |-
-          // Ignore encoder changes briefly after exiting screensaver
-          uint32_t now = millis();
-          if (now < id(screensaver_exit_ignore_until_ms)) {
-            ESP_LOGD("script", "Ignoring encoder change (screensaver exit delay)");
-            return;
-          }
-          
           ESP_LOGI("script", "Encoder value changed by %d for entity %d", change, id(current_entity_index));
           // Encoder rotation adjusts values based on entity type
           int base = id(base_entity_count);

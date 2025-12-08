@@ -9,17 +9,15 @@ esp32:
 
 # Enable logging
 logger:
-  logs:
-    esp32_ble_client: INFO  # Suppress noisy DEBUG messages from BLE proxy notifications
 
 # Enable Home Assistant API
 api:
   encryption:
-    key: !secret downstairs_encryption_key
+    key: "DKmWAYeabDY4DD3EET/dwecpowk8FwbM+UswIpr0t1M="
 
 ota:
   - platform: esphome
-    password: !secret downstairs_ota_password
+    password: "aaa56df03d357f54d04150f3711c9c7c"
 
 wifi:
   ssid: !secret wifi_ssid

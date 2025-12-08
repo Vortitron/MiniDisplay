@@ -1,12 +1,12 @@
 # Loft TFT Display Controller
 
-A comprehensive home automation display controller with rotary encoder, 160x240 colour TFT display (portrait), and MQ2 gas sensor running on ESP32-WROOM.
+A comprehensive home automation display controller with rotary encoder, 240x320 colour TFT display (portrait), and MQ2 gas sensor running on ESP32-WROOM. The UI now uses full-screen cards, live graphs, and contextual headers so the content finally looks as rich as the data feeding it.
 
 **Note:** Bluetooth Proxy is disabled to save memory for the display and sensors.
 
 ## Quick Reference - Pin Connections
 
-**TFT Display (160x240 ST7789V, portrait):**
+**TFT Display (240x320 ST7789V, portrait):**
 - SCL (CLK) → GPIO18
 - SDA (MOSI) → GPIO23  
 - CS → GPIO5
@@ -14,8 +14,6 @@ A comprehensive home automation display controller with rotary encoder, 160x240 
 - RES (RST) → GPIO17
 - BLK (Backlight) → GPIO4
 
-**MQ2 Sensor:**
-- AO → GPIO34
 
 **Rotary Encoder:**
 - A → GPIO25
@@ -27,7 +25,7 @@ A comprehensive home automation display controller with rotary encoder, 160x240 
 
 ## Pin Assignments (ESP32-WROOM)
 
-### TFT Display Module Connections (160x240 ST7789V, portrait)
+### TFT Display Module Connections (240x320 ST7789V, portrait)
 
 | Display Label | ESP32 Pin | ESP32 Label | Notes |
 |---------------|-----------|-------------|-------|   
@@ -44,7 +42,6 @@ A comprehensive home automation display controller with rotary encoder, 160x240 
 
 | Component | ESP32 Pin | ESP32 Label | Notes |
 |-----------|-----------|-------------|-------|
-| **MQ2 Gas Sensor** | GPIO34 | GPIO34 | Analog input (ADC1_CH6) |
 | **Rotary Encoder - A** | GPIO25 | GPIO25 | Encoder phase A |
 | **Rotary Encoder - B** | GPIO26 | GPIO26 | Encoder phase B |
 | **Rotary Encoder - Push** | GPIO27 | GPIO27 | Encoder button |
@@ -72,16 +69,9 @@ KEYO Button Module              ESP32-WROOM Board
 ------------------              -----------------
 PUSH                        --> GPIO14
 GND                         --> GND
-
-MQ2 Gas Sensor                  ESP32-WROOM Board
---------------                  -----------------
-AO (Analog Out)             --> SVP (GPIO36)
-VCC                         --> 3.3V
-GND                         --> GND
 ```
 
 **Important Notes:**
-- **SVP** on the ESP32 board = GPIO36 (Sensor VP pin)
 - **SCL** on display = SPI Clock (NOT I2C!)
 - **SDA** on display = SPI Data/MOSI (NOT I2C!)
 - All modules run on **3.3V** (NOT 5V!)
@@ -89,66 +79,91 @@ GND                         --> GND
 ## Features
 
 ### 🎨 **Colour TFT Display (ST7789)**
-- 240×240 pixel colour display
+- 320×240 pixel colour display in landscape orientation (rotary/button underneath)
 - Four main screens with summary and detail views
 - Smooth rotation control via rotary encoder
 - Auto-dimming backlight (30s timeout)
+- On-screen clock, mode indicator, and status footer
+- Wide format optimised for charts and data visualization
 
-### 📺 **Four Display Screens**
+### 📺 **Five Display Screens**
 
 1. **Notifications** (Screen 0)
-   - Summary: Current notification with title and message (red)
-   - Detail: List of all active notifications
+   - Summary: Hero card with alert indicator, title, and trimmed body
+   - Detail: Paginated list (up to 8 per page) with readable spacing
+   - Auto wake + highlight whenever HA pushes a new notification
 
-2. **Weather** (Screen 1)
-   - Summary: Current conditions with temperature (blue)
-   - Detail: Hourly forecast predictions
-   - AI image placeholder ready
+2. **Weather** (Screen 1) ✨ **ANIMATED**
+   - Summary: Large temperature with **animated weather icon**, condition text, humidity progress bar, wind speed
+   - Detail: Expanded weather stats (temperature, condition, humidity, wind)
+   - **Animated icons**: Sun rays rotate, rain drops fall, clouds drift, snowflakes tumble
+   - Icons update every second for smooth animation
 
-3. **Power** (Screen 2)
-   - Summary: Current Nordpool electricity price (green)
-   - Detail: All power sensors (Bio P1IB L1/L2/L3, HEM P1IB L1/L2/L3)
+3. **Power** (Screen 2) 📊 **ENHANCED CHARTS**
+   - Summary: Price info (left) + **wide 24-hour chart with markers** (right), Bio/HEM L1 power at bottom
+   - Detail: **Large 4-hour zoom chart** (16 bars at 15-min resolution) + all Bio/HEM phases in 3 columns
+   - **Chart enhancements**:
+     - Min/Max price markers (green dot = cheapest, red dot = most expensive)
+     - Average price line (dotted white)
+     - Trend arrows (↗️ rising prices, ↘️ falling prices)
+     - Current hour/slot highlighted with white border
+     - Colour-coded: green=cheap, yellow=normal, red=expensive
 
 4. **Calendar** (Screen 3)
-   - Summary: Next upcoming event (yellow)
-   - Detail: List of upcoming calendar events
-   - AI image placeholder ready
+   - Summary: Next upcoming event with start time and location card
+   - Detail: Expanded event card fed by `message`, `start_time`, and `location` attributes
+
+5. **Energy** (Screen 4) ⚡ **NEW**
+   - Summary: Total power consumption (kW), Bio/HEM breakdown bars, current cost rate (SEK/h)
+   - Detail: Per-phase power visualization with horizontal bars for all 6 phases (Bio L1/L2/L3, HEM L1/L2/L3)
+   - Visual power flow representation
+   - Real-time cost calculation based on Nordpool prices
 
 ### 🎛️ **Controls**
 
-**Rotary Encoder:**
-- **Rotate**: Switch between screens (Notifications → Weather → Power → Calendar)
-- **Push**: Toggle between summary and detail view
-- Automatically turns on backlight when rotated
+**Rotary Encoder (Dial):**
+- **Rotate in summary view**: Switch between screens (Notifications → Weather → Power → Calendar → Energy)
+- **Rotate in detail view**: Scroll through detail items (notifications, power sensors, etc.)
+- **Push**: Toggle between summary ↔ detail view
+- Automatically turns on backlight when used
 
-**KEYO Button:**
-- **Short press**: Exit detail view (go back to summary)
-- **Long press (3s)**: Turn off all downstairs lights, turn on loft lights
-  - Downstairs OFF: gold_light, bio_floodlight, led_flood_light, living_office_stand, isp_ba4bb8_4bb8
-  - Loft ON: isp_1a3c38_3c38, loft_lights
+**KEYO Button (Big Button):**
+- **Short press**: Back/Home button
+  - If in detail view: Exit to summary view
+  - If in summary view: Return to home screen (Weather)
+- **Long press (3s)**: Quick lights control
+  - Turn OFF all downstairs lights: gold_light, bio_floodlight, led_flood_light, living_office_stand, isp_ba4bb8_4bb8
+  - Turn ON loft lights: isp_1a3c38_3c38, loft_lights
 
-### 🔥 **MQ2 Gas Sensor**
-- Continuous gas/smoke monitoring
-- Percentage reading (0-100%)
-- Software alarm with hysteresis (triggers at 25%, clears at 20%)
-- Integrated into Home Assistant
-- Uses GPIO36 (ADC1_CH0) - one of the best analog pins on ESP32
 
-### 🤖 **AI Integration** (Placeholders Ready)
-- OpenAI task integration prepared
-- AI-generated images for weather conditions
-- AI-generated calendar imagery
-- Image placeholders currently shown as grey rectangles with "AI IMG" text
+### 🎨 **Graphics & Visualization**
+- **Animated weather icons**: Real-time vector graphics with smooth animations
+  - Sun rays rotate slowly
+  - Rain drops fall frame-by-frame
+  - Clouds drift across
+  - Snowflakes tumble down
+- **Enhanced price charts**:
+  - 24-hour overview with min/max markers and average line
+  - 4-hour zoom with trend arrows
+  - Push encoder to toggle between views
+  - Current time highlighted
+- **Energy dashboard**: Visual power flow with horizontal bar graphs
+- **Progress bars**: Humidity and power visualization
+- **Memory-efficient**: All graphics drawn using basic shapes (circles, lines, rectangles) - no bitmap images
 
 ### 🔋 **Power Monitoring**
-Displays detailed power consumption from:
-- Bio P1IB Active Power L1, L2, L3
-- HEM P1IB Active Power L1, L2, L3
+- Real-time readouts for Bio + HEM phases (L1/L2/L3)
+- Inline tariff classifier (cheap/normal/high thresholds)
+- **Two-level price chart**:
+  - Summary: 24-hour day overview (hourly averages)
+  - Detail: 4-hour zoom with 15-minute resolution
+- Colour-coded price visualization (green/yellow/red)
+- Current time/slot highlighted with white border
 
 ### 📅 **Calendar Integration**
-- Reads from `calendar.handl_f`
+- Reads from `calendar.handl_f` (state + `message`, `location`, `start_time` attributes)
 - Shows next upcoming event
-- Detail view lists multiple events
+- Detail view highlights the next event in a dedicated card
 
 ### 💡 **Smart Backlight**
 - Turns on automatically when encoder is rotated
@@ -158,26 +173,25 @@ Displays detailed power consumption from:
 
 ## Display Model Configuration
 
-The configuration uses `model: Custom` with 240×240 dimensions. If your display is different, update line 118-122:
+The configuration uses `model: Custom` with 320×240 dimensions in landscape orientation (`rotation: 90`). This provides optimal horizontal space for charts while staying within ESP32-WROOM memory limits (~153KB framebuffer).
 
 ```yaml
 display:
   - platform: st7789v
     model: Custom
-    height: 240
+    height: 320
     width: 240
+    rotation: 90  # Landscape orientation
 ```
 
-You may need to adjust the `rotation:` parameter (line 125) to `0`, `90`, `180`, or `270` degrees.
+Rotate via the `rotation:` parameter (`0`, `90`, `180`, `270`) if you mount the screen differently.
 
 ## Home Assistant Integration
 
 The device exposes these entities:
 - **Display Backlight** (light) - Manual backlight control
-- **MQ2 Gas/Smoke Level** (sensor) - Percentage reading
-- **MQ2 Smoke/Gas Alarm** (binary_sensor) - Alarm status
-- **Encoder Push** (binary_sensor) - Push button state
-- **KEYO Button** (binary_sensor) - Back button state
+- **Encoder Push** (binary_sensor) - Dial push button state
+- **KEYO Button** (binary_sensor) - Big button state
 
 Required Home Assistant entities:
 - `input_text.minidisplay_notification_ids`
@@ -188,6 +202,9 @@ Required Home Assistant entities:
 - `calendar.handl_f`
 - `sensor.bio_p1ib_active_power_l1/l2/l3`
 - `sensor.hem_p1ib_active_power_l1/l2/l3`
+- Attributes consumed from `weather.openweathermap`: `temperature`, `humidity`, `wind_speed`
+- Attributes consumed from `calendar.handl_f`: `message`, `location`, `start_time`
+- Attributes consumed from `sensor.nordpool_kwh_se4_sek_3_10_025`: `raw_today` (for price chart)
 
 ## Wiring Notes
 
@@ -195,13 +212,10 @@ Required Home Assistant entities:
    - **SCL** and **SDA** labels are for SPI, not I2C!
    - **RES** = Reset pin
    - **BLK** = Backlight
-2. **MQ2 Sensor** outputs 0-3.3V analog signal to **SVP** (GPIO36)
-   - SVP stands for "Sensor VP" (VP = Voltage Positive)
-   - This is one of the best analog pins on ESP32
-3. **Rotary Encoder** uses internal pullups on both phases
-4. **Buttons** use internal pullups (connect button to pin and GND)
-5. **Backlight** is PWM-controlled for smooth dimming on GPIO4
-6. **Use VSPI pins** for best SPI performance (GPIO18/23 are hardware SPI)
+2. **Rotary Encoder** uses internal pullups on both phases
+3. **Buttons** use internal pullups (connect button to pin and GND)
+4. **Backlight** is PWM-controlled for smooth dimming on GPIO4
+5. **Use VSPI pins** for best SPI performance (GPIO18/23 are hardware SPI)
 
 ## Why ESP32-WROOM Instead of ESP32-C3?
 
@@ -211,7 +225,7 @@ The ESP32-WROOM has:
 - **More stable** with complex lambdas and multiple fonts
 - **Same price** as C3
 
-The 240×240 colour TFT requires ~170KB just for the framebuffer, which is why the ESP32-C3 couldn't handle it (kernel panic due to out of memory).
+The 320×240 colour TFT requires ~153KB for the framebuffer at 16-bit colour. This is at the memory limit for ESP32-WROOM (~520KB total RAM, ~200KB used by WiFi/system). The landscape orientation provides better horizontal space for charts without requiring more memory than portrait 240×320.
 
 ## Network Configuration
 
@@ -221,14 +235,18 @@ Static IP: **192.168.1.31**
 
 ## TODO / Future Enhancements
 
-- [ ] Implement AI image generation and display
-- [ ] Add hourly weather forecast in detail view
+- [x] Animated weather icons
+- [x] Enhanced price charts with markers and trends
+- [x] Energy dashboard screen
+- [ ] Parse actual raw_today data for real 15-minute price charts
+- [ ] Add hourly weather forecast in detail view (if memory allows)
 - [ ] Add calendar event scrolling in detail view
-- [ ] Add detail view scrolling with rotary encoder
-- [ ] Add graph for power consumption trends
 - [ ] Add more colour themes
 - [ ] Add screen saver mode
-- [ ] Add gas sensor alert to display
+- [ ] Consider upgrading to ESP32-S3 with PSRAM for:
+  - Live camera feeds (5-10 FPS possible)
+  - Larger display support
+  - More complex graphics
 
 ## Troubleshooting
 
@@ -243,11 +261,6 @@ Static IP: **192.168.1.31**
 2. Check GPIO25 and GPIO26 connections
 3. Test encoder push button separately
 
-### Gas sensor always 0% or 100%:
-1. MQ2 sensors need 24-48 hours initial burn-in
-2. Verify 3.3V power to sensor
-3. Check analog output connection to GPIO36
-4. Wait for sensor to warm up (takes several minutes)
 
 ## Notes
 

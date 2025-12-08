@@ -4,33 +4,113 @@ triggers:
   - trigger: state
     entity_id:
       - input_number.electricity_price_rank
-  - trigger: state
-    entity_id:
-      - weather.openweathermap
-    attribute: forecast
+  - trigger: time_pattern
+    hours: /1
 conditions: []
 actions:
+  - action: weather.get_forecasts
+    data:
+      type: hourly
+    target:
+      entity_id: weather.openweathermap
+    response_variable: forecast_response
+  - variables:
+      forecast_data: "{{ forecast_response['weather.openweathermap'].forecast }}"
+      forecast_debug_json: "{{ forecast_data | tojson }}"
+      forecast_today_debug: >-
+        {% set today = now().strftime('%Y-%m-%d') %}
+        {% set values = namespace(data=[]) %}
+        {% for entry in forecast_data %}
+          {% if entry.datetime is defined and today in entry.datetime %}
+            {% if entry.templow is defined and entry.templow is not none %}
+              {% set values.data = values.data + [entry.templow | float] %}
+            {% endif %}
+            {% if entry.temperature is defined and entry.temperature is not none %}
+              {% set values.data = values.data + [entry.temperature | float] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ values.data | tojson }}
+      forecast_all_debug: >-
+        {% set values = namespace(data=[]) %}
+        {% for entry in forecast_data %}
+          {% if entry.templow is defined and entry.templow is not none %}
+            {% set values.data = values.data + [entry.templow | float] %}
+          {% endif %}
+          {% if entry.temperature is defined and entry.temperature is not none %}
+            {% set values.data = values.data + [entry.temperature | float] %}
+          {% endif %}
+        {% endfor %}
+        {{ values.data | tojson }}
+      current_rank: "{{ states('input_number.electricity_price_rank') | int(99) }}"
+      min_temp: >-
+        {% set today = now().strftime('%Y-%m-%d') %}
+        {% set today_values = namespace(data=[]) %}
+        {% set all_values = namespace(data=[]) %}
+        {% for entry in forecast_data %}
+          {% set temps = [] %}
+          {% if entry.templow is defined and entry.templow is not none %}
+            {% set temps = temps + [entry.templow | float] %}
+          {% endif %}
+          {% if entry.temperature is defined and entry.temperature is not none %}
+            {% set temps = temps + [entry.temperature | float] %}
+          {% endif %}
+          {% for t in temps %}
+            {% set all_values.data = all_values.data + [t] %}
+            {% if entry.datetime is defined and today in entry.datetime %}
+              {% set today_values.data = today_values.data + [t] %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        {% if today_values.data %}
+          {{ today_values.data | min }}
+        {% elif all_values.data %}
+          {{ all_values.data | min }}
+        {% else %}
+          10
+        {% endif %}
+      required_hours: >-
+        {% set min_temp_value = min_temp | float(10) %}
+        {% if min_temp_value >= 6 %}
+          1
+        {% else %}
+          {{ (6 - min_temp_value) | round(0, 'ceil') | int }}
+        {% endif %}
   - choose:
-      # Cheap hours: run both relays at 12C for concentrated heating
+      # Peak price hours: keep both relays barely on
       - conditions:
           - condition: template
-            value_template: >-
-              {% set forecast = state_attr('weather.openweathermap', 'forecast') or [] %}
-              {% set today_forecasts = forecast | selectattr('datetime', 'search', now().strftime('%Y-%m-%d')) | list %}
-              {% set min_temp = 10 %}
-              {% if today_forecasts | length > 0 %}
-                {% set temps = today_forecasts | map(attribute='temperature') | list %}
-                {% if temps | length > 0 %}
-                  {% set min_temp = temps | min %}
-                {% endif %}
-              {% endif %}
-              {% if min_temp >= 1 %}
-                {% set required_hours = 1 %}
-              {% else %}
-                {% set required_hours = ((1 - min_temp) | round(0, 'ceil')) | int %}
-              {% endif %}
-              {% set current_rank = states('input_number.electricity_price_rank') | int(99) %}
-              {{ current_rank < required_hours }}
+            value_template: "{{ current_rank >= 14 }}"
+        sequence:
+          - action: climate.set_temperature
+            data:
+              temperature: 3
+            target:
+              entity_id:
+                - climate.boiler_relay_1_thermostat
+                - climate.boiler_relay_2_thermostat
+      # Daytime boost when cold but still within cheap window
+      - conditions:
+          - condition: template
+            value_template: "{{ min_temp | float(10) <= 4 }}"
+          - condition: state
+            entity_id: input_boolean.daytime_cheap_7_21
+            state: "on"
+        sequence:
+          - action: climate.set_temperature
+            data:
+              temperature: 10
+            target:
+              entity_id: climate.boiler_relay_1_thermostat
+          - action: climate.set_temperature
+            data:
+              temperature: 8
+            target:
+              entity_id: climate.boiler_relay_2_thermostat
+      # Cheap hours: run both relays hot for concentrated heating
+      - conditions:
+          - condition: template
+            value_template: "{{ current_rank < required_hours }}"
         sequence:
           - action: climate.set_temperature
             data:
@@ -41,14 +121,29 @@ actions:
                 - climate.boiler_relay_2_thermostat
     default:
       # Not in cheap hours: set to minimal (thermostat handles emergency)
-      - action: climate.set_temperature
-        data:
-          temperature: 6
-        target:
-          entity_id: climate.boiler_relay_1_thermostat
-      - action: climate.set_temperature
-        data:
-          temperature: 4
-        target:
-          entity_id: climate.boiler_relay_2_thermostat
+      # If forecast is mild (2°C+), use lower minimums to save energy
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ min_temp | float(10) >= 2 }}"
+            sequence:
+              - action: climate.set_temperature
+                data:
+                  temperature: 3
+                target:
+                  entity_id:
+                    - climate.boiler_relay_1_thermostat
+                    - climate.boiler_relay_2_thermostat
+        default:
+          # Colder forecast: higher minimums to prevent local cold spots
+          - action: climate.set_temperature
+            data:
+              temperature: 6
+            target:
+              entity_id: climate.boiler_relay_1_thermostat
+          - action: climate.set_temperature
+            data:
+              temperature: 4
+            target:
+              entity_id: climate.boiler_relay_2_thermostat
 mode: single

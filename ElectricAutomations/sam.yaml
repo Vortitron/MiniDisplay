@@ -1,0 +1,201 @@
+alias: Sync Sam HVAC with Desired Temperature and Energy Saving
+description: Control Sam HVAC with remote sensor, desired temp, and dynamic fan-only
+variables:
+  cool_indoor_threshold: 26
+  cool_outdoor_threshold: 25
+  cool_indoor_min: 20
+  heat_offset: 1
+  cool_offset: -1
+  base_stop_heat_offset: -2
+  max_stop_heat_offset: -5
+  temp_tolerance: 0.5
+  fan_only_diff: 3
+triggers:
+  - entity_id:
+      - sensor.t_h_sensor_temperature
+      - sensor.sam_outside_temperature
+      - sensor.sam_inside_temperature
+      - input_number.sam_desired_temperature
+    for:
+      seconds: 30
+    trigger: state
+actions:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {% set remote_indoor = states('sensor.t_h_sensor_temperature') |
+              float %} {% set outdoor = states('sensor.sam_outside_temperature')
+              | float %} {{ remote_indoor > cool_indoor_threshold or (outdoor >=
+              cool_outdoor_threshold and remote_indoor > cool_indoor_min) }}
+        sequence:
+          - target:
+              entity_id: climate.sam
+            data:
+              hvac_mode: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                outdoor = states('sensor.sam_outside_temperature') | float %} {{
+                'fan_only' if remote > desired + temp_tolerance and outdoor <
+                desired else 'cool' }}
+            action: climate.set_hvac_mode
+          - target:
+              entity_id: climate.sam
+            data:
+              temperature: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                internal = states('sensor.sam_inside_temperature') | float %} {{
+                internal + cool_offset if remote > desired + temp_tolerance else
+                internal }}
+              hvac_mode: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                outdoor = states('sensor.sam_outside_temperature') | float %} {{
+                'fan_only' if remote > desired + temp_tolerance and outdoor <
+                desired else 'cool' }}
+            action: climate.set_temperature
+          - data:
+              name: Sam HVAC
+              message: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                outdoor = states('sensor.sam_outside_temperature') | float %} {%
+                set internal = states('sensor.sam_inside_temperature') | float
+                %} {% set mode = 'fan_only' if remote > desired + temp_tolerance
+                and outdoor < desired else 'cool' %} {% set target = internal +
+                cool_offset if remote > desired + temp_tolerance else internal
+                %} Set to {{ mode }}, target {{ target | round(1) }}°C:  {% if
+                mode == 'fan_only' %}
+                  remote {{ remote | round(1) }}°C too warm and outdoor {{ outdoor | round(1) }}°C < desired {{ desired | round(1) }}°C
+                {% else %}
+                  remote {{ remote | round(1) }}°C too warm for cooling, internal {{ internal | round(1) }}°C
+                {% endif %}
+            action: logbook.log
+          - target:
+              entity_id: input_text.sam_hvac_status
+            data:
+              value: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                outdoor = states('sensor.sam_outside_temperature') | float %} {%
+                set internal = states('sensor.sam_inside_temperature') | float
+                %} {% set mode = 'fan_only' if remote > desired + temp_tolerance
+                and outdoor < desired else 'cool' %} {% set target = internal +
+                cool_offset if remote > desired + temp_tolerance else internal
+                %} Set to {{ mode }}, target {{ target | round(1) }}°C:  {% if
+                mode == 'fan_only' %}
+                  remote {{ remote | round(1) }}°C too warm and outdoor {{ outdoor | round(1) }}°C < desired {{ desired | round(1) }}°C
+                {% else %}
+                  remote {{ remote | round(1) }}°C too warm for cooling, internal {{ internal | round(1) }}°C
+                {% endif %}
+            action: input_text.set_value
+      - conditions:
+          - condition: template
+            value_template: >
+              {% set remote_indoor = states('sensor.t_h_sensor_temperature') |
+              float %} {% set outdoor = states('sensor.sam_outside_temperature')
+              | float %} {{ not (remote_indoor > cool_indoor_threshold or
+              (outdoor >= cool_outdoor_threshold and remote_indoor >
+              cool_indoor_min)) }}
+        sequence:
+          - target:
+              entity_id: climate.sam
+            data:
+              hvac_mode: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                outdoor = states('sensor.sam_outside_temperature') | float %} {%
+                set diff = remote - desired %} {{ 'fan_only' if (remote <
+                desired - temp_tolerance and outdoor > desired) or diff >
+                fan_only_diff else 'heat' }}
+            action: climate.set_hvac_mode
+          - target:
+              entity_id: climate.sam
+            data:
+              temperature: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                internal = states('sensor.sam_inside_temperature') | float %} {%
+                set diff = remote - desired %} {% if remote < desired -
+                temp_tolerance %}
+                  {{ internal + heat_offset }}
+                {% elif remote >= desired %}
+                  {{ internal + [base_stop_heat_offset - diff, max_stop_heat_offset] | max }}
+                {% else %}
+                  {{ internal }}
+                {% endif %}
+              hvac_mode: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                outdoor = states('sensor.sam_outside_temperature') | float %} {%
+                set diff = remote - desired %} {{ 'fan_only' if (remote <
+                desired - temp_tolerance and outdoor > desired) or diff >
+                fan_only_diff else 'heat' }}
+            action: climate.set_temperature
+          - data:
+              name: Sam HVAC
+              message: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                outdoor = states('sensor.sam_outside_temperature') | float %} {%
+                set internal = states('sensor.sam_inside_temperature') | float
+                %} {% set diff = remote - desired %} {% set mode = 'fan_only' if
+                (remote < desired - temp_tolerance and outdoor > desired) or
+                diff > fan_only_diff else 'heat' %} {% set target = internal +
+                heat_offset if remote < desired - temp_tolerance else (internal
+                + [base_stop_heat_offset - diff, max_stop_heat_offset] | max if
+                remote >= desired else internal) %} Set to {{ mode }}, target {{
+                target | round(1) }}°C:  {% if mode == 'fan_only' %}
+                  {% if remote < desired - temp_tolerance %}
+                    remote {{ remote | round(1) }}°C too cold but outdoor {{ outdoor | round(1) }}°C > desired {{ desired | round(1) }}°C
+                  {% else %}
+                    remote {{ remote | round(1) }}°C too warm by {{ diff | round(1) }}°C > {{ fan_only_diff }}°C
+                  {% endif %}
+                {% elif remote < desired - temp_tolerance %}
+                  remote {{ remote | round(1) }}°C too cold, internal {{ internal | round(1) }}°C
+                {% elif remote >= desired %}
+                  remote {{ remote | round(1) }}°C too warm or at desired by {{ diff | round(1) }}°C, internal {{ internal | round(1) }}°C
+                {% else %}
+                  remote {{ remote | round(1) }}°C within {{ temp_tolerance }}°C of desired {{ desired | round(1) }}°C, internal {{ internal | round(1) }}°C
+                {% endif %}
+            action: logbook.log
+          - target:
+              entity_id: input_text.sam_hvac_status
+            data:
+              value: >
+                {% set remote = states('sensor.t_h_sensor_temperature') | float
+                %} {% set desired =
+                states('input_number.sam_desired_temperature') | float %} {% set
+                outdoor = states('sensor.sam_outside_temperature') | float %} {%
+                set internal = states('sensor.sam_inside_temperature') | float
+                %} {% set diff = remote - desired %} {% set mode = 'fan_only' if
+                (remote < desired - temp_tolerance and outdoor > desired) or
+                diff > fan_only_diff else 'heat' %} {% set target = internal +
+                heat_offset if remote < desired - temp_tolerance else (internal
+                + [base_stop_heat_offset - diff, max_stop_heat_offset] | max if
+                remote >= desired else internal) %} Set to {{ mode }}, target {{
+                target | round(1) }}°C:  {% if mode == 'fan_only' %}
+                  {% if remote < desired - temp_tolerance %}
+                    remote {{ remote | round(1) }}°C too cold but outdoor {{ outdoor | round(1) }}°C > desired {{ desired | round(1) }}°C
+                  {% else %}
+                    remote {{ remote | round(1) }}°C too warm by {{ diff | round(1) }}°C > {{ fan_only_diff }}°C
+                  {% endif %}
+                {% elif remote < desired - temp_tolerance %}
+                  remote {{ remote | round(1) }}°C too cold, internal {{ internal | round(1) }}°C
+                {% elif remote >= desired %}
+                  remote {{ remote | round(1) }}°C too warm or at desired by {{ diff | round(1) }}°C, internal {{ internal | round(1) }}°C
+                {% else %}
+                  remote {{ remote | round(1) }}°C within {{ temp_tolerance }}°C of desired {{ desired | round(1) }}°C, internal {{ internal | round(1) }}°C
+                {% endif %}
+            action: input_text.set_value
+    default: []

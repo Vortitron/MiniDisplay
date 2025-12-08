@@ -1,5 +1,5 @@
 alias: Electricity Price Rank
-description: Set input_number to indicate current hour's cheapness rank (0=cheapest) for today only
+description: Set input_numbers for hourly rank, 4h window rank, and daytime rank (8am-8pm)
 triggers:
   - trigger: state
     entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
@@ -41,7 +41,6 @@ actions:
         {% endif %}
         {% set hourly_values = ns.hours | map(attribute='avg') | list %}
         {% set sorted_hourly = hourly_values | sort %}
-        {% set unique_hourly = sorted_hourly | unique | list %}
         {% set current_hour = now().hour %}
         {% set current_entry = ns.hours | selectattr('hour', 'equalto', current_hour) | list %}
         {% set current_hour_avg = current_entry[0]['avg'] if current_entry | length > 0 else current_price %}
@@ -54,20 +53,23 @@ actions:
           {% set window_ns.values = window_ns.values + [sum_ns.total / window_ns.window_size] %}
         {% endfor %}
         {% set sorted_windows = window_ns.values | sort %}
-        {% set unique_windows = sorted_windows | unique | list %}
         {% set quarter_index = (now().hour * 4) + ((now().minute // 15) | int(0)) %}
         {% set current_window_avg = window_ns.values[quarter_index] if quarter_index < window_ns.values | length else current_price %}
+        {% set daytime_hours = ns.hours | selectattr('hour', 'ge', 8) | selectattr('hour', 'lt', 20) | list %}
+        {% set daytime_prices = daytime_hours | map(attribute='avg') | list %}
         Current Price (15 min): {{ current_price }},
         Current Hour Avg: {{ current_hour_avg }},
         Current 4h Avg: {{ current_window_avg }},
         15-min Slots: {{ ns.quarters | length }},
         Hour Buckets: {{ ns.hours | length }},
         4h Windows: {{ window_ns.values | length }},
+        Daytime Hours (8-20): {{ daytime_hours | length }},
         First Hourly Prices: {{ hourly_values[:5] }},
         First 4h Avgs: {{ window_ns.values[:5] }},
         Last 4h Avgs: {{ window_ns.values[-5:] }},
-        Sorted Hourly First: {{ unique_hourly[:5] }},
-        Sorted 4h First: {{ unique_windows[:5] }}
+        Sorted Hourly First: {{ sorted_hourly[:5] }},
+        Sorted 4h First: {{ sorted_windows[:5] }},
+        Daytime Prices: {{ daytime_prices }}
   - service: input_number.set_value
     target:
       entity_id: input_number.electricity_price_rank
@@ -95,18 +97,17 @@ actions:
         {% endif %}
         {% set hourly_values = ns_prices.hours | map(attribute='avg') | list %}
         {% set sorted_prices = hourly_values | sort %}
-        {% set unique_prices = sorted_prices | unique | list %}
         {% set current_hour = now().hour %}
         {% set current_entry = ns_prices.hours | selectattr('hour', 'equalto', current_hour) | list %}
         {% set current_hour_avg = current_entry[0]['avg'] if current_entry | length > 0 else current_price %}
         {% set ns = namespace(rank=-1) %}
-        {% for price in unique_prices %}
+        {% for price in sorted_prices %}
           {% if ns.rank == -1 and current_hour_avg <= price %}
             {% set ns.rank = loop.index0 %}
           {% endif %}
         {% endfor %}
         {% if ns.rank == -1 %}
-          {{ [ (unique_prices | length) - 1, 0 ] | max }}
+          {{ [ (sorted_prices | length) - 1, 0 ] | max }}
         {% else %}
           {{ ns.rank }}
         {% endif %}
@@ -132,22 +133,125 @@ actions:
           {% set window_ns.values = window_ns.values + [sum_ns.total / window_ns.size] %}
         {% endfor %}
         {% set sorted_windows = window_ns.values | sort %}
-        {% set unique_windows = sorted_windows | unique | list %}
         {% set quarter_index = (now().hour * 4) + ((now().minute // 15) | int(0)) %}
         {% set current_window_avg = window_ns.values[quarter_index] if quarter_index < window_ns.values | length else current_price %}
         {% set ns_window = namespace(rank=-1) %}
-        {% for price in unique_windows %}
+        {% for price in sorted_windows %}
           {% if ns_window.rank == -1 and current_window_avg <= price %}
             {% set ns_window.rank = loop.index0 %}
           {% endif %}
         {% endfor %}
-        {% set total_windows = unique_windows | length %}
+        {% set total_windows = sorted_windows | length %}
         {% if total_windows <= 1 %}
           0
         {% else %}
           {% set raw_rank = ns_window.rank if ns_window.rank >= 0 else (total_windows - 1) %}
           {% set scaled_rank = ((raw_rank * 23.0) / (total_windows - 1)) | round(0, 'floor') | int %}
           {{ [[scaled_rank, 0] | max, 23] | min }}
+        {% endif %}
+  - service: input_number.set_value
+    target:
+      entity_id: input_number.electricity_price_rank_daytime
+    data:
+      value: >-
+        {% set current_hour = now().hour %}
+        {% if current_hour < 8 or current_hour >= 20 %}
+          99
+        {% else %}
+          {% set current_price = states('sensor.nordpool_kwh_se4_sek_3_10_025') | float %}
+          {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
+          {% set ns_day = namespace(hours=[], accum=0.0, count=0, idx=0) %}
+          {% for slot in today %}
+            {% if slot is mapping and 'value' in slot %}
+              {% set val = slot['value'] | float(0) %}
+              {% set ns_day.accum = ns_day.accum + val %}
+              {% set ns_day.count = ns_day.count + 1 %}
+              {% if ns_day.count == 4 %}
+                {% set ns_day.hours = ns_day.hours + [{'hour': ns_day.idx, 'avg': ns_day.accum / ns_day.count}] %}
+                {% set ns_day.accum = 0 %}
+                {% set ns_day.count = 0 %}
+                {% set ns_day.idx = ns_day.idx + 1 %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns_day.count > 0 %}
+            {% set ns_day.hours = ns_day.hours + [{'hour': ns_day.idx, 'avg': ns_day.accum / ns_day.count}] %}
+          {% endif %}
+          {% set daytime_hours = ns_day.hours | selectattr('hour', 'ge', 8) | selectattr('hour', 'lt', 20) | list %}
+          {% if daytime_hours | length == 0 %}
+            99
+          {% else %}
+            {% set current_entry = daytime_hours | selectattr('hour', 'equalto', current_hour) | list %}
+            {% set current_hour_avg = current_entry[0]['avg'] if current_entry | length > 0 else current_price %}
+            {% set sorted_daytime = daytime_hours | sort(attribute='avg') | list %}
+            {% set daytime_prices = sorted_daytime | map(attribute='avg') | list %}
+            {% set ns_rank = namespace(rank=-1) %}
+            {% for price in daytime_prices %}
+              {% if ns_rank.rank == -1 and current_hour_avg <= price %}
+                {% set ns_rank.rank = loop.index0 %}
+              {% endif %}
+            {% endfor %}
+            {% if ns_rank.rank == -1 %}
+              {{ [ (daytime_prices | length) - 1, 0 ] | max }}
+            {% else %}
+              {{ ns_rank.rank }}
+            {% endif %}
+          {% endif %}
+        {% endif %}
+  - service: input_number.set_value
+    target:
+      entity_id: input_number.electricity_price_rank_4h_avg
+    data:
+      value: >-
+        {% set current_price = states('sensor.nordpool_kwh_se4_sek_3_10_025') | float %}
+        {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
+        {% set quarters = namespace(values=[]) %}
+        {% for slot in today %}
+          {% if slot is mapping and 'value' in slot %}
+            {% set quarters.values = quarters.values + [slot['value'] | float(0)] %}
+          {% endif %}
+        {% endfor %}
+        {% set window_ns = namespace(values=[], size=16) %}
+        {% for start in range(0, (quarters.values | length) - window_ns.size + 1) %}
+          {% set sum_ns = namespace(total=0.0) %}
+          {% for offset in range(0, window_ns.size) %}
+            {% set sum_ns.total = sum_ns.total + quarters.values[start + offset] %}
+          {% endfor %}
+          {% set window_ns.values = window_ns.values + [sum_ns.total / window_ns.size] %}
+        {% endfor %}
+        {% set quarter_index = (now().hour * 4) + ((now().minute // 15) | int(0)) %}
+        {{ window_ns.values[quarter_index] if quarter_index < window_ns.values | length else current_price }}
+  - service: input_number.set_value
+    target:
+      entity_id: input_number.electricity_price_rank_daytime_avg
+    data:
+      value: >-
+        {% set current_hour = now().hour %}
+        {% if current_hour < 8 or current_hour >= 20 %}
+          0
+        {% else %}
+          {% set current_price = states('sensor.nordpool_kwh_se4_sek_3_10_025') | float %}
+          {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
+          {% set ns_day = namespace(hours=[], accum=0.0, count=0, idx=0) %}
+          {% for slot in today %}
+            {% if slot is mapping and 'value' in slot %}
+              {% set val = slot['value'] | float(0) %}
+              {% set ns_day.accum = ns_day.accum + val %}
+              {% set ns_day.count = ns_day.count + 1 %}
+              {% if ns_day.count == 4 %}
+                {% set ns_day.hours = ns_day.hours + [{'hour': ns_day.idx, 'avg': ns_day.accum / ns_day.count}] %}
+                {% set ns_day.accum = 0 %}
+                {% set ns_day.count = 0 %}
+                {% set ns_day.idx = ns_day.idx + 1 %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns_day.count > 0 %}
+            {% set ns_day.hours = ns_day.hours + [{'hour': ns_day.idx, 'avg': ns_day.accum / ns_day.count}] %}
+          {% endif %}
+          {% set daytime_hours = ns_day.hours | selectattr('hour', 'ge', 8) | selectattr('hour', 'lt', 20) | list %}
+          {% set current_entry = daytime_hours | selectattr('hour', 'equalto', current_hour) | list %}
+          {{ current_entry[0]['avg'] if current_entry | length > 0 else current_price }}
         {% endif %}
 mode: single
 

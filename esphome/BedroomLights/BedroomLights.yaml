@@ -6,7 +6,7 @@ substitutions:
   switch_led_pending_low_ratio: '0.35'
 
 esphome:
-  name: bedroomlights
+  name: "bedroomlights"
   friendly_name: BedroomLights
   on_boot:
     # High priority - wait for WiFi before initialising I2C sensors
@@ -16,8 +16,7 @@ esphome:
             wifi.connected:
         - logger.log: "WiFi connected, enabling environmental sensors"
         # Start sensor polling now that WiFi is stable
-        - component.update: aht20_sensor
-        - component.update: bmp280_sensor
+        - component.update: aht10_sensor
     # Low priority - initialise application state after everything else
     - priority: -100
       then:
@@ -43,7 +42,7 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-      key: "bbPqKzlRqaDwTVSkjY4EQ7Qk2b4abgkozeDiwwEWI5w="
+      key: "R5ce2+sAWu+P64UfkenRwn2nVHHSHXP5v4hd8oSQ2Ao="
   on_client_connected:
     - lambda: |-
         ESP_LOGI("ha_sync", "Home Assistant connected");
@@ -67,20 +66,14 @@ api:
 
 ota:
   - platform: esphome
-    password: "3743fce26550feb4b84274ac957685ca"
+    password: "629ce264867a48aca47fe3655f629c81"
 
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: NONE
-  fast_connect: false
-  reboot_timeout: 15min
-  output_power: 8.5dB
-  # Try removing static IP temporarily to rule out DHCP issues
-  # manual_ip:
-  #   static_ip: 192.168.1.38
-  #   gateway: 192.168.1.1
-  #   subnet: 255.255.255.0
+  fast_connect: true
+  reboot_timeout: 5min
 
 
 # Bluetooth Proxy (extends HA BLE range)
@@ -88,14 +81,13 @@ bluetooth_proxy:
   active: true
 
 # I2C bus for environmental sensors
-# Note: GPIO20/GPIO21 avoid strapping pins that cause WiFi boot issues
+# SDA/SCL on safe pins (avoiding strapping pins GPIO2/8/9)
 i2c:
   id: bedroom_i2c_bus
   sda: GPIO5
   scl: GPIO3
   scan: true
-  frequency: 400kHz  # Reduce frequency for stability
-  setup_priority: -100  # Initialise I2C bus AFTER WiFi connects
+  frequency: 100kHz
 
 
 # Time component for potential future use
@@ -105,27 +97,20 @@ time:
 
 # Interval to poll environmental sensors (only after WiFi connected)
 interval:
-  - interval: 30s
+  - interval: 2min
     then:
       - if:
           condition:
             wifi.connected:
           then:
-            - component.update: aht20_sensor
-  - interval: 60s
-    then:
-      - if:
-          condition:
-            wifi.connected:
-          then:
-            - component.update: bmp280_sensor
+            - component.update: aht10_sensor
 
 # Binary Sensors - Switches
 binary_sensor:
   # Latching Switch 1 - Controls bedroom_light_stand
   - platform: gpio
     pin:
-      number: GPIO8
+      number: GPIO0
       mode:
         input: true
         pullup: true
@@ -133,8 +118,8 @@ binary_sensor:
     name: "Stand Light Switch"
     id: switch1
     filters:
-      - delayed_on: 40ms
-      - delayed_off: 40ms
+      - delayed_on: 200ms
+      - delayed_off: 200ms
     on_press:
       then:
         - logger.log: "Switch 1 pressed - turning on bedroom_light_stand"
@@ -250,51 +235,34 @@ binary_sensor:
       - script.execute: update_pending_leds
       - script.execute: sync_switch_leds
 
-# Environmental sensors (AHT20 for temp/humidity, BMP280 for pressure)
+# Environmental sensors (AHT10 for temp/humidity only)
 # Delayed startup to avoid interfering with WiFi connection
 sensor:
   - platform: aht10
-    id: aht20_sensor
+    id: aht10_sensor
+    variant: AHT20  # Specify the model as AHT20
     i2c_id: bedroom_i2c_bus
     update_interval: never  # Manual control to prevent boot-time polling
     temperature:
       name: "BedroomLights Temperature"
-      id: bedroom_aht20_temperature
+      id: bedroom_aht10_temperature
       accuracy_decimals: 1
       filters:
         - calibrate_linear:
             - 0.0 -> 0.0
             - 100.0 -> 100.0
-        # Adjust the offset below if sensor reads high (negative) or low (positive)
-        # Example: if sensor reads 2°C too high, use -2.0
+        # Fresh sensor - start with no offset and adjust after testing
         - offset: 0.0
     humidity:
       name: "BedroomLights Humidity"
-      id: bedroom_aht20_humidity
+      id: bedroom_aht10_humidity
       accuracy_decimals: 1
-
-  - platform: bmp280_i2c
-    id: bmp280_sensor
-    i2c_id: bedroom_i2c_bus
-    address: 0x77
-    update_interval: never  # Manual control to prevent boot-time polling
-    temperature:
-      name: "BedroomLights Barometric Temperature"
-      id: bedroom_bmp280_temperature
-      accuracy_decimals: 1
-      filters:
-        - median
-    pressure:
-      name: "BedroomLights Pressure"
-      id: bedroom_bmp280_pressure
-      accuracy_decimals: 1
-      unit_of_measurement: "hPa"
 
 # Outputs - Switch LEDs
 output:
   # LED for Switch 1 (bedroom_light_stand)
   - platform: ledc
-    pin: GPIO9
+    pin: GPIO4
     id: switch1_led_output
     frequency: 1000Hz
   

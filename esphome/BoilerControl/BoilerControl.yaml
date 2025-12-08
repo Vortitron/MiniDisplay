@@ -14,7 +14,7 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "FpSU4uWfdjSNc0dAxtMGojEgLKCgl6bhTWJxpMT6mXE="
+    key: !secret boilercontrol_encryption_key
   reboot_timeout: 0s  # Don't reboot on API timeout
   # Failsafe: If connection to HA is lost for 15+ minutes, activate failsafe
   on_client_disconnected:
@@ -53,7 +53,7 @@ api:
 
 ota:
   - platform: esphome
-    password: "b5238b88692d6b7e4aa3ee4377c8f76b"
+    password: !secret boilercontrol_ota_password
 
 # WiFi configuration
 wifi:

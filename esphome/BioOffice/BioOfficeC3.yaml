@@ -13,11 +13,11 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "rhTI7o9zy213PHa0gn7uSRPnlihPsG+JjhxI2kzE8W0="
+    key: !secret bioofficec3_encryption_key
 
 ota:
   - platform: esphome
-    password: "0b8de384f640b091defa00ed3cf3615b"
+  password: !secret bioofficec3_ota_password
 
 wifi:
   ssid: !secret wifi_ssid

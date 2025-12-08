@@ -23,11 +23,11 @@ wifi:
 
 api:
   encryption:
-    key: dpYQhtTju8d7cHiHRC44cizLbJtp1a+LqJRLkznX39A=
+    key: !secret kitchendetectorer_encryption_key
 
 ota:
   platform: esphome
-  password: !secret esphome_password
+  password: !secret kitchendetectorer_ota_password
 
 # GPIO pin to power the microphone
 output:

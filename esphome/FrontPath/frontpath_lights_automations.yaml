@@ -1,124 +1,562 @@
-# Front Path Lights Automations
-# Controls light.front_porch_local and light.fairy_lights based on:
-# - Sunset schedule (turn on at 10% brightness)
-# - Midnight schedule (turn off)
-# - Person position detection (brighten as approaching door, dim as leaving)
-# - Time-based minimums (10% after sunset, 0% before sunset)
+# Front Path Lighting (BLE + HA logic)
+# - Uses LD2410 BLE entities (`sensor.hlk_ld2410_*`) so everything lives in one file
+# - Builds an adaptive baseline from statistics sensors (no ESP UART firmware needed)
+# - Keeps a low baseline when dark, ramps up as someone approaches the door,
+#   and drives a Christmas colour wash that follows the person's position.
+# Drop this file into a Home Assistant package or copy the sections into their
+# respective YAML files (helpers/templates/automations). Update the entity IDs
+# if your LD2410 sensors or lights use different names.
+#
+# ADAPTIVE BASELINE: The statistics sensors track a 10-minute rolling average of
+# motion energy. This automatically adapts to weather (rain/wind) by slowly raising
+# the baseline. Person detection compares current energy vs baseline, so as the
+# baseline rises in bad weather, false triggers reduce. See BLE_ADAPTIVE_BASELINE.md
+# for tuning guidance.
+#
+# TUNING HELPERS:
+# - frontpath_energy_margin (default 22%): How far above baseline = person detected
+#   * Increase (30-40%) if too many false triggers in wind/rain
+#   * Decrease (15-18%) if missing people walking
+# - frontpath_gate_trigger_floor (default 18%): Minimum gate energy for instant trigger
+#   * Increase (25-35%) to ignore weak spikes
+#   * Decrease (12-15%) for more sensitive detection
+# - frontpath_darkness_threshold_pct (default 32%): Light level % below which = dark
+#   * Increase (40-50%) to turn on lights earlier (twilight)
+#   * Decrease (20-25%) to turn on later (only when very dark)
+# - frontpath_idle_brightness (default 12%): Baseline glow when no one present
+# - frontpath_path_length (default 16m): Total path distance for position mapping
 
-# Required Helper:
-# Create an input_boolean helper called input_boolean.frontpath_evening_mode
-# This tracks the "between sunset and midnight" period
-# Settings → Devices & Services → Helpers → Create Helper → Toggle
+input_boolean:
+  frontpath_christmas_mode:
+    name: "Front Path Christmas Mode"
+    icon: mdi:string-lights
+    initial: true
+  frontpath_tuya_pattern_mode:
+    name: "Front Path Tuya Pattern Mode"
+    icon: mdi:led-strip-variant
+    initial: false
+  frontpath_fairy_daytime_motion:
+    name: "Front Path Fairy Lights Daytime Motion"
+    icon: mdi:weather-sunny
+    initial: true
+
+input_number:
+  frontpath_path_length:
+    name: "Front Path Path Length"
+    min: 8
+    max: 20
+    step: 0.5
+    unit_of_measurement: "m"
+    icon: mdi:map-marker-distance
+    initial: 16
+  frontpath_idle_brightness:
+    name: "Front Path Idle Brightness"
+    min: 0
+    max: 40
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:brightness-4
+    initial: 12
+  frontpath_energy_margin:
+    name: "Front Path Energy Margin"
+    min: 5
+    max: 60
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:signal-variant
+    initial: 22
+  frontpath_gate_trigger_floor:
+    name: "Front Path Gate Trigger Floor"
+    min: 5
+    max: 60
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:gate
+    initial: 18
+  frontpath_darkness_threshold_pct:
+    name: "Front Path Darkness Threshold"
+    min: 5
+    max: 90
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:weather-night
+    initial: 32
+
+sensor:
+  - platform: statistics
+    name: "FrontPath 7144 Motion Energy Avg"
+    entity_id: sensor.hlk_ld2410_7144_motion_energy
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Motion Energy Avg"
+    entity_id: sensor.hlk_ld2410_6602_motion_energy
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+
+template:
+  - sensor:
+      - name: "FrontPath Path Person Position"
+        unique_id: frontpath_path_person_position
+        icon: mdi:map-marker-path
+        unit_of_measurement: "m"
+        device_class: distance
+        state_class: measurement
+        availability: >-
+          {{ states('sensor.hlk_ld2410_7144_motion_energy_gate_0') not in ['unknown','unavailable']
+             and states('sensor.hlk_ld2410_6602_motion_energy_gate_0') not in ['unknown','unavailable']
+             and states('input_number.frontpath_path_length') not in ['unknown','unavailable']
+             and states('input_number.frontpath_gate_trigger_floor') not in ['unknown','unavailable'] }}
+        state: >
+          {% set gate_span = 0.75 %}
+          {% set path_length = states('input_number.frontpath_path_length') | float(16) %}
+          {% set gate_floor = states('input_number.frontpath_gate_trigger_floor') | float(18) %}
+          {% set door = namespace(idx=-1, energy=0.0) %}
+          {% set street = namespace(idx=-1, energy=0.0) %}
+          {% set door_gates = [
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_8')|float(0)
+          ] %}
+          {% for val in door_gates %}
+            {% if val > door.energy %}
+              {% set door.energy = val %}
+              {% set door.idx = loop.index0 %}
+            {% endif %}
+          {% endfor %}
+          {% set street_gates = [
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_8')|float(0)
+          ] %}
+          {% for val in street_gates %}
+            {% if val > street.energy %}
+              {% set street.energy = val %}
+              {% set street.idx = loop.index0 %}
+            {% endif %}
+          {% endfor %}
+          {% set pos = namespace(value=0.0) %}
+          {% if door.energy >= gate_floor or street.energy >= gate_floor %}
+            {% if door.energy >= street.energy %}
+              {% set pos.value = path_length - (door.idx + 0.5) * gate_span %}
+            {% else %}
+              {% set pos.value = (street.idx + 0.5) * gate_span %}
+            {% endif %}
+          {% endif %}
+          {% if pos.value < 0 %}
+            {% set pos.value = 0 %}
+          {% elif pos.value > path_length %}
+            {% set pos.value = path_length %}
+          {% endif %}
+          {{ pos.value | round(2) }}
+
+  - binary_sensor:
+      - name: "FrontPath Path Person Detected"
+        unique_id: frontpath_path_person_detected
+        device_class: occupancy
+        state: >
+          {% set margin = states('input_number.frontpath_energy_margin') | float(22) %}
+          {% set gate_floor = states('input_number.frontpath_gate_trigger_floor') | float(18) %}
+          {% set s1 = states('sensor.hlk_ld2410_7144_motion_energy') | float(0) %}
+          {% set s2 = states('sensor.hlk_ld2410_6602_motion_energy') | float(0) %}
+          {% set base1 = states('sensor.frontpath_7144_motion_energy_avg') | float(s1) %}
+          {% set base2 = states('sensor.frontpath_6602_motion_energy_avg') | float(s2) %}
+          {% set delta1 = s1 - base1 %}
+          {% set delta2 = s2 - base2 %}
+          {% set moving1 = is_state('binary_sensor.hlk_ld2410_7144_has_moving_target', 'on') %}
+          {% set moving2 = is_state('binary_sensor.hlk_ld2410_6602_has_moving_target', 'on') %}
+          {% set gates = [
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_8')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_8')|float(0)
+          ] %}
+          {% set gate_peak = gates | max %}
+          {# Person detected if: large energy spike above baseline OR gate spike with moving target confirmation #}
+          {{ (delta1 >= margin or delta2 >= margin) or (gate_peak >= gate_floor and (moving1 or moving2)) }}
+        delay_on: "00:00:01"
+        delay_off: "00:00:05"
+
+      - name: "FrontPath Active Gate"
+        unique_id: frontpath_active_gate
+        state: >
+          {% set gate_floor = states('input_number.frontpath_gate_trigger_floor') | float(18) %}
+          {% set door_gates = [
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_7144_motion_energy_gate_8')|float(0)
+          ] %}
+          {% set street_gates = [
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_6602_motion_energy_gate_8')|float(0)
+          ] %}
+          {% set door = namespace(idx=-1, energy=0.0) %}
+          {% set street = namespace(idx=-1, energy=0.0) %}
+          {% for val in door_gates %}
+            {% if val > door.energy %}
+              {% set door.energy = val %}
+              {% set door.idx = loop.index0 %}
+            {% endif %}
+          {% endfor %}
+          {% for val in street_gates %}
+            {% if val > street.energy %}
+              {% set street.energy = val %}
+              {% set street.idx = loop.index0 %}
+            {% endif %}
+          {% endfor %}
+          {% if door.energy >= gate_floor and door.energy >= street.energy %}
+            door_{{ door.idx }}
+          {% elif street.energy >= gate_floor %}
+            street_{{ street.idx }}
+          {% else %}
+            none
+          {% endif %}
+
+  - sensor:
+      - name: "FrontPath Tuya Scene Pattern"
+        unique_id: frontpath_tuya_scene_pattern
+        state: >-
+          {% set gate_floor = states('input_number.frontpath_gate_trigger_floor') | float(18) %}
+
+          {# Sum energies from both sensors for each gate 0-7 #}
+          {% set combined_gates = [] %}
+          {% for i in range(8) %}
+            {% set door_energy = states('sensor.hlk_ld2410_7144_motion_energy_gate_' ~ i) | float(0) %}
+            {% set street_energy = states('sensor.hlk_ld2410_6602_motion_energy_gate_' ~ i) | float(0) %}
+            {% set combined = door_energy + street_energy %}
+            {% set combined_gates = combined_gates + [combined] %}
+          {% endfor %}
+
+          {# Build dict of units #}
+          {% set scene_units = namespace(val={}) %}
+          {% for i in range(8) %}
+            {% set energy = combined_gates[i] %}
+            {% if energy >= gate_floor %}
+              {% if i < 2 %}
+                {% set h, s, v = 120, 255, (energy * 2.5) | int %}
+              {% elif i < 4 %}
+                {% set h, s, v = 60, 255, (energy * 2.5) | int %}
+              {% elif i < 6 %}
+                {% set h, s, v = 0, 255, (energy * 2.5) | int %}
+              {% else %}
+                {% set h, s, v = 30, 255, (energy * 2.5) | int %}
+              {% endif %}
+              {% if v > 255 %}{% set v = 255 %}{% endif %}
+            {% else %}
+              {% set h, s, v = 30, 50, 30 %}
+            {% endif %}
+            {% set unit_key = 'unit_' ~ (i + 1) %}
+            {% set scene_units.val = scene_units.val | combine({ unit_key: {'h': h, 's': s, 'v': v} }) %}
+          {% endfor %}
+
+          {# Payload as dict -> JSON -> base64 #}
+          {% set payload = {'scene_num': 1, 'scene_units': scene_units.val} %}
+          {{ payload | tojson | base64_encode }}
 
 automation:
-  # Turn lights on at sunset at 10% brightness
-alias: "Front Path Lights Sunset On"
-description: "Turn on front path lights at 10% brightness at sunset"
-trigger:
-  - platform: sun
-    event: sunset
-    offset: 0
-action:
-  - service: input_boolean.turn_on
-    target:
-      entity_id: input_boolean.frontpath_evening_mode
-  - service: light.turn_on
-    target:
-      entity_id:
-        - light.front_porch_local
-        - light.fairy_lights
-    data:
-      brightness_pct: 10
-      transition: 2
-mode: single
-
-  # Turn lights off at midnight
-alias: "Front Path Lights Midnight Off"
-description: "Turn off front path lights at midnight"
-trigger:
-  - platform: time
-    at: "00:00:00"
-action:
-  - service: input_boolean.turn_off
-    target:
-      entity_id: input_boolean.frontpath_evening_mode
-  - service: light.turn_off
-    target:
-      entity_id:
-        - light.front_porch_local
-        - light.fairy_lights
-mode: single
-
-  # Dynamic brightness based on person position
-alias: "Front Path Lights Dynamic Brightness"
-description: "Adjust brightness based on person position - brighter as approaching door"
-trigger:
-  - platform: state
-    entity_id: sensor.frontpath_path_person_position
-  - platform: state
-    entity_id: binary_sensor.frontpath_path_person_detected
-  - platform: state
-    entity_id: input_boolean.frontpath_evening_mode
-mode: restart
-action:
-  - variables:
-      person_on: "{{ is_state('binary_sensor.frontpath_path_person_detected','on') }}"
-      evening: "{{ is_state('input_boolean.frontpath_evening_mode','on') }}"
-      min_brightness: "{{ 10 if is_state('input_boolean.frontpath_evening_mode','on') else 0 }}"
-  - choose:
-      # Person detected - calculate brightness based on position
-      - conditions:
-          - condition: template
-            value_template: "{{ person_on }}"
-        sequence:
-          - variables:
-              pos_state: "{{ states('sensor.frontpath_path_person_position') }}"
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: >-
-                      {{ pos_state not in ['unknown','unavailable','none','', 'nan'] }}
-                sequence:
-                  - variables:
-                      brightness: >-
-                        {# Linear map of 0..16m → min_b .. 100% #}
-                        {% set min_b = min_brightness | int %}
-                        {% set p = pos_state | float(0) %}
-                        {% set p = [16, [0, p] | max] | min %}
-                        {% set result = min_b + (p / 16) * (100 - min_b) %}
-                        {{ [result | round(0), min_b] | max }}
-                  - service: light.turn_on
-                    target:
-                      entity_id:
-                        - light.front_porch_local
-                        - light.fairy_lights
-                    data:
-                      brightness_pct: "{{ brightness }}"
-                      transition: 2
-            # Default: position unknown → do nothing (hold last brightness)
-            default: []
-    # No person detected
-    default:
-      - delay: "00:00:05"  # Wait before falling back; cancelled if person returns (mode: restart)
+  - id: frontpath_adaptive_seasonal
+    alias: "Front Path - Adaptive + Seasonal Lighting"
+    description: >
+      Maintains a low glow when it is genuinely dark, ramps brightness as a person
+      walks the path, and maps Christmas colour washes to the active zone.
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.frontpath_path_person_detected
+          - sensor.frontpath_path_person_position
+          - binary_sensor.frontpath_active_gate
+          - sensor.frontpath_tuya_scene_pattern
+          - sensor.frontpath_light_level
+          - binary_sensor.frontpath_path_is_dark
+          - sun.sun
+          - input_boolean.frontpath_christmas_mode
+          - input_boolean.frontpath_tuya_pattern_mode
+          - input_boolean.frontpath_fairy_daytime_motion
+          - input_number.frontpath_idle_brightness
+          - input_number.frontpath_path_length
+          - input_number.frontpath_darkness_threshold_pct
+          - input_number.frontpath_energy_margin
+          - input_number.frontpath_gate_trigger_floor
+      - platform: time_pattern
+        minutes: "/5"
+    variables:
+      idle_pct: >
+        {% set helper = states('input_number.frontpath_idle_brightness') %}
+        {% if helper in ['unknown', 'unavailable', ''] %}
+          12
+        {% else %}
+          {{ helper | float(12) }}
+        {% endif %}
+      path_length: "{{ states('input_number.frontpath_path_length') | float(16) }}"
+      light_pct: "{{ states('sensor.frontpath_light_level') }}"
+      darkness_threshold: >
+        {% set helper = states('input_number.frontpath_darkness_threshold_pct') %}
+        {% if helper in ['unknown', 'unavailable', ''] %}
+          32
+        {% else %}
+          {{ helper | float(32) }}
+        {% endif %}
+      lux_flag: >
+        {% if light_pct not in ['unknown', 'unavailable', ''] %}
+          {{ (light_pct | float(100)) <= darkness_threshold }}
+        {% else %}
+          false
+        {% endif %}
+      is_dark: >
+        {{ (lux_flag in [true, 'true', 'True'])
+           or is_state('binary_sensor.frontpath_path_is_dark', 'on')
+           or is_state('sun.sun', 'below_horizon')
+           or (state_attr('sun.sun', 'elevation') | float(-10) <= 2) }}
+      person_present: "{{ is_state('binary_sensor.frontpath_path_person_detected','on') }}"
+      raw_pos: "{{ states('sensor.frontpath_path_person_position') }}"
+      position: >
+        {% if raw_pos in ['unknown','unavailable','none','', 'nan'] %}
+          {{ '' }}
+        {% else %}
+          {{ raw_pos | float(0) }}
+        {% endif %}
+      active_gate: "{{ states('binary_sensor.frontpath_active_gate') }}"
+      target_pct: >
+        {% if not (is_dark in [true, 'true', 'True']) %}
+          0
+        {% elif not person_present %}
+          {{ idle_pct }}
+        {% elif position == '' %}
+          {% set fallback = idle_pct + 40 %}
+          {% if fallback < 70 %}
+            {% set fallback = 70 %}
+          {% elif fallback > 100 %}
+            {% set fallback = 100 %}
+          {% endif %}
+          {{ fallback | round(0) }}
+        {% else %}
+          {% set pos = position | float(0) %}
+          {% if pos < 0 %}
+            {% set pos = 0 %}
+          {% elif pos > path_length %}
+            {% set pos = path_length %}
+          {% endif %}
+          {% set result = idle_pct + (pos / path_length) * (100 - idle_pct) %}
+          {{ result | round(0) }}
+        {% endif %}
+      zone: >
+        {% if position == '' %}
+          none
+        {% else %}
+          {% set pos = position | float(0) %}
+          {% if pos < path_length * 0.35 %}
+            far
+          {% elif pos < path_length * 0.75 %}
+            mid
+          {% else %}
+            door
+          {% endif %}
+        {% endif %}
+      christmas_mode: >
+        {% set helper = states('input_boolean.frontpath_christmas_mode') %}
+        {% if helper == 'on' %}
+          true
+        {% elif helper == 'off' %}
+          false
+        {% else %}
+          {{ now().month == 12 }}
+        {% endif %}
+      tuya_pattern_mode: "{{ is_state('input_boolean.frontpath_tuya_pattern_mode', 'on') }}"
+      fairy_daytime_motion: "{{ is_state('input_boolean.frontpath_fairy_daytime_motion', 'on') }}"
+      tuya_scene_data: "{{ states('sensor.frontpath_tuya_scene_pattern') }}"
+      fairy_boost_pct: 15
+    action:
       - choose:
-          # Evening mode - keep at 10%
           - conditions:
               - condition: template
-                value_template: "{{ evening }}"
+                value_template: "{{ not (is_dark in [true, 'true', 'True']) and not person_present }}"
             sequence:
-              - service: light.turn_on
+              - service: light.turn_off
                 target:
                   entity_id:
                     - light.front_porch_local
                     - light.fairy_lights
+              - stop: "Ambient light available, no movement"
+          - conditions:
+              - condition: template
+                value_template: "{{ not (is_dark in [true, 'true', 'True']) and person_present and not (fairy_daytime_motion in [true, 'true', 'True']) }}"
+            sequence:
+              - service: light.turn_off
+                target:
+                  entity_id: light.fairy_lights
+              - service: light.turn_off
+                target:
+                  entity_id: light.front_porch_local
+              - stop: "Daytime, no motion override"
+          - conditions:
+              - condition: template
+                value_template: "{{ person_present }}"
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id: light.front_porch_local
                 data:
-                  brightness_pct: 10
-                  transition: 2
-        # Daytime - turn off
+                  brightness_pct: "{{ [target_pct, idle_pct] | max | round(0) }}"
+                  transition: 1.2
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: >-
+                          {{ person_present
+                             and tuya_pattern_mode in [true, 'true', 'True']
+                             and tuya_scene_data not in ['','unknown','unavailable', none]
+                             and tuya_scene_data != states('text.fairy_lights_scene') }}
+                    sequence:
+                      - service: text.set_value
+                        target:
+                          entity_id: text.fairy_lights_scene
+                        data:
+                          value: "{{ tuya_scene_data }}"
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ christmas_mode in [true, 'true', 'True'] }}"
+                    sequence:
+                      - service: light.turn_on
+                        target:
+                          entity_id: light.fairy_lights
+                        data:
+                          brightness_pct: "{{ [target_pct + fairy_boost_pct, 100] | min | round(0) }}"
+                          transition: 0.8
+                          effect: >
+                            {% set gate = active_gate %}
+                            {% if gate.startswith('door_') %}
+                              {% set idx = gate.split('_')[1] | int %}
+                              {% if idx >= 7 %}
+                                Sparkle
+                              {% elif idx >= 5 %}
+                                Twinkle
+                              {% elif idx >= 3 %}
+                                Candy Cane
+                              {% else %}
+                                Chase
+                              {% endif %}
+                            {% elif gate.startswith('street_') %}
+                              {% set idx = gate.split('_')[1] | int %}
+                              {% if idx >= 6 %}
+                                Fade
+                              {% elif idx >= 4 %}
+                                Pulse
+                              {% elif idx >= 2 %}
+                                Wave
+                              {% else %}
+                                Evergreen Fade
+                              {% endif %}
+                            {% else %}
+                              Sparkle
+                            {% endif %}
+                          rgb_color: >
+                            {% set gate = active_gate %}
+                            {% if gate.startswith('door_') %}
+                              {% set idx = gate.split('_')[1] | int %}
+                              {% if idx >= 7 %}
+                                [255, 200, 150]
+                              {% elif idx >= 5 %}
+                                [255, 180, 100]
+                              {% elif idx >= 3 %}
+                                [255, 100, 100]
+                              {% else %}
+                                [255, 50, 50]
+                              {% endif %}
+                            {% elif gate.startswith('street_') %}
+                              {% set idx = gate.split('_')[1] | int %}
+                              {% if idx >= 6 %}
+                                [0, 255, 150]
+                              {% elif idx >= 4 %}
+                                [0, 200, 100]
+                              {% elif idx >= 2 %}
+                                [50, 255, 100]
+                              {% else %}
+                                [100, 200, 50]
+                              {% endif %}
+                            {% else %}
+                              [255, 255, 255]
+                            {% endif %}
+                default:
+                  - service: light.turn_on
+                    target:
+                      entity_id: light.fairy_lights
+                    data:
+                      brightness_pct: "{{ [target_pct + 10, 100] | min | round(0) }}"
+                      transition: 0.8
+                      rgb_color: [255, 200, 160]
+              - stop: "Motion handled"
         default:
-          - service: light.turn_off
+          - service: light.turn_on
             target:
-              entity_id:
-                - light.front_porch_local
-                - light.fairy_lights
+              entity_id: light.front_porch_local
+            data:
+              brightness_pct: "{{ idle_pct | round(0) }}"
+              transition: 2
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ person_present
+                         and tuya_pattern_mode in [true, 'true', 'True']
+                         and tuya_scene_data not in ['','unknown','unavailable', none]
+                         and tuya_scene_data != states('text.fairy_lights_scene') }}
+                sequence:
+                  - service: text.set_value
+                    target:
+                      entity_id: text.fairy_lights_scene
+                    data:
+                      value: "{{ tuya_scene_data }}"
+            default:
+              - service: light.turn_on
+                target:
+                  entity_id: light.fairy_lights
+                data:
+                  brightness_pct: "{{ [idle_pct + 5, 30] | min | round(0) }}"
+                  transition: 2
+                  rgb_color: [255, 190, 140]
+
 

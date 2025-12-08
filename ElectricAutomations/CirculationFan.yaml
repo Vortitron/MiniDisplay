@@ -1,0 +1,60 @@
+---
+# Automation to sync circulation fan temperature to mama's bedroom thermostat + 1°C
+id: circulation_fan_temperature_sync
+alias: "Circulation Fan - Temperature Sync"
+description: "Set circulation fan to 1°C higher than mama's bedroom thermostat"
+trigger:
+  - platform: state
+    entity_id: climate.mama_bedroom_thermostat
+    attribute: temperature
+condition: []
+action:
+  - service: climate.set_temperature
+    target:
+      entity_id: climate.circulation_fan
+    data:
+      temperature: >
+        {{ state_attr('climate.mama_bedroom_thermostat', 'temperature') | float(20) + 1 }}
+mode: single
+
+# Automation to control circulation fan based on temperature comparison
+id: circulation_fan_temperature_control
+alias: "Circulation Fan - Temperature Control"
+description: "Turn off fan when bedroom temp is higher than T&H sensor, turn on when lower"
+trigger:
+  - platform: state
+    entity_id: sensor.bedroomlights_bedroomlights_temperature
+  - platform: state
+    entity_id: sensor.t_h_sensor_temperature
+condition: []
+action:
+  - choose:
+      # If bedroom temperature is higher than T&H sensor, turn off
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ states('sensor.bedroomlights_bedroomlights_temperature') | float(0) > 
+                  (states('sensor.t_h_sensor_temperature') | float(0) - 1) }}
+        sequence:
+          - service: climate.turn_off
+            target:
+              entity_id: climate.circulation_fan
+      # If bedroom temperature is lower than T&H sensor - 2°C buffer, turn on
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ states('sensor.bedroomlights_bedroomlights_temperature') | float(0) < 
+                  (states('sensor.t_h_sensor_temperature') | float(0) - 2) }}
+        sequence:
+          - service: climate.turn_on
+            target:
+              entity_id: climate.circulation_fan
+          # Re-sync temperature after turning on
+          - service: climate.set_temperature
+            target:
+              entity_id: climate.circulation_fan
+            data:
+              temperature: >
+                {{ state_attr('climate.mama_bedroom_thermostat', 'temperature') | float(20) + 1 }}
+mode: single
+

@@ -1,0 +1,151 @@
+esphome:
+  name: loftc3
+  friendly_name: LoftC3
+  on_boot:
+    # High priority - wait for WiFi before initialising I2C sensors
+    - priority: 600
+      then:
+        - wait_until:
+            wifi.connected:
+        - logger.log: "WiFi connected, enabling environmental sensors"
+        # Start sensor polling now that WiFi is stable
+        - component.update: aht10_sensor
+    - priority: -100
+      then:
+        - logger.log: "LoftC3 boot complete"
+
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+      key: !secret loftc3_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret loftc3_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: False
+  reboot_timeout: 5min
+  output_power: 8.5dbm
+
+# Bluetooth Proxy (extends HA BLE range)
+bluetooth_proxy:
+  active: true
+
+# I2C bus for environmental sensors
+# SDA/SCL on safe pins (avoiding strapping pins GPIO2/8/9)
+i2c:  
+  id: bedroom_i2c_bus
+  sda: GPIO1
+  scl: GPIO2
+  scan: true
+  frequency: 100kHz
+
+
+# Time component for potential future use
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# Interval to poll environmental sensors (only after WiFi connected)
+interval:
+  - interval: 2min
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - component.update: aht10_sensor
+
+# Environmental sensors (AHT10 for temp/humidity)
+# Delayed startup to avoid interfering with WiFi connection
+sensor:
+  - platform: aht10
+    id: aht10_sensor
+    variant: AHT20  # Specify the model as AHT20
+    i2c_id: bedroom_i2c_bus
+    update_interval: never  # Manual control to prevent boot-time polling
+    temperature:
+      name: "LoftC3 Temperature"
+      id: loft_aht10_temperature
+      accuracy_decimals: 1
+      filters:
+        - calibrate_linear:
+            - 0.0 -> 0.0
+            - 100.0 -> 100.0
+        # Adjust the offset below if sensor reads high (negative) or low (positive)
+        #- offset: -10.0
+    humidity:
+      name: "LoftC3 Humidity"
+      id: loft_aht10_humidity
+      accuracy_decimals: 1
+
+  # MQ2 Gas Sensor - Raw Analog Voltage
+  - platform: adc
+    name: "LoftC3 MQ2 Gas/Smoke Level - Raw Analog Voltage"
+    pin: GPIO0  # Analog input pin on ESP32-C3
+    id: mq2_analog_raw
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: 2s
+    attenuation: 12db  # Allows reading 0-3.3V range
+    internal: true  # Hide raw voltage from HA
+    filters:
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 5
+  
+  # MQ2 Gas Sensor - Percentage (template sensor to avoid device_class conflict)
+  - platform: template
+    name: "LoftC3 MQ2 Gas/Smoke Level"
+    id: mq2_analog
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 2s
+    lambda: |-
+      if (id(mq2_analog_raw).state != NAN) {
+        // Convert voltage (0-3.3V) to percentage (0-100%)
+        float percentage = (id(mq2_analog_raw).state / 3.3) * 100.0;
+        // Apply baseline offset (25% = clean air baseline after several days of observation)
+        percentage = percentage - 25.0;
+        // Clamp between 0-100%
+        if (percentage < 0.0) return 0.0;
+        if (percentage > 100.0) return 100.0;
+        percentage = roundf(percentage * 10.0) / 10.0;
+        return percentage;
+      }
+      return NAN;
+
+# MQ2 Gas Sensor - Software Alarm (based on analog percentage)
+# Uses hysteresis to prevent oscillation: triggers at 15% above baseline, clears at 5%
+binary_sensor:
+  - platform: template
+    id: mq2_digital
+    name: "LoftC3 MQ2 Smoke/Gas Alarm"
+    device_class: smoke
+    lambda: |-
+      static bool alarm_state = false;
+      if (id(mq2_analog).state != NAN) {
+        if (id(mq2_analog).state >= 30.0) {
+          alarm_state = true;   // Trigger at 15% above baseline
+        } else if (id(mq2_analog).state <= 15.0) {
+          alarm_state = false;  // Clear at 5% above baseline
+        }
+        // Between 5-15% it maintains previous state (hysteresis)
+      }
+      return alarm_state;
+    filters:
+      - delayed_on: 2s  # Must be high for 2s to trigger (prevents spikes)
+      - delayed_off: 10s  # Stays on for 10s after clearing (latching)

@@ -1,0 +1,90 @@
+alias: Hot Water on Cheap El
+description: ""
+triggers:
+  - trigger: state
+    entity_id:
+      - input_number.electricity_price_rank
+  - trigger: state
+    entity_id:
+      - switch.smart_plug_2_socket_1
+    to: "on"
+    id: manual_on
+conditions: []
+actions:
+  # If hot water was manually turned on, set override timer for 3 hours
+  - if:
+      - condition: trigger
+        id: manual_on
+      - condition: template
+        value_template: "{{ trigger.from_state.state == 'off' }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.context.user_id is not none }}"
+    then:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.hot_water_manual_override_until
+        data:
+          datetime: "{{ (now() + timedelta(hours=3)).isoformat() }}"
+      - stop: "Hot water manually turned on - override active for 3 hours"
+  - if:
+      - condition: or
+        conditions:
+          - condition: numeric_state
+            entity_id: input_number.electricity_price_rank
+            below: 8
+          - condition: and
+            conditions:
+              - condition: numeric_state
+                entity_id: input_number.electricity_price_rank_daytime
+                below: 6
+              - condition: or
+                conditions:
+                  - condition: numeric_state
+                    entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
+                    below: 32
+                  - condition: state
+                    entity_id: sensor.lyeklint_hancock_felix_needs_preparation_today_2
+                    state:
+                      - "False"
+    then:
+      - type: turn_on
+        device_id: 91a58efc9daabbc41395d2adb4619c61
+        entity_id: ad378be22033f2f4c26aa9609e286c6a
+        domain: switch
+      - delay:
+          hours: 0
+          minutes: 1
+          seconds: 0
+          milliseconds: 0
+      - if:
+          - condition: device
+            type: is_off
+            device_id: 91a58efc9daabbc41395d2adb4619c61
+            entity_id: ad378be22033f2f4c26aa9609e286c6a
+            domain: switch
+            for:
+              hours: 0
+              minutes: 0
+              seconds: 10
+        then:
+          - action: notify.persistent_notification
+            metadata: {}
+            data:
+              message: "Hot Water Not Reacting - Alarm: 2"
+    else:
+      # Only turn off if not within manual override period
+      - if:
+          - condition: template
+            value_template: >-
+              {% set override_time = states('input_datetime.hot_water_manual_override_until') %}
+              {% if override_time in ['unknown', 'unavailable', 'none', ''] %}
+                true
+              {% else %}
+                {{ now() > (override_time | as_datetime) }}
+              {% endif %}
+        then:
+          - type: turn_off
+            device_id: 91a58efc9daabbc41395d2adb4619c61
+            entity_id: ad378be22033f2f4c26aa9609e286c6a
+            domain: switch
+mode: single

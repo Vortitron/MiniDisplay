@@ -74,12 +74,11 @@ actions:
       target_temp: >-
         {% set day_of_week = now().weekday() %}
         {% set needs_prep = state_attr('sensor.lyeklint_hancock_felix_needs_preparation_today_2', 'needs_preparation') %}
-        {% if day_of_week >= 5 or needs_prep == false %}
-          {% set base = 16 %}
-        {% else %}
-          {% set base = 10 %}
-        {% endif %}
+        {% set current_hour = now().hour %}
+        {% set is_weekend = day_of_week >= 5 or needs_prep == false %}
+        {% set is_daytime = current_hour >= 5 and current_hour < 17 %}
         
+        {# Check occupancy #}
         {% set press_time = states('input_datetime.bio_office_occupancy_time') %}
         {% set occupied = false %}
         {% if press_time not in ['unknown', 'unavailable', ''] %}
@@ -102,24 +101,33 @@ actions:
           {% endif %}
         {% endif %}
         
-        {% set current_hour = now().hour %}
-        
         {% if occupied %}
           19
-        {% elif current_hour >= 17 %}
-          10
         {% else %}
+          {# Base is always 10C, apply doubled price rank boost #}
+          {% set base = 10 %}
           {% set rank = states('input_number.electricity_price_rank') | int(99) %}
           {% if rank == 0 %}
-            {{ base + 4 }}
+            {% set temp = base + 8 %}
           {% elif rank == 1 %}
-            {{ base + 3 }}
+            {% set temp = base + 6 %}
           {% elif rank == 2 %}
-            {{ base + 2 }}
+            {% set temp = base + 4 %}
           {% elif rank == 3 %}
-            {{ base + 1 }}
+            {% set temp = base + 2 %}
           {% else %}
-            {{ base }}
+            {% set temp = base %}
+          {% endif %}
+          
+          {# Apply weekend daytime minimum of 16C #}
+          {% if is_weekend and is_daytime %}
+            {% if temp < 16 %}
+              16
+            {% else %}
+              {{ temp }}
+            {% endif %}
+          {% else %}
+            {{ temp }}
           {% endif %}
         {% endif %}
   - action: climate.set_temperature

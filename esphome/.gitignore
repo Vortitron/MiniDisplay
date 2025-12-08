@@ -1,0 +1,18 @@
+# ESPHome secrets file - NEVER commit this!
+secrets.yaml
+
+# Python key generation script output
+*.pyc
+__pycache__/
+
+# ESPHome build artifacts
+.esphome/
+*.bin
+*.elf
+*.map
+
+# Temporary files
+*.swp
+*.tmp
+*~
+

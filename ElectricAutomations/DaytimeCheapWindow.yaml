@@ -1,50 +1,18 @@
-alias: Daytime Cheap 7-21
-description: Turn on helper when current price is <= 50% of daytime (07-21) average
+alias: Daytime Cheap 8-20
+description: Turn on helper during the cheapest 4 hours in daytime window (8am-8pm)
 triggers:
   - trigger: state
-    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
-  - trigger: state
-    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
-    attribute: raw_today
+    entity_id: input_number.electricity_price_rank_daytime
   - trigger: time_pattern
     minutes: "/15"
 conditions: []
 actions:
-  - variables:
-      in_day_window: >-
-        {% set hour = now().hour %}
-        {{ 7 <= hour < 21 }}
-      is_daytime_cheap: >-
-        {% if not in_day_window %}
-          {{ false }}
-        {% else %}
-          {% set sensor_state = states('sensor.nordpool_kwh_se4_sek_3_10_025') %}
-          {% if sensor_state in ['unknown', 'unavailable', ''] %}
-            {{ false }}
-          {% else %}
-            {% set current_price = sensor_state | float(0) %}
-            {% set slots = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
-            {% set day_values = [] %}
-            {% for slot in slots %}
-              {% if slot is mapping and 'start' in slot and 'value' in slot %}
-                {% set start_dt = as_datetime(slot['start']) %}
-                {% if start_dt and 7 <= start_dt.hour < 21 %}
-                  {% set day_values = day_values + [slot['value'] | float(0)] %}
-                {% endif %}
-              {% endif %}
-            {% endfor %}
-            {% if day_values | length == 0 %}
-              {{ false }}
-            {% else %}
-              {% set avg = (day_values | sum) / (day_values | length) %}
-              {{ current_price <= (avg / 2) }}
-            {% endif %}
-          {% endif %}
-        {% endif %}
   - choose:
       - conditions:
           - condition: template
-            value_template: "{{ is_daytime_cheap }}"
+            value_template: >-
+              {% set rank = states('input_number.electricity_price_rank_daytime') | int(99) %}
+              {{ rank < 4 }}
         sequence:
           - action: input_boolean.turn_on
             target:

@@ -26,11 +26,11 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "CYM+X3tIAeAaIWson+NrIoSV3KJQrK2oGOJ9K+OnfOk="
+    key: !secret manifoldtemp_encryption_key
 
 ota:
   - platform: esphome
-    password: "d5db3b91c9f86717fe13391851a90b79"
+    password: !secret manifoldtemp_ota_password
 
 # Ethernet configuration with built-in support (now using your forked IDF)
 ethernet:

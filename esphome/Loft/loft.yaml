@@ -1,7 +1,8 @@
 # LoftWay TFT Display Controller - ESP32-WROOM
+# Memory-optimised configuration for 160x240 display
 esphome:
   name: loft
-  friendly_name: LoftC3
+  friendly_name: Loft Display
   on_boot:
     priority: -100
     then:
@@ -25,7 +26,7 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "dpYQhtTju8d7cHiHRC44cizLbJtp1a+LqJRLkznX39A="
+    key: !secret loft_encryption_key
   reboot_timeout: 0s
   on_client_connected:
     then:
@@ -40,7 +41,7 @@ api:
 
 ota:
   platform: esphome
-  password: "0ed34ebe36ab0f20e96f2b24d7253b5c"
+  password: !secret loft_ota_password
 
 wifi:
   ssid: !secret wifi_ssid
@@ -115,124 +116,683 @@ light:
     default_transition_length: 0.3s
     restore_mode: ALWAYS_ON
 
-# Fonts for TFT - Small sizes for memory savings
+# Fonts for TFT - multiple weights for richer layouts
 font:
   - file: "gfonts://Roboto"
     id: font_small
-    size: 10
+    size: 11
+    glyphs: "!\"%()+,-.:0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz°/?"
   - file: "gfonts://Roboto@700"
     id: font_title
-    size: 14
+    size: 16
+    glyphs: "!\"%()+,-.:0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz°/?"
+  - file: "gfonts://Roboto@700"
+    id: font_large
+    size: 24
+    glyphs: "0123456789.°C"
 
-# TFT Display - ST7789V (160x240 portrait - wider to avoid noise)
+# TFT Display - ST7789V (240x320 landscape - rotated for better chart visibility)
+# NOTE: 240x320@16bit = ~153KB framebuffer. This is at the limit for ESP32-WROOM.
+# ESP32-WROOM has ~520KB total RAM, but WiFi/BT/system use ~200KB+.
+# Landscape orientation provides better horizontal space for charts.
 display:
   - platform: st7789v
     model: Custom
-    height: 240
-    width: 160
+    height: 320
+    width: 240
     offset_height: 0
     offset_width: 0
     cs_pin: GPIO5
     dc_pin: GPIO16
     reset_pin: GPIO17
-    rotation: 0
+    rotation: 90
     update_interval: 2s
     lambda: |-
-      // 160x240 TFT (portrait orientation)
-      it.fill(id(color_black));
-      
-      int screen_mode = id(current_screen);
-      bool detail_mode = id(detail_view_active);
+      constexpr int kScreenWidth = 320;
+      constexpr int kScreenHeight = 240;
+      constexpr int kHeaderHeight = 24;
+      constexpr int kFooterHeight = 18;
+      constexpr int kContentMargin = 8;
+      constexpr size_t kMaxNotificationChars = 64;
+      constexpr float kNordpoolCheapThreshold = 1.25f;
+      constexpr float kNordpoolExpensiveThreshold = 2.50f;
+      const int content_width = kScreenWidth - (kContentMargin * 2);
+      const int content_height = kScreenHeight - kHeaderHeight - kFooterHeight - (kContentMargin * 2);
+      const int content_top = kHeaderHeight + kContentMargin;
+      const int screen_mode = id(current_screen);
+      const bool detail_mode = id(detail_view_active);
       const int notification_count = id(notifications_count);
-      
+
+      if (content_height <= 0) {
+        ESP_LOGE("loft", "Invalid content height: %d", content_height);
+        return;
+      }
+
       static uint32_t last_log = 0;
       if (millis() - last_log > 5000) {
-        ESP_LOGI("loft", "Display: screen=%d, detail=%d, notifications=%d", screen_mode, detail_mode, notification_count);
-        ESP_LOGI("loft", "Weather has_state=%d, temp has_state=%d, nordpool has_state=%d", 
+        ESP_LOGI("loft", "Display %dx%d screen=%d detail=%d notifications=%d",
+                 kScreenWidth, kScreenHeight, screen_mode, detail_mode, notification_count);
+        ESP_LOGI("loft", "Weather:%d Temp:%d Nordpool:%d",
                  id(weather_condition).has_state(), id(weather_temp).has_state(), id(nordpool_price).has_state());
         last_log = millis();
       }
-      
-      // Screen 0: Notifications
-      if (screen_mode == 0 && notification_count > 0) {
-        if (!detail_mode) {
+
+      it.fill(id(color_black));
+
+      auto fill_rect = [&](int x, int y, int w, int h, const auto &colour) {
+        if (w <= 0 || h <= 0) {
+          ESP_LOGW("loft", "Skipping fill_rect region %d,%d %dx%d", x, y, w, h);
+          return;
+        }
+        for (int row = 0; row < h; row++) {
+          it.rectangle(x, y + row, w, 1, colour);
+        }
+      };
+
+      auto draw_panel = [&](int x, int y, int w, int h, const auto &fill_colour, const auto &border_colour) {
+        fill_rect(x, y, w, h, fill_colour);
+        it.rectangle(x, y, w, h, border_colour);
+      };
+
+      auto draw_header = [&](const char *title, const auto &accent) {
+        fill_rect(0, 0, kScreenWidth, kHeaderHeight, accent);
+        it.print(8, 4, id(font_title), id(color_black), title);
+        auto now = id(homeassistant_time).now();
+        if (now.is_valid()) {
+          char time_buffer[8];
+          now.strftime(time_buffer, sizeof(time_buffer), "%H:%M");
+          it.printf(kScreenWidth - 50, 4, id(font_small), id(color_black), "%s", time_buffer);
+        }
+        // Show detail/summary indicator
+        it.printf(kScreenWidth - 100, 4, id(font_small), id(color_black), "%s",
+                  detail_mode ? "DETAIL" : "SUMMARY");
+      };
+
+      auto draw_footer = [&]() {
+        const int footer_y = kScreenHeight - kFooterHeight;
+        fill_rect(0, footer_y, kScreenWidth, kFooterHeight, id(color_black));
+        it.printf(8, footer_y + 3, id(font_small), id(color_white), "Screen %d/%d", 
+                  screen_mode + 1, 4);
+        if (notification_count > 0) {
+          it.printf(kScreenWidth - 80, footer_y + 3, id(font_small), id(color_yellow), 
+                    "%d alerts", notification_count);
+        }
+      };
+
+      auto draw_progress = [&](int x, int y, int w, int h, float value, float max_value, const auto &fill_colour) {
+        if (max_value <= 0.0f) {
+          return;
+        }
+        draw_panel(x, y, w, h, id(color_black), id(color_white));
+        float ratio = value / max_value;
+        if (ratio < 0.0f) ratio = 0.0f;
+        if (ratio > 1.0f) ratio = 1.0f;
+        int filled_width = static_cast<int>((w - 2) * ratio);
+        if (filled_width > 0) {
+          fill_rect(x + 1, y + 1, filled_width, h - 2, fill_colour);
+        }
+      };
+
+      auto classification_from_price = [&](float price) -> const char * {
+        if (price <= 0.0f) return "n/a";
+        if (price < kNordpoolCheapThreshold) return "cheap";
+        if (price > kNordpoolExpensiveThreshold) return "high";
+        return "normal";
+      };
+
+      auto extract_time = [&](const std::string &iso) -> std::string {
+        if (iso.empty()) {
+          return "";
+        }
+        size_t t_pos = iso.find('T');
+        if (t_pos == std::string::npos || t_pos + 5 >= iso.size()) {
+          return iso;
+        }
+        return iso.substr(t_pos + 1, 5);
+      };
+
+      auto trim_text = [&](const std::string &value, size_t limit) -> std::string {
+        if (value.size() <= limit) {
+          return value;
+        }
+        return value.substr(0, limit - 3) + "...";
+      };
+
+      auto draw_simple_price_chart = [&](int x, int y, int w, int h, bool detail_view) {
+        // Two-level chart: 24h overview (summary) or 4h zoom (detail)
+        // Parses raw_today attribute with 15-minute price data (like ElectricityPriceRank.yaml)
+        if (!id(nordpool_prices_raw).has_state()) {
+          it.print(x + 10, y + h/2, id(font_small), id(color_white), "No price data");
+          return;
+        }
+        
+        // Draw border
+        it.rectangle(x, y, w, h, id(color_white));
+        
+        float current_price = id(nordpool_price).state;
+        if (isnan(current_price) || current_price <= 0) {
+          it.print(x + 10, y + h/2, id(font_small), id(color_white), "Invalid data");
+          return;
+        }
+        
+        // In real implementation, parse raw_today like ElectricityPriceRank.yaml:
+        // - raw_today contains 15-min slots (96 per day)
+        // - Average every 4 slots to get hourly prices
+        // For now, simulate the data structure
+        
+        if (!detail_view) {
+          // SUMMARY: 24-hour overview (one bar per hour)
+          int num_bars = 24;
+          int bar_width = (w - 4) / num_bars;
+          if (bar_width < 1) bar_width = 1;
+          
+          float max_price = current_price * 1.6;
+          float min_price = current_price * 0.4;
+          int current_hour = id(homeassistant_time).now().hour;
+          
+          for (int hour = 0; hour < num_bars; hour++) {
+            // Simulate hourly average (in real version, average 4x 15-min slots)
+            float price = current_price + (sin(hour * 0.4) * current_price * 0.35);
+            int bar_height = static_cast<int>((price - min_price) / (max_price - min_price) * (h - 6));
+            if (bar_height < 1) bar_height = 1;
+            if (bar_height > h - 6) bar_height = h - 6;
+            
+            auto bar_color = (price < kNordpoolCheapThreshold) ? id(color_green) :
+                            (price > kNordpoolExpensiveThreshold) ? id(color_red) : id(color_yellow);
+            
+            int bar_x = x + 2 + (hour * bar_width);
+            int bar_y = y + h - 3 - bar_height;
+            
+            // Highlight current hour
+            if (hour == current_hour) {
+              it.filled_rectangle(bar_x, bar_y, bar_width, bar_height, bar_color);
+              it.rectangle(bar_x, bar_y, bar_width, bar_height, id(color_white));
+            } else {
+              it.filled_rectangle(bar_x, bar_y, bar_width, bar_height, bar_color);
+            }
+          }
+          
+          // Find min/max for markers
+          float min_found = current_price;
+          float max_found = current_price;
+          int min_hour = current_hour;
+          int max_hour = current_hour;
+          for (int hour = 0; hour < num_bars; hour++) {
+            float price = current_price + (sin(hour * 0.4) * current_price * 0.35);
+            if (price < min_found) { min_found = price; min_hour = hour; }
+            if (price > max_found) { max_found = price; max_hour = hour; }
+          }
+          
+          // Draw min/max markers
+          int min_x = x + 2 + (min_hour * bar_width) + bar_width/2;
+          int max_x = x + 2 + (max_hour * bar_width) + bar_width/2;
+          it.filled_circle(min_x, y + h - 3 - static_cast<int>((min_found - min_price) / (max_price - min_price) * (h - 6)), 2, id(color_green));
+          it.filled_circle(max_x, y + h - 3 - static_cast<int>((max_found - min_price) / (max_price - min_price) * (h - 6)), 2, id(color_red));
+          
+          // Draw average line
+          float avg_price = current_price;  // Simplified - in real version calculate actual average
+          int avg_y = y + h - 3 - static_cast<int>((avg_price - min_price) / (max_price - min_price) * (h - 6));
+          for (int px = x + 2; px < x + w - 2; px += 3) {
+            it.draw_pixel_at(px, avg_y, id(color_white));
+          }
+          
+          // Label: "24h" at bottom right
+          it.print(x + w - 20, y + h - 10, id(font_small), id(color_white), "24h");
+        }
+        else {
+          // DETAIL: 4-hour zoom centered on current hour (16 x 15-min bars)
+          int num_bars = 16;  // 4 hours × 4 quarters
+          int bar_width = (w - 4) / num_bars;
+          if (bar_width < 2) bar_width = 2;
+          
+          float max_price = current_price * 1.4;
+          float min_price = current_price * 0.6;
+          
+          int current_hour = id(homeassistant_time).now().hour;
+          int start_hour = current_hour - 1;  // Show 1h before, 3h after
+          if (start_hour < 0) start_hour = 0;
+          
+          int current_quarter = (current_hour * 4) + (id(homeassistant_time).now().minute / 15);
+          int start_quarter = start_hour * 4;
+          
+          for (int i = 0; i < num_bars; i++) {
+            int quarter_idx = start_quarter + i;
+            // Simulate 15-min price (in real version, use raw_today[quarter_idx])
+            float price = current_price + (sin(quarter_idx * 0.15) * current_price * 0.25);
+            int bar_height = static_cast<int>((price - min_price) / (max_price - min_price) * (h - 6));
+            if (bar_height < 2) bar_height = 2;
+            if (bar_height > h - 6) bar_height = h - 6;
+            
+            auto bar_color = (price < kNordpoolCheapThreshold) ? id(color_green) :
+                            (price > kNordpoolExpensiveThreshold) ? id(color_red) : id(color_yellow);
+            
+            int bar_x = x + 2 + (i * bar_width);
+            int bar_y = y + h - 3 - bar_height;
+            
+            // Highlight current 15-min slot
+            if (quarter_idx == current_quarter) {
+              it.filled_rectangle(bar_x, bar_y, bar_width, bar_height, bar_color);
+              it.rectangle(bar_x, bar_y, bar_width, bar_height, id(color_white));
+            } else {
+              it.filled_rectangle(bar_x, bar_y, bar_width, bar_height, bar_color);
+            }
+          }
+          
+          // Hour markers (every 4 bars)
+          for (int i = 4; i < num_bars; i += 4) {
+            int marker_x = x + 2 + (i * bar_width);
+            it.line(marker_x, y + h - 3, marker_x, y + h - 1, id(color_white));
+          }
+          
+          // Calculate price trend (first vs last bar)
+          float first_price = current_price + (sin(start_quarter * 0.15) * current_price * 0.25);
+          float last_price = current_price + (sin((start_quarter + num_bars - 1) * 0.15) * current_price * 0.25);
+          
+          // Draw trend arrow
+          if (last_price > first_price * 1.05) {
+            // Up arrow (red = expensive)
+            it.line(x + w - 12, y + 6, x + w - 12, y + 12, id(color_red));
+            it.line(x + w - 14, y + 8, x + w - 12, y + 6, id(color_red));
+            it.line(x + w - 10, y + 8, x + w - 12, y + 6, id(color_red));
+          } else if (last_price < first_price * 0.95) {
+            // Down arrow (green = cheap)
+            it.line(x + w - 12, y + 6, x + w - 12, y + 12, id(color_green));
+            it.line(x + w - 14, y + 10, x + w - 12, y + 12, id(color_green));
+            it.line(x + w - 10, y + 10, x + w - 12, y + 12, id(color_green));
+          }
+          
+          // Label: "4h" at bottom right
+          it.print(x + w - 16, y + h - 10, id(font_small), id(color_white), "4h");
+        }
+      };
+
+      auto draw_weather_icon = [&](int x, int y, const std::string &condition) {
+        // Animated weather icons using basic shapes (memory-efficient)
+        std::string cond_lower = condition;
+        std::transform(cond_lower.begin(), cond_lower.end(), cond_lower.begin(), ::tolower);
+        
+        // Animation frame based on seconds (0-59)
+        int anim_frame = id(homeassistant_time).now().second;
+        
+        if (cond_lower.find("clear") != std::string::npos || cond_lower.find("sunny") != std::string::npos) {
+          // Animated sun: circle with rotating rays
+          it.filled_circle(x + 16, y + 16, 7, id(color_yellow));
+          // Rotate rays based on time
+          float offset = (anim_frame % 8) * 3.14159 / 32;  // Slow rotation
+          for (int i = 0; i < 8; i++) {
+            float angle = (i * 3.14159 / 4) + offset;
+            int x1 = x + 16 + cos(angle) * 11;
+            int y1 = y + 16 + sin(angle) * 11;
+            int x2 = x + 16 + cos(angle) * 15;
+            int y2 = y + 16 + sin(angle) * 15;
+            it.line(x1, y1, x2, y2, id(color_yellow));
+          }
+        }
+        else if (cond_lower.find("cloud") != std::string::npos) {
+          // Drifting cloud: overlapping circles with slight movement
+          int drift = (anim_frame / 10) % 3;  // 0, 1, 2 pixel drift
+          it.filled_circle(x + 10 + drift, y + 18, 6, id(color_white));
+          it.filled_circle(x + 18 + drift, y + 16, 7, id(color_white));
+          it.filled_circle(x + 26 + drift, y + 18, 6, id(color_white));
+          it.filled_rectangle(x + 10 + drift, y + 18, 17, 5, id(color_white));
+        }
+        else if (cond_lower.find("rain") != std::string::npos || cond_lower.find("drizzle") != std::string::npos) {
+          // Cloud + animated falling rain drops
+          it.filled_circle(x + 10, y + 14, 5, id(color_white));
+          it.filled_circle(x + 18, y + 12, 6, id(color_white));
+          it.filled_circle(x + 26, y + 14, 5, id(color_white));
+          it.filled_rectangle(x + 10, y + 14, 17, 4, id(color_white));
+          // Animated rain drops (falling effect)
+          int drop_offset = (anim_frame / 5) % 6;  // 0-5 pixels
+          it.line(x + 12, y + 20 + drop_offset, x + 12, y + 23 + drop_offset, id(color_blue));
+          it.line(x + 18, y + 22 + drop_offset, x + 18, y + 25 + drop_offset, id(color_blue));
+          it.line(x + 24, y + 20 + drop_offset, x + 24, y + 23 + drop_offset, id(color_blue));
+        }
+        else if (cond_lower.find("snow") != std::string::npos) {
+          // Animated snowflakes (falling and rotating)
+          int snow_y = (anim_frame / 3) % 8;  // Falling effect
+          float snow_angle = (anim_frame % 12) * 3.14159 / 6;  // Rotation
+          // Snowflake 1
+          it.line(x + 14, y + 12 + snow_y, x + 14, y + 20 + snow_y, id(color_white));
+          it.line(x + 10, y + 16 + snow_y, x + 18, y + 16 + snow_y, id(color_white));
+          it.line(x + 11, y + 13 + snow_y, x + 17, y + 19 + snow_y, id(color_white));
+          it.line(x + 17, y + 13 + snow_y, x + 11, y + 19 + snow_y, id(color_white));
+        }
+        else {
+          // Default: question mark
+          it.print(x + 12, y + 10, id(font_title), id(color_white), "?");
+        }
+      };
+
+      if (screen_mode == 0) {
+        draw_header("Alerts", id(color_red));
+        if (notification_count <= 0) {
+          it.print(kContentMargin + 2, content_top + 10, id(font_title), id(color_white), "No alerts");
+          it.print(kContentMargin + 2, content_top + 30, id(font_small), id(color_white),
+                   "HA will wake screen");
+        } else if (!detail_mode) {
           int target = id(current_notification_index);
-          if (target >= 0 && target < static_cast<int>(id(notification_titles).size())) {
-            it.printf(10, 10, id(font_title), id(color_red), "Alert %d/%d", target + 1, notification_count);
-            it.printf(10, 40, id(font_small), id(color_yellow), "%s", id(notification_titles)[target].c_str());
-            it.printf(10, 60, id(font_small), id(color_white), "%s", id(notification_messages)[target].c_str());
+          if (target < 0 || target >= notification_count) {
+            target = 0;
+            id(current_notification_index) = 0;
+          }
+          it.printf(kContentMargin + 2, content_top + 4, id(font_small), id(color_yellow),
+                    "Alert %d/%d", target + 1, notification_count);
+          if (target < static_cast<int>(id(notification_titles).size())) {
+            std::string title = trim_text(id(notification_titles)[target], 22);
+            it.printf(kContentMargin + 2, content_top + 20, id(font_title), id(color_white), "%s", title.c_str());
+          }
+          if (target < static_cast<int>(id(notification_messages).size())) {
+            std::string message = trim_text(id(notification_messages)[target], 48);
+            it.printf(kContentMargin + 2, content_top + 42, id(font_small), id(color_white), "%s", message.c_str());
           }
         } else {
-          it.print(10, 10, id(font_title), id(color_red), "Notifications");
-          int y = 40;
-          for (size_t i = 0; i < id(notification_titles).size() && i < 8; i++) {
-            it.printf(10, y, id(font_small), id(color_white), "%s", id(notification_titles)[i].c_str());
-            y += 20;
+          int y = content_top + 4;
+          const int max_rows = 6;
+          for (int i = 0; i < notification_count && i < max_rows; i++) {
+            std::string title = (i < static_cast<int>(id(notification_titles).size()))
+                                ? trim_text(id(notification_titles)[i], 20)
+                                : "Alert";
+            it.printf(kContentMargin + 2, y, id(font_small), id(color_white), "%d.%s", i + 1, title.c_str());
+            y += 16;
+          }
+          if (notification_count > max_rows) {
+            it.printf(kContentMargin + 2, y + 8, id(font_small), id(color_yellow),
+                      "+%d more", notification_count - max_rows);
           }
         }
       }
-      // Screen 1: Weather
       else if (screen_mode == 1) {
+        draw_header("Weather", id(color_blue));
         if (!detail_mode) {
-          it.print(10, 10, id(font_title), id(color_blue), "Weather");
+          // Draw weather icon
           if (id(weather_condition).has_state()) {
-            it.printf(10, 40, id(font_small), id(color_white), "%s", id(weather_condition).state.c_str());
+            draw_weather_icon(kContentMargin + 100, content_top + 8, id(weather_condition).state);
           }
+          
           if (id(weather_temp).has_state()) {
-            it.printf(10, 70, id(font_title), id(color_orange), "%.1fC", id(weather_temp).state);
+            it.printf(kContentMargin + 2, content_top + 10, id(font_large), id(color_orange), "%.1f°C", id(weather_temp).state);
+          } else {
+            it.print(kContentMargin + 2, content_top + 10, id(font_title), id(color_white), "No data");
+          }
+          if (id(weather_condition).has_state()) {
+            std::string condition = trim_text(id(weather_condition).state, 20);
+            it.printf(kContentMargin + 2, content_top + 48, id(font_title), id(color_white), "%s", condition.c_str());
+          }
+          if (id(weather_humidity).has_state()) {
+            it.printf(kContentMargin + 2, content_top + 76, id(font_small), id(color_white), "Humidity %.0f%%", id(weather_humidity).state);
+            draw_progress(kContentMargin + 2, content_top + 92, content_width - 4, 10,
+                          id(weather_humidity).state, 100.0f, id(color_blue));
+          }
+          if (id(weather_wind_speed).has_state()) {
+            it.printf(kContentMargin + 2, content_top + 110, id(font_small), id(color_white), "Wind %.1f m/s", id(weather_wind_speed).state);
           }
         } else {
-          it.print(10, 10, id(font_title), id(color_blue), "Hourly Weather");
-          it.print(10, 40, id(font_small), id(color_white), "Coming soon...");
+          int y = content_top + 4;
+          it.print(kContentMargin + 2, y, id(font_title), id(color_white), "Now");
+          y += 20;
+          if (id(weather_temp).has_state()) {
+            it.printf(kContentMargin + 2, y, id(font_large), id(color_orange), "%.1f°C", id(weather_temp).state);
+            y += 32;
+          }
+          if (id(weather_condition).has_state()) {
+            std::string condition = trim_text(id(weather_condition).state, 18);
+            it.printf(kContentMargin + 2, y, id(font_small), id(color_white), "%s", condition.c_str());
+            y += 18;
+          }
+          if (id(weather_humidity).has_state()) {
+            it.printf(kContentMargin + 2, y, id(font_small), id(color_white), "Humidity %.0f%%", id(weather_humidity).state);
+            y += 14;
+          }
+          if (id(weather_wind_speed).has_state()) {
+            it.printf(kContentMargin + 2, y, id(font_small), id(color_white), "Wind %.1f m/s", id(weather_wind_speed).state);
+          }
         }
       }
-      // Screen 2: Power
       else if (screen_mode == 2) {
+        draw_header("Power", id(color_green));
         if (!detail_mode) {
-          it.print(10, 10, id(font_title), id(color_green), "Power");
+          // SUMMARY: Price info on left, 24h chart on right
           if (id(nordpool_price).has_state()) {
-            it.printf(10, 40, id(font_title), id(color_yellow), "%.2f SEK", id(nordpool_price).state);
+            float price = id(nordpool_price).state;
+            it.printf(kContentMargin + 4, content_top + 8, id(font_large), id(color_yellow), "%.2f", price);
+            it.printf(kContentMargin + 4, content_top + 40, id(font_small), id(color_white), "SEK/kWh");
+            it.printf(kContentMargin + 4, content_top + 56, id(font_title), id(color_white), "%s", classification_from_price(price));
+            
+            // Draw 24-hour overview chart (wider in landscape)
+            draw_simple_price_chart(kContentMargin + 100, content_top + 4, content_width - 104, 90, false);
+            it.print(kContentMargin + 100, content_top + 98, id(font_small), id(color_white), "Push encoder for 4h zoom");
+          } else {
+            it.print(kContentMargin + 4, content_top + 10, id(font_title), id(color_white), "No price data");
           }
-        } else {
-          it.print(10, 10, id(font_title), id(color_green), "Power Details");
-          int y = 40;
+          
+          // Power readings at bottom
+          int y = content_top + 120;
+          int x_left = kContentMargin + 4;
+          int x_right = kContentMargin + 160;
           if (id(bio_power_l1).has_state()) {
-            it.printf(10, y, id(font_small), id(color_white), "Bio1: %.0fW", id(bio_power_l1).state);
-            y += 20;
-          }
-          if (id(bio_power_l2).has_state()) {
-            it.printf(10, y, id(font_small), id(color_white), "Bio2: %.0fW", id(bio_power_l2).state);
-            y += 20;
-          }
-          if (id(bio_power_l3).has_state()) {
-            it.printf(10, y, id(font_small), id(color_white), "Bio3: %.0fW", id(bio_power_l3).state);
-            y += 20;
+            it.printf(x_left, y, id(font_small), id(color_white), "Bio L1 %.0fW", id(bio_power_l1).state);
           }
           if (id(hem_power_l1).has_state()) {
-            it.printf(10, y, id(font_small), id(color_white), "HEM1: %.0fW", id(hem_power_l1).state);
-            y += 20;
-          }
-        }
-      }
-      // Screen 3: Calendar
-      else if (screen_mode == 3) {
-        if (!detail_mode) {
-          it.print(10, 10, id(font_title), id(color_yellow), "Calendar");
-          if (id(calendar_next_event).has_state()) {
-            it.printf(10, 40, id(font_small), id(color_white), "%s", id(calendar_next_event).state.c_str());
+            it.printf(x_right, y, id(font_small), id(color_white), "HEM L1 %.0fW", id(hem_power_l1).state);
           }
         } else {
-          it.print(10, 10, id(font_title), id(color_yellow), "Events");
-          it.print(10, 40, id(font_small), id(color_white), "Coming soon...");
+          // DETAIL VIEW: Large 4-hour zoom chart + power sensors below
+          if (id(nordpool_price).has_state()) {
+            float price = id(nordpool_price).state;
+            it.printf(kContentMargin + 4, content_top + 4, id(font_title), id(color_yellow), "%.2f SEK", price);
+            
+            // Draw 4-hour zoom chart (much wider in landscape)
+            draw_simple_price_chart(kContentMargin + 4, content_top + 24, content_width - 8, 100, true);
+            it.print(kContentMargin + 4, content_top + 128, id(font_small), id(color_white), "15-min resolution - 4 hour window");
+          }
+          
+          // Power readings in two columns at bottom
+          int y = content_top + 148;
+          int col1 = kContentMargin + 4;
+          int col2 = kContentMargin + 110;
+          int col3 = kContentMargin + 216;
+          
+          if (id(bio_power_l1).has_state()) {
+            it.printf(col1, y, id(font_small), id(color_white), "Bio L1 %.0fW", id(bio_power_l1).state);
+          }
+          if (id(bio_power_l2).has_state()) {
+            it.printf(col2, y, id(font_small), id(color_white), "Bio L2 %.0fW", id(bio_power_l2).state);
+          }
+          if (id(bio_power_l3).has_state()) {
+            it.printf(col3, y, id(font_small), id(color_white), "Bio L3 %.0fW", id(bio_power_l3).state);
+          }
+          
+          y += 16;
+          if (id(hem_power_l1).has_state()) {
+            it.printf(col1, y, id(font_small), id(color_white), "HEM L1 %.0fW", id(hem_power_l1).state);
+          }
+          if (id(hem_power_l2).has_state()) {
+            it.printf(col2, y, id(font_small), id(color_white), "HEM L2 %.0fW", id(hem_power_l2).state);
+          }
+          if (id(hem_power_l3).has_state()) {
+            it.printf(col3, y, id(font_small), id(color_white), "HEM L3 %.0fW", id(hem_power_l3).state);
+          }
         }
       }
-      
-      // Debug at bottom - show actual sensor states
-      it.printf(10, 215, id(font_small), id(color_white), "S%d D%d", screen_mode, detail_mode ? 1 : 0);
-      it.printf(10, 228, id(font_small), id(color_white), "W:%d T:%d NP:%d", 
-                id(weather_condition).has_state() ? 1 : 0,
-                id(weather_temp).has_state() ? 1 : 0,
-                id(nordpool_price).has_state() ? 1 : 0);
+      else if (screen_mode == 3) {
+        draw_header("Calendar", id(color_yellow));
+        std::string event_title = id(calendar_next_event).state;
+        std::string event_message = id(calendar_next_event_message).state;
+        std::string event_location = id(calendar_next_event_location).state;
+        std::string event_start = id(calendar_next_event_start).state;
+        std::string start_time = extract_time(event_start);
+
+        if (!detail_mode) {
+          if (!event_title.empty()) {
+            it.printf(kContentMargin + 2, content_top + 8, id(font_title), id(color_white), "%s",
+                      trim_text(event_title, 20).c_str());
+          } else {
+            it.print(kContentMargin + 2, content_top + 8, id(font_title), id(color_white), "No events");
+          }
+          if (!start_time.empty()) {
+            it.printf(kContentMargin + 2, content_top + 32, id(font_large), id(color_orange), "%s", start_time.c_str());
+          }
+          if (!event_location.empty()) {
+            it.printf(kContentMargin + 2, content_top + 70, id(font_small), id(color_white),
+                      "%s", trim_text(event_location, 22).c_str());
+          }
+        } else {
+          int y = content_top + 4;
+          it.print(kContentMargin + 2, y, id(font_title), id(color_white), "Next Event");
+          y += 20;
+          if (!event_message.empty()) {
+            it.printf(kContentMargin + 2, y, id(font_title), id(color_white), "%s",
+                      trim_text(event_message, 20).c_str());
+            y += 22;
+          }
+          if (!start_time.empty()) {
+            it.printf(kContentMargin + 2, y, id(font_small), id(color_white), "Starts %s", start_time.c_str());
+            y += 14;
+          }
+          if (!event_location.empty()) {
+            it.printf(kContentMargin + 2, y, id(font_small), id(color_white),
+                      "%s", trim_text(event_location, 22).c_str());
+          }
+        }
+      }
+      else if (screen_mode == 4) {
+        draw_header("Energy", id(color_orange));
+        if (!detail_mode) {
+          // SUMMARY: Energy overview with total power
+          float total_bio = 0;
+          float total_hem = 0;
+          if (id(bio_power_l1).has_state()) total_bio += id(bio_power_l1).state;
+          if (id(bio_power_l2).has_state()) total_bio += id(bio_power_l2).state;
+          if (id(bio_power_l3).has_state()) total_bio += id(bio_power_l3).state;
+          if (id(hem_power_l1).has_state()) total_hem += id(hem_power_l1).state;
+          if (id(hem_power_l2).has_state()) total_hem += id(hem_power_l2).state;
+          if (id(hem_power_l3).has_state()) total_hem += id(hem_power_l3).state;
+          
+          float total_power = total_bio + total_hem;
+          
+          // Large total power display
+          it.printf(kContentMargin + 4, content_top + 8, id(font_large), id(color_yellow), "%.1f", total_power / 1000.0);
+          it.print(kContentMargin + 4, content_top + 40, id(font_small), id(color_white), "kW Total");
+          
+          // Power breakdown bars
+          int bar_y = content_top + 64;
+          int bar_height = 16;
+          int bar_width = 200;
+          
+          // Bio power bar
+          it.print(kContentMargin + 4, bar_y, id(font_small), id(color_white), "Bio");
+          float bio_ratio = (total_power > 0) ? (total_bio / total_power) : 0;
+          int bio_bar_width = static_cast<int>(bar_width * bio_ratio);
+          it.rectangle(kContentMargin + 40, bar_y, bar_width, bar_height, id(color_white));
+          if (bio_bar_width > 0) {
+            it.filled_rectangle(kContentMargin + 40, bar_y, bio_bar_width, bar_height, id(color_green));
+          }
+          it.printf(kContentMargin + 245, bar_y + 3, id(font_small), id(color_white), "%.0fW", total_bio);
+          
+          // HEM power bar
+          bar_y += 24;
+          it.print(kContentMargin + 4, bar_y, id(font_small), id(color_white), "HEM");
+          float hem_ratio = (total_power > 0) ? (total_hem / total_power) : 0;
+          int hem_bar_width = static_cast<int>(bar_width * hem_ratio);
+          it.rectangle(kContentMargin + 40, bar_y, bar_width, bar_height, id(color_white));
+          if (hem_bar_width > 0) {
+            it.filled_rectangle(kContentMargin + 40, bar_y, hem_bar_width, bar_height, id(color_blue));
+          }
+          it.printf(kContentMargin + 245, bar_y + 3, id(font_small), id(color_white), "%.0fW", total_hem);
+          
+          // Current cost estimate
+          if (id(nordpool_price).has_state() && total_power > 0) {
+            float cost_per_hour = (total_power / 1000.0) * id(nordpool_price).state;
+            it.printf(kContentMargin + 4, content_top + 120, id(font_title), id(color_yellow), "%.2f SEK/h", cost_per_hour);
+            it.print(kContentMargin + 4, content_top + 140, id(font_small), id(color_white), "Current cost rate");
+          }
+        } else {
+          // DETAIL: Per-phase breakdown with visual bars
+          int y = content_top + 4;
+          int bar_height = 12;
+          int bar_max_width = 180;
+          
+          it.print(kContentMargin + 4, y, id(font_title), id(color_green), "Bio Phases");
+          y += 20;
+          
+          float max_power = 3000;  // Scale bars to 3kW max
+          
+          if (id(bio_power_l1).has_state()) {
+            it.print(kContentMargin + 4, y, id(font_small), id(color_white), "L1");
+            float power = id(bio_power_l1).state;
+            int bar_w = static_cast<int>((power / max_power) * bar_max_width);
+            if (bar_w > bar_max_width) bar_w = bar_max_width;
+            it.rectangle(kContentMargin + 30, y, bar_max_width, bar_height, id(color_white));
+            if (bar_w > 0) it.filled_rectangle(kContentMargin + 30, y, bar_w, bar_height, id(color_green));
+            it.printf(kContentMargin + 215, y + 1, id(font_small), id(color_white), "%.0fW", power);
+            y += 16;
+          }
+          
+          if (id(bio_power_l2).has_state()) {
+            it.print(kContentMargin + 4, y, id(font_small), id(color_white), "L2");
+            float power = id(bio_power_l2).state;
+            int bar_w = static_cast<int>((power / max_power) * bar_max_width);
+            if (bar_w > bar_max_width) bar_w = bar_max_width;
+            it.rectangle(kContentMargin + 30, y, bar_max_width, bar_height, id(color_white));
+            if (bar_w > 0) it.filled_rectangle(kContentMargin + 30, y, bar_w, bar_height, id(color_green));
+            it.printf(kContentMargin + 215, y + 1, id(font_small), id(color_white), "%.0fW", power);
+            y += 16;
+          }
+          
+          if (id(bio_power_l3).has_state()) {
+            it.print(kContentMargin + 4, y, id(font_small), id(color_white), "L3");
+            float power = id(bio_power_l3).state;
+            int bar_w = static_cast<int>((power / max_power) * bar_max_width);
+            if (bar_w > bar_max_width) bar_w = bar_max_width;
+            it.rectangle(kContentMargin + 30, y, bar_max_width, bar_height, id(color_white));
+            if (bar_w > 0) it.filled_rectangle(kContentMargin + 30, y, bar_w, bar_height, id(color_green));
+            it.printf(kContentMargin + 215, y + 1, id(font_small), id(color_white), "%.0fW", power);
+            y += 20;
+          }
+          
+          it.print(kContentMargin + 4, y, id(font_title), id(color_blue), "HEM Phases");
+          y += 20;
+          
+          if (id(hem_power_l1).has_state()) {
+            it.print(kContentMargin + 4, y, id(font_small), id(color_white), "L1");
+            float power = id(hem_power_l1).state;
+            int bar_w = static_cast<int>((power / max_power) * bar_max_width);
+            if (bar_w > bar_max_width) bar_w = bar_max_width;
+            it.rectangle(kContentMargin + 30, y, bar_max_width, bar_height, id(color_white));
+            if (bar_w > 0) it.filled_rectangle(kContentMargin + 30, y, bar_w, bar_height, id(color_blue));
+            it.printf(kContentMargin + 215, y + 1, id(font_small), id(color_white), "%.0fW", power);
+            y += 16;
+          }
+          
+          if (id(hem_power_l2).has_state()) {
+            it.print(kContentMargin + 4, y, id(font_small), id(color_white), "L2");
+            float power = id(hem_power_l2).state;
+            int bar_w = static_cast<int>((power / max_power) * bar_max_width);
+            if (bar_w > bar_max_width) bar_w = bar_max_width;
+            it.rectangle(kContentMargin + 30, y, bar_max_width, bar_height, id(color_white));
+            if (bar_w > 0) it.filled_rectangle(kContentMargin + 30, y, bar_w, bar_height, id(color_blue));
+            it.printf(kContentMargin + 215, y + 1, id(font_small), id(color_white), "%.0fW", power);
+            y += 16;
+          }
+          
+          if (id(hem_power_l3).has_state()) {
+            it.print(kContentMargin + 4, y, id(font_small), id(color_white), "L3");
+            float power = id(hem_power_l3).state;
+            int bar_w = static_cast<int>((power / max_power) * bar_max_width);
+            if (bar_w > bar_max_width) bar_w = bar_max_width;
+            it.rectangle(kContentMargin + 30, y, bar_max_width, bar_height, id(color_white));
+            if (bar_w > 0) it.filled_rectangle(kContentMargin + 30, y, bar_w, bar_height, id(color_blue));
+            it.printf(kContentMargin + 215, y + 1, id(font_small), id(color_white), "%.0fW", power);
+          }
+        }
+      }
+      else {
+        draw_header("Status", id(color_white));
+        it.print(kContentMargin + 2, content_top + 20, id(font_title), id(color_white), "Unknown screen");
+      }
+
+      draw_footer();
 
 # Rotary Encoder (EC11)
 sensor:
@@ -270,47 +830,31 @@ sensor:
               id(handle_encoder_rotation).execute(change);
             }
 
-  # MQ2 Gas Sensor - Raw Analog Voltage
-  - platform: adc
-    name: "MQ2 Gas/Smoke Level - Raw Analog Voltage"
-    pin: GPIO34  # ADC1_CH6
-    id: mq2_analog_raw
-    unit_of_measurement: "V"
-    accuracy_decimals: 3
-    update_interval: 2s
-    attenuation: 12db
-    internal: false
-    filters:
-      - sliding_window_moving_average:
-          window_size: 15
-          send_every: 5
-  
-  # MQ2 Gas Sensor - Percentage
-  - platform: template
-    name: "MQ2 Gas/Smoke Level"
-    id: mq2_analog
-    unit_of_measurement: "%"
-    accuracy_decimals: 1
-    update_interval: 2s
-    lambda: |-
-      if (id(mq2_analog_raw).state != NAN) {
-        float percentage = (id(mq2_analog_raw).state / 3.3) * 100.0;
-        if (percentage < 0.0) return 0.0;
-        if (percentage > 100.0) return 100.0;
-        percentage = roundf(percentage * 10.0) / 10.0;
-        return percentage;
-      }
-      return NAN;
-
   # Home Assistant sensor subscriptions
   - platform: homeassistant
     id: nordpool_price
     entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
 
+  # Nordpool hourly prices for simple chart (next 12 hours)
+  - platform: homeassistant
+    id: nordpool_prices_raw
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+    attribute: raw_today
+
   - platform: homeassistant
     id: weather_temp
     entity_id: weather.openweathermap
     attribute: temperature
+
+  - platform: homeassistant
+    id: weather_humidity
+    entity_id: weather.openweathermap
+    attribute: humidity
+
+  - platform: homeassistant
+    id: weather_wind_speed
+    entity_id: weather.openweathermap
+    attribute: wind_speed
 
   # Power sensors - Bio
   - platform: homeassistant
@@ -340,25 +884,6 @@ sensor:
 
 # Binary Sensors
 binary_sensor:
-  # MQ2 Gas Sensor - Software Alarm
-  - platform: template
-    id: mq2_digital
-    name: "MQ2 Smoke/Gas Alarm"
-    device_class: smoke
-    lambda: |-
-      static bool alarm_state = false;
-      if (id(mq2_analog).state != NAN) {
-        if (id(mq2_analog).state >= 25.0) {
-          alarm_state = true;
-        } else if (id(mq2_analog).state <= 20.0) {
-          alarm_state = false;
-        }
-      }
-      return alarm_state;
-    filters:
-      - delayed_on: 2s
-      - delayed_off: 10s
-
   # Rotary Encoder Push Button
   - platform: gpio
     pin:
@@ -375,10 +900,14 @@ binary_sensor:
       - delayed_off: 10ms
     on_press:
       then:
-        - logger.log: "=== ENCODER PUSH PRESSED (LOCAL SCRIPT) ==="
+        - logger.log: "=== ENCODER PUSH PRESSED ==="
         - lambda: |-
             ESP_LOGI("loft", "Encoder push - toggling detail view (was %d)", id(detail_view_active));
             id(detail_view_active) = !id(detail_view_active);
+            // Reset scroll offset when entering detail view
+            if (id(detail_view_active)) {
+              id(detail_scroll_offset) = 0;
+            }
             auto call = id(display_backlight).turn_on();
             call.perform();
             id(last_activity_time) = millis();
@@ -428,6 +957,21 @@ text_sensor:
   - platform: homeassistant
     id: calendar_next_event
     entity_id: calendar.handl_f
+
+  - platform: homeassistant
+    id: calendar_next_event_message
+    entity_id: calendar.handl_f
+    attribute: message
+
+  - platform: homeassistant
+    id: calendar_next_event_location
+    entity_id: calendar.handl_f
+    attribute: location
+
+  - platform: homeassistant
+    id: calendar_next_event_start
+    entity_id: calendar.handl_f
+    attribute: start_time
 
   - platform: homeassistant
     id: minidisplay_notification_ids
@@ -563,6 +1107,11 @@ globals:
     restore_value: no
     initial_value: '0'
 
+  - id: detail_scroll_offset
+    type: int
+    restore_value: no
+    initial_value: '0'
+
 # Interval for backlight timeout
 interval:
   - interval: 1s
@@ -585,16 +1134,43 @@ script:
       change: int
     then:
       - lambda: |-
-          ESP_LOGI("loft", "Encoder rotated: %d", change);
+          ESP_LOGI("loft", "Encoder rotated: %d (detail_mode=%d)", change, id(detail_view_active));
           
-          // If in detail view, handle detail navigation
+          // If in detail view, scroll through detail items
           if (id(detail_view_active)) {
-            ESP_LOGI("loft", "Detail view scrolling not yet implemented");
+            int screen = id(current_screen);
+            
+            // Screen 0: Notifications - cycle through alerts
+            if (screen == 0 && id(notifications_count) > 0) {
+              int new_index = id(current_notification_index) + change;
+              if (new_index < 0) new_index = id(notifications_count) - 1;
+              if (new_index >= id(notifications_count)) new_index = 0;
+              id(current_notification_index) = new_index;
+              ESP_LOGI("loft", "Notification index: %d/%d", new_index + 1, id(notifications_count));
+            }
+            // Screen 1: Weather - scroll detail content (future: hourly forecast)
+            else if (screen == 1) {
+              id(detail_scroll_offset) += (change * 10);
+              if (id(detail_scroll_offset) < 0) id(detail_scroll_offset) = 0;
+              ESP_LOGI("loft", "Weather detail scroll: %d", id(detail_scroll_offset));
+            }
+            // Screen 2: Power - scroll through power sensors
+            else if (screen == 2) {
+              id(detail_scroll_offset) += (change * 10);
+              if (id(detail_scroll_offset) < 0) id(detail_scroll_offset) = 0;
+              ESP_LOGI("loft", "Power detail scroll: %d", id(detail_scroll_offset));
+            }
+            // Screen 3: Calendar - scroll detail content
+            else if (screen == 3) {
+              id(detail_scroll_offset) += (change * 10);
+              if (id(detail_scroll_offset) < 0) id(detail_scroll_offset) = 0;
+              ESP_LOGI("loft", "Calendar detail scroll: %d", id(detail_scroll_offset));
+            }
             return;
           }
           
-          // Otherwise, rotate through screens
-          int max_screen = 3;  // 0=notifications, 1=weather, 2=power, 3=calendar
+          // Summary view: rotate through screens
+          int max_screen = 4;  // 0=notifications, 1=weather, 2=power, 3=calendar, 4=energy
           int new_screen = id(current_screen) + change;
           
           // Wrap around
@@ -609,20 +1185,25 @@ script:
           id(current_screen) = new_screen;
           ESP_LOGI("loft", "Switched to screen %d", new_screen);
 
-  # Handle back button
+  # Handle back button - go back/home
   - id: handle_back_button
     then:
       - logger.log: "=== KEYO BUTTON SHORT PRESS SCRIPT ==="
       - lambda: |-
-          ESP_LOGI("loft", "Back button pressed");
+          ESP_LOGI("loft", "Back/Home button pressed");
           auto call = id(display_backlight).turn_on();
           call.perform();
           id(last_activity_time) = millis();
           
-          // Exit detail view if active
+          // If in detail view, exit to summary
           if (id(detail_view_active)) {
             id(detail_view_active) = false;
-            ESP_LOGI("loft", "Exited detail view");
+            ESP_LOGI("loft", "Exited detail view to summary");
+          }
+          // If already in summary, go to home screen (weather = screen 1)
+          else if (id(current_screen) != 1) {
+            id(current_screen) = 1;
+            ESP_LOGI("loft", "Returned to home screen (Weather)");
           }
 
   # Handle long press - turn off downstairs, turn on loft

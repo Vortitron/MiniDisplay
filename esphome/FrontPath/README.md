@@ -1,14 +1,61 @@
 # FrontPath - ESP32-C3 SuperMini with Dual LD2410C Sensors
 
+## ⚡ Two Operating Modes Available
+
+This project supports **two different configurations**:
+
+### 🔵 **BLE Proxy Mode** (Current: `FrontPath.yaml`) - RECOMMENDED
+- ESP32 acts as Bluetooth proxy for Home Assistant
+- LD2410 sensors communicate directly with HA via BLE
+- All detection logic runs in HA automations (full flexibility)
+- Simpler ESP32 code, easier to maintain
+- Better diagnostics and sensor visibility in HA
+- **See [BLE_SETUP.md](BLE_SETUP.md) for setup instructions**
+- **See [HA_AUTOMATIONS.md](HA_AUTOMATIONS.md) for automation examples**
+
+### 🔌 **UART Mode** (Backup: `FrontPathUART.yaml`)
+- Direct UART connection to sensors
+- All detection logic runs on ESP32 (adaptive baseline, gate calibration)
+- More complex but fully autonomous
+- Original configuration with sophisticated filtering
+- **See sections below for UART setup details**
+
+**To switch modes:** Flash the appropriate YAML file. For BLE mode, disconnect TX/RX pins from sensors (power only).
+
+---
+
 ## Hardware Configuration
 
 This configuration uses an ESP32-C3 SuperMini board with two LD2410C millimetre-wave radar sensors in a single enclosure positioned at the middle of a 12m outdoor path:
-- **Sensor 1**: Points towards the door/house
-- **Sensor 2**: Points away from the door/house (towards the far end)
+- **Sensor 1**: `B8:BE:51:7D:71:44` - Points towards the door/house
+- **Sensor 2**: `14:AA:8C:58:66:02` - Points away from the door/house (towards the far end)
 
 Both sensors are mounted in the same box at the path's midpoint, pointing in opposite directions to provide full coverage of the 12m path length and enable direction/position tracking.
 
 ## Wiring Connections
+
+### BLE Mode (Current Configuration)
+
+**TEMT6000 Light Sensor:**
+| TEMT6000 Pin | ESP32-C3 Pin | Function |
+|--------------|--------------|----------|
+| VCC          | 5V           | Power    |
+| GND          | GND          | Ground   |
+| OUT (SIG)    | GPIO0        | Analog output |
+
+**LD2410 Sensors (Power Only):**
+| LD2410 Pin | ESP32-C3 Pin | Function |
+|------------|--------------|----------|
+| VCC        | 5V           | Power    |
+| GND        | GND          | Ground   |
+| TX         | Not connected | BLE mode |
+| RX         | Not connected | BLE mode |
+
+**Important:** Do NOT connect TX/RX pins in BLE mode. Sensors automatically broadcast BLE when UART is disconnected.
+
+---
+
+### UART Mode Wiring (FrontPathUART.yaml)
 
 ### ESP32-C3 SuperMini Pinout Reference
 ```
