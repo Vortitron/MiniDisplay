@@ -14,23 +14,26 @@ triggers:
     at: "23:00:00"
     id: end_evening_occupancy
   - trigger: state
-    entity_id: sensor.lyeklint_hancock_felix_needs_preparation_today_2
-    attribute: needs_preparation
+    entity_id: input_boolean.school_day
   - trigger: homeassistant
     event: start
 conditions: []
 actions:
   - variables:
-      # Determine if today is a "weekend" (actual weekend or no prep needed)
+      school_day: >-
+        {% set raw = states('input_boolean.school_day') %}
+        {% if raw in ['on', 'off'] %}
+          {{ raw == 'on' }}
+        {% else %}
+          false
+        {% endif %}
+      # Determine if today is a "weekend" (actual weekend or school day off)
       is_weekend: >-
         {% set day_of_week = now().weekday() %}
-        {% set needs_prep = state_attr('sensor.lyeklint_hancock_felix_needs_preparation_today_2', 'needs_preparation') %}
-        {{ day_of_week >= 5 or needs_prep == false }}
+        {{ day_of_week >= 5 or not school_day }}
       # Base temperature: 16C weekend, 10C weekday
       base_temp: >-
-        {% set day_of_week = now().weekday() %}
-        {% set needs_prep = state_attr('sensor.lyeklint_hancock_felix_needs_preparation_today_2', 'needs_preparation') %}
-        {% if day_of_week >= 5 or needs_prep == false %}
+        {% if is_weekend %}
           16
         {% else %}
           10
@@ -72,10 +75,7 @@ actions:
         {% endif %}
       # Calculate temperature with price rank boost
       target_temp: >-
-        {% set day_of_week = now().weekday() %}
-        {% set needs_prep = state_attr('sensor.lyeklint_hancock_felix_needs_preparation_today_2', 'needs_preparation') %}
         {% set current_hour = now().hour %}
-        {% set is_weekend = day_of_week >= 5 or needs_prep == false %}
         {% set is_daytime = current_hour >= 5 and current_hour < 17 %}
         
         {# Check occupancy #}

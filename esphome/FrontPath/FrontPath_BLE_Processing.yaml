@@ -1,0 +1,735 @@
+substitutions:
+  ld2410_sensor1_mac: B8:BE:51:7D:71:44
+  ld2410_sensor2_mac: 14:AA:8C:58:66:02
+  ld2410_password: "HiLink"
+  sensor_throttle: '200ms'
+
+esphome:
+  name: frontpath
+  friendly_name: FrontPath BLE Processing
+  on_boot:
+    priority: -100
+    then:
+      - script.execute: sensor1_start_after_delay
+      - script.execute: sensor2_start_after_delay
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_BT_BLE_42_FEATURES_SUPPORTED: y
+
+logger:
+  level: INFO
+  logs:
+    ble_client: INFO
+    sensor: WARN
+
+api:
+  encryption:
+    key: !secret frontpath_encryption_key
+  reboot_timeout: 15min
+
+ota:
+  - platform: esphome
+    password: !secret frontpath_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+  fast_connect: false
+  reboot_timeout: 15min
+  output_power: 13.5dB
+
+# Globals for rolling averages and detection state
+globals:
+  # Sensor 1 (7144) gate energy baselines (10-min rolling avg)
+  - id: sensor1_gate_avg
+    type: float[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  
+  # Sensor 2 (6602) gate energy baselines
+  - id: sensor2_gate_avg
+    type: float[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  
+  # Current gate energies
+  - id: sensor1_gates
+    type: float[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  
+  - id: sensor2_gates
+    type: float[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  
+  # Overall moving target energy
+  - id: sensor1_moving_energy
+    type: float
+    restore_value: no
+    initial_value: '0'
+  
+  - id: sensor2_moving_energy
+    type: float
+    restore_value: no
+    initial_value: '0'
+  
+  # Baselines for overall energy
+  - id: sensor1_moving_avg
+    type: float
+    restore_value: no
+    initial_value: '0'
+  
+  - id: sensor2_moving_avg
+    type: float
+    restore_value: no
+    initial_value: '0'
+  
+  # Moving target flags
+  - id: sensor1_has_target
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  
+  - id: sensor2_has_target
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  
+  # Detection parameters (can be adjusted via HA)
+  - id: energy_margin_pct
+    type: float
+    restore_value: yes
+    initial_value: '22.0'
+  
+  - id: gate_trigger_floor_pct
+    type: float
+    restore_value: yes
+    initial_value: '18.0'
+  
+  - id: gate_delta_margin_pct
+    type: float
+    restore_value: yes
+    initial_value: '8.0'
+  
+  - id: path_length_m
+    type: float
+    restore_value: yes
+    initial_value: '16.0'
+  
+  # Sample count for rolling average (10min @ 200ms = ~3000 samples, use 120 for memory)
+  - id: avg_alpha
+    type: float
+    restore_value: no
+    initial_value: '0.0083'  # EMA alpha ≈ 2/(N+1) where N=240 samples
+
+# BLE Client for Sensor 1 (Door end - 7144)
+ble_client:
+  - mac_address: ${ld2410_sensor1_mac}
+    id: ld2410_sensor1
+    on_passkey_notification:
+      then:
+        - lambda: |-
+            const char *TAG = "sensor1_notify";
+            ESP_LOGD(TAG, "Notification received, %d bytes", x.size());
+            
+            if (!id(sensor1_connected)->state) {
+              id(sensor1_connected).publish_state(true);
+              ESP_LOGI(TAG, "Sensor 1 (7144) data flowing");
+            }
+            
+            if (x.size() < 32) {
+              return;
+            }
+            
+            // Engineering mode packet format
+            if (x[0] == 0xf4 && x[1] == 0xf3 && x[2] == 0xf2 && x[3] == 0xf1) {
+              bool moving = x[8] & 0x01;
+              float motion_distance = x[9] + (x[10] << 8);
+              float motion_energy = x[11];
+              
+              id(sensor1_has_target) = moving;
+              id(sensor1_moving_energy) = motion_energy;
+              
+              // Update EMA baseline
+              float alpha = id(avg_alpha);
+              id(sensor1_moving_avg) = alpha * motion_energy + (1 - alpha) * id(sensor1_moving_avg);
+              
+              // Parse gate energies
+              if (x.size() >= 53) {
+                for (int i = 0; i < 9; i++) {
+                  int offset = 17 + (i * 2);
+                  if (offset < x.size()) {
+                    float gate_energy = x[offset];
+                    id(sensor1_gates)[i] = gate_energy;
+                    id(sensor1_gate_avg)[i] = alpha * gate_energy + (1 - alpha) * id(sensor1_gate_avg)[i];
+                  }
+                }
+              } else {
+                // Fallback: estimate from distance
+                int gate_idx = (int)(motion_distance / 75.0);
+                if (gate_idx > 8) gate_idx = 8;
+                for (int i = 0; i < 9; i++) {
+                  id(sensor1_gates)[i] = (i == gate_idx) ? motion_energy : 0;
+                }
+              }
+              
+              id(calculate_person_detection).execute();
+            }
+    on_disconnect:
+      then:
+        - logger.log:
+            format: "Sensor 1 (7144) disconnected"
+            tag: "ble_sensor1"
+        - lambda: id(sensor1_connected).publish_state(false);
+        - delay: 1s
+        - script.execute: sensor1_start_after_delay
+    on_connect:
+      then:
+        - logger.log:
+            format: "Sensor 1 (7144) connecting..."
+            tag: "ble_sensor1"
+        - delay: 100ms
+        # Authenticate
+        - ble_client.ble_write:
+            id: ld2410_sensor1
+            service_uuid: 0000fff0-0000-1000-8000-00805f9b34fb
+            characteristic_uuid: 0000fff2-0000-1000-8000-00805f9b34fb
+            value: !lambda |-
+              std::vector<uint8_t> data = { 0xfd, 0xfc, 0xfb, 0xfa, 0x08, 0x00, 0xa8, 0x00 };
+              std::vector<uint8_t> postamble = { 0x04, 0x03, 0x02, 0x01 };
+              std::string pw = {"${ld2410_password}"};
+              for (auto& c : pw) {
+                data.push_back(c);
+              }
+              data.insert(data.end(), postamble.begin(), postamble.end());
+              return data;
+        - delay: 250ms
+        # Enable config mode
+        - ble_client.ble_write:
+            id: ld2410_sensor1
+            service_uuid: 0000fff0-0000-1000-8000-00805f9b34fb
+            characteristic_uuid: 0000fff2-0000-1000-8000-00805f9b34fb
+            value: [0xfd, 0xfc, 0xfb, 0xfa, 0x04, 0x00, 0xff, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01]
+        - delay: 250ms
+        # Enable engineering mode (gate data)
+        - ble_client.ble_write:
+            id: ld2410_sensor1
+            service_uuid: 0000fff0-0000-1000-8000-00805f9b34fb
+            characteristic_uuid: 0000fff2-0000-1000-8000-00805f9b34fb
+            value: [0xfd, 0xfc, 0xfb, 0xfa, 0x02, 0x00, 0x62, 0x00, 0x04, 0x03, 0x02, 0x01]
+        - delay: 250ms
+        # Disable config mode
+        - ble_client.ble_write:
+            id: ld2410_sensor1
+            service_uuid: 0000fff0-0000-1000-8000-00805f9b34fb
+            characteristic_uuid: 0000fff2-0000-1000-8000-00805f9b34fb
+            value: [0xfd, 0xfc, 0xfb, 0xfa, 0x02, 0x00, 0xfe, 0x00, 0x04, 0x03, 0x02, 0x01]
+        - delay: 250ms
+        - logger.log:
+            format: "Sensor 1 (7144) configured, enabling notifications..."
+            tag: "ble_sensor1"
+        - delay: 250ms
+        - lambda: |-
+            auto *client = id(ld2410_sensor1);
+            auto *chr = client->get_characteristic(
+              esphome::esp32_ble::ESPBTUUID::from_raw("0000fff0-0000-1000-8000-00805f9b34fb"),
+              esphome::esp32_ble::ESPBTUUID::from_raw("0000fff1-0000-1000-8000-00805f9b34fb")
+            );
+            if (chr == nullptr) {
+              ESP_LOGE("ble_sensor1", "Failed to get characteristic!");
+              return;
+            }
+            
+            auto status = esp_ble_gattc_register_for_notify(
+              client->get_gattc_if(),
+              client->get_remote_bda(),
+              chr->handle
+            );
+            ESP_LOGD("ble_sensor1", "Registered for notifications, handle=%d, status=%d", chr->handle, status);
+            
+            if (status == ESP_GATT_OK) {
+              id(sensor1_connected).publish_state(true);
+            }
+        - delay: 10s
+        - if:
+            condition:
+              lambda: 'return !id(sensor1_connected)->state;'
+            then:
+              - logger.log:
+                  format: "Sensor 1 failed to start, retrying..."
+                  tag: "ble_sensor1"
+              - lambda: id(ld2410_sensor1)->set_enabled(false);
+              - script.execute: sensor1_start_after_delay
+
+  - mac_address: ${ld2410_sensor2_mac}
+    id: ld2410_sensor2
+    on_disconnect:
+      then:
+        - logger.log:
+            format: "Sensor 2 (6602) disconnected"
+            tag: "ble_sensor2"
+        - lambda: id(sensor2_connected).publish_state(false);
+        - delay: 1s
+        - script.execute: sensor2_start_after_delay
+    on_connect:
+      then:
+        - logger.log:
+            format: "Sensor 2 (6602) connecting..."
+            tag: "ble_sensor2"
+        - delay: 100ms
+        # Authenticate
+        - ble_client.ble_write:
+            id: ld2410_sensor2
+            service_uuid: 0000fff0-0000-1000-8000-00805f9b34fb
+            characteristic_uuid: 0000fff2-0000-1000-8000-00805f9b34fb
+            value: !lambda |-
+              std::vector<uint8_t> data = { 0xfd, 0xfc, 0xfb, 0xfa, 0x08, 0x00, 0xa8, 0x00 };
+              std::vector<uint8_t> postamble = { 0x04, 0x03, 0x02, 0x01 };
+              std::string pw = {"${ld2410_password}"};
+              for (auto& c : pw) {
+                data.push_back(c);
+              }
+              data.insert(data.end(), postamble.begin(), postamble.end());
+              return data;
+        - delay: 250ms
+        # Enable config mode
+        - ble_client.ble_write:
+            id: ld2410_sensor2
+            service_uuid: 0000fff0-0000-1000-8000-00805f9b34fb
+            characteristic_uuid: 0000fff2-0000-1000-8000-00805f9b34fb
+            value: [0xfd, 0xfc, 0xfb, 0xfa, 0x04, 0x00, 0xff, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01]
+        - delay: 250ms
+        # Enable engineering mode
+        - ble_client.ble_write:
+            id: ld2410_sensor2
+            service_uuid: 0000fff0-0000-1000-8000-00805f9b34fb
+            characteristic_uuid: 0000fff2-0000-1000-8000-00805f9b34fb
+            value: [0xfd, 0xfc, 0xfb, 0xfa, 0x02, 0x00, 0x62, 0x00, 0x04, 0x03, 0x02, 0x01]
+        - delay: 250ms
+        # Disable config mode
+        - ble_client.ble_write:
+            id: ld2410_sensor2
+            service_uuid: 0000fff0-0000-1000-8000-00805f9b34fb
+            characteristic_uuid: 0000fff2-0000-1000-8000-00805f9b34fb
+            value: [0xfd, 0xfc, 0xfb, 0xfa, 0x02, 0x00, 0xfe, 0x00, 0x04, 0x03, 0x02, 0x01]
+        - delay: 250ms
+        - logger.log:
+            format: "Sensor 2 (6602) configured, enabling notifications..."
+            tag: "ble_sensor2"
+        - delay: 250ms
+        - lambda: |-
+            auto *client = id(ld2410_sensor2);
+            auto *chr = client->get_characteristic(
+              esphome::esp32_ble::ESPBTUUID::from_raw("0000fff0-0000-1000-8000-00805f9b34fb"),
+              esphome::esp32_ble::ESPBTUUID::from_raw("0000fff1-0000-1000-8000-00805f9b34fb")
+            );
+            if (chr == nullptr) {
+              ESP_LOGE("ble_sensor2", "Failed to get characteristic!");
+              return;
+            }
+            
+            auto status = esp_ble_gattc_register_for_notify(
+              client->get_gattc_if(),
+              client->get_remote_bda(),
+              chr->handle
+            );
+            ESP_LOGD("ble_sensor2", "Registered for notifications, handle=%d, status=%d", chr->handle, status);
+            
+            if (status == ESP_GATT_OK) {
+              id(sensor2_connected).publish_state(true);
+            }
+        - delay: 10s
+        - if:
+            condition:
+              lambda: 'return !id(sensor2_connected)->state;'
+            then:
+              - logger.log:
+                  format: "Sensor 2 failed to start, retrying..."
+                  tag: "ble_sensor2"
+              - lambda: id(ld2410_sensor2)->set_enabled(false);
+              - script.execute: sensor2_start_after_delay
+
+script:
+  - id: sensor1_start_after_delay
+    then:
+      - delay: !lambda 'return (rand() % 5000) + 1000;'
+      - lambda: id(ld2410_sensor1)->set_enabled(true);
+  
+  - id: sensor2_start_after_delay
+    then:
+      - delay: !lambda 'return (rand() % 5000) + 3000;'
+      - lambda: id(ld2410_sensor2)->set_enabled(true);
+  
+  # Person detection logic - runs after sensor updates
+  - id: calculate_person_detection
+    then:
+      - lambda: |-
+          const char *TAG = "person_detect";
+          
+          float margin = id(energy_margin_pct);
+          float gate_floor = id(gate_trigger_floor_pct);
+          float gate_delta_margin = id(gate_delta_margin_pct);
+          
+          // Overall energy check
+          float s1 = id(sensor1_moving_energy);
+          float s2 = id(sensor2_moving_energy);
+          float base1 = id(sensor1_moving_avg);
+          float base2 = id(sensor2_moving_avg);
+          float delta1 = s1 - base1;
+          float delta2 = s2 - base2;
+          bool moving1 = id(sensor1_has_target);
+          bool moving2 = id(sensor2_has_target);
+          
+          // Per-gate check
+          float gate_peak = 0;
+          int gates_hot = 0;
+          float gate_delta_max = 0;
+          
+          for (int i = 0; i < 9; i++) {
+            float g1 = id(sensor1_gates)[i];
+            float g2 = id(sensor2_gates)[i];
+            float total_gate = g1 + g2;
+            
+            if (total_gate > gate_peak) {
+              gate_peak = total_gate;
+            }
+            if (total_gate >= gate_floor) {
+              gates_hot++;
+            }
+            
+            // Check delta vs baseline
+            float avg1 = id(sensor1_gate_avg)[i];
+            float avg2 = id(sensor2_gate_avg)[i];
+            float delta_g1 = g1 - avg1;
+            float delta_g2 = g2 - avg2;
+            if (delta_g1 > gate_delta_max) gate_delta_max = delta_g1;
+            if (delta_g2 > gate_delta_max) gate_delta_max = delta_g2;
+          }
+          
+          // Detection logic
+          bool cond_energy = (delta1 >= margin || delta2 >= margin) && (moving1 || moving2);
+          bool cond_gate = (gate_peak >= gate_floor) && ((moving1 || moving2) || (gates_hot >= 2));
+          bool cond_sequential = gate_delta_max >= gate_delta_margin;
+          
+          bool detected = cond_energy || cond_gate || cond_sequential;
+          
+          ESP_LOGD(TAG, "Detection: energy=%d gate=%d seq=%d => %d (delta1=%.1f delta2=%.1f gate_peak=%.1f gate_delta_max=%.1f)",
+                   cond_energy, cond_gate, cond_sequential, detected, delta1, delta2, gate_peak, gate_delta_max);
+          
+          id(person_detected).publish_state(detected);
+      
+      # Calculate position
+      - lambda: |-
+          const float GATE_SPAN = 0.75;
+          float path_length = id(path_length_m);
+          float gate_floor = id(gate_trigger_floor_pct);
+          
+          // Find strongest gate from each sensor
+          int door_idx = -1, street_idx = -1;
+          float door_energy = 0, street_energy = 0;
+          
+          for (int i = 0; i < 9; i++) {
+            float g1 = id(sensor1_gates)[i];
+            float g2 = id(sensor2_gates)[i];
+            if (g1 > door_energy) {
+              door_energy = g1;
+              door_idx = i;
+            }
+            if (g2 > street_energy) {
+              street_energy = g2;
+              street_idx = i;
+            }
+          }
+          
+          float pos = 0;
+          if (door_energy >= gate_floor || street_energy >= gate_floor) {
+            if (door_energy >= street_energy) {
+              pos = path_length - (door_idx + 0.5) * GATE_SPAN;
+            } else {
+              pos = (street_idx + 0.5) * GATE_SPAN;
+            }
+          }
+          
+          if (pos < 0) pos = 0;
+          if (pos > path_length) pos = path_length;
+          
+          id(person_position).publish_state(pos);
+          
+          // Active gate
+          std::string active_gate = "none";
+          if (door_energy >= gate_floor && door_energy >= street_energy) {
+            active_gate = "door_" + std::to_string(door_idx);
+          } else if (street_energy >= gate_floor) {
+            active_gate = "street_" + std::to_string(street_idx);
+          }
+          id(active_gate_sensor).publish_state(active_gate);
+
+binary_sensor:
+  - platform: template
+    name: "Sensor 1 (7144) Connected"
+    id: sensor1_connected
+    device_class: connectivity
+  
+  - platform: template
+    name: "Sensor 2 (6602) Connected"
+    id: sensor2_connected
+    device_class: connectivity
+  
+  - platform: template
+    name: "Path Person Detected"
+    id: person_detected
+    device_class: occupancy
+    filters:
+      - delayed_on: 1s
+      - delayed_off: 8s
+
+text_sensor:
+  - platform: template
+    name: "Active Gate"
+    id: active_gate_sensor
+    icon: mdi:gate
+
+sensor:
+  # BLE parser for Sensor 1 - processes engineering mode data with gate info
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: ld2410_sensor1
+    service_uuid: '0000fff0-0000-1000-8000-00805f9b34fb'
+    characteristic_uuid: '0000fff1-0000-1000-8000-00805f9b34fb'
+    update_interval: never
+    notify: false
+    internal: true
+    id: sensor1_ble_parser
+    filters:
+      - throttle: ${sensor_throttle}
+    lambda: |-
+      const char *TAG = "sensor1_parse";
+      
+      if (!id(sensor1_connected)->state) {
+        id(sensor1_connected).publish_state(true);
+        ESP_LOGI(TAG, "Sensor 1 (7144) data flowing");
+      }
+      
+      if (x.size() < 32) {
+        ESP_LOGV(TAG, "Packet too small: %d bytes", x.size());
+        return NAN;
+      }
+      
+      // Engineering mode packet format (partial, need full spec for gates)
+      // For now, parse basic data and estimate gate energies from distance
+      if (x[0] == 0xf4 && x[1] == 0xf3 && x[2] == 0xf2 && x[3] == 0xf1) {
+        bool moving = x[8] & 0x01;
+        float motion_distance = x[9] + (x[10] << 8);
+        float motion_energy = x[11];
+        
+        id(sensor1_has_target) = moving;
+        id(sensor1_moving_energy) = motion_energy;
+        
+        // Update EMA baseline
+        float alpha = id(avg_alpha);
+        id(sensor1_moving_avg) = alpha * motion_energy + (1 - alpha) * id(sensor1_moving_avg);
+        
+        // Parse gate energies from engineering packet (gates start at byte 17+)
+        // Format: [motion_gate_0, static_gate_0, motion_gate_1, static_gate_1, ...]
+        if (x.size() >= 53) {
+          for (int i = 0; i < 9; i++) {
+            int offset = 17 + (i * 2);
+            if (offset < x.size()) {
+              float gate_energy = x[offset];
+              id(sensor1_gates)[i] = gate_energy;
+              
+              // Update gate baseline
+              id(sensor1_gate_avg)[i] = alpha * gate_energy + (1 - alpha) * id(sensor1_gate_avg)[i];
+            }
+          }
+        } else {
+          // Fallback: estimate gate from distance
+          int gate_idx = (int)(motion_distance / 75.0);
+          if (gate_idx > 8) gate_idx = 8;
+          for (int i = 0; i < 9; i++) {
+            id(sensor1_gates)[i] = (i == gate_idx) ? motion_energy : 0;
+          }
+        }
+        
+        id(calculate_person_detection).execute();
+      }
+      
+      return NAN;
+  
+  # BLE parser for Sensor 2
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: ld2410_sensor2
+    service_uuid: '0000fff0-0000-1000-8000-00805f9b34fb'
+    characteristic_uuid: '0000fff1-0000-1000-8000-00805f9b34fb'
+    update_interval: never
+    notify: false
+    internal: true
+    id: sensor2_ble_parser
+    filters:
+      - throttle: ${sensor_throttle}
+    lambda: |-
+      const char *TAG = "sensor2_parse";
+      
+      if (!id(sensor2_connected)->state) {
+        id(sensor2_connected).publish_state(true);
+        ESP_LOGI(TAG, "Sensor 2 (6602) data flowing");
+      }
+      
+      if (x.size() < 32) {
+        ESP_LOGV(TAG, "Packet too small: %d bytes", x.size());
+        return NAN;
+      }
+      
+      if (x[0] == 0xf4 && x[1] == 0xf3 && x[2] == 0xf2 && x[3] == 0xf1) {
+        bool moving = x[8] & 0x01;
+        float motion_distance = x[9] + (x[10] << 8);
+        float motion_energy = x[11];
+        
+        id(sensor2_has_target) = moving;
+        id(sensor2_moving_energy) = motion_energy;
+        
+        float alpha = id(avg_alpha);
+        id(sensor2_moving_avg) = alpha * motion_energy + (1 - alpha) * id(sensor2_moving_avg);
+        
+        if (x.size() >= 53) {
+          for (int i = 0; i < 9; i++) {
+            int offset = 17 + (i * 2);
+            if (offset < x.size()) {
+              float gate_energy = x[offset];
+              id(sensor2_gates)[i] = gate_energy;
+              id(sensor2_gate_avg)[i] = alpha * gate_energy + (1 - alpha) * id(sensor2_gate_avg)[i];
+            }
+          }
+        } else {
+          int gate_idx = (int)(motion_distance / 75.0);
+          if (gate_idx > 8) gate_idx = 8;
+          for (int i = 0; i < 9; i++) {
+            id(sensor2_gates)[i] = (i == gate_idx) ? motion_energy : 0;
+          }
+        }
+        
+        id(calculate_person_detection).execute();
+      }
+      
+      return NAN;
+  
+  # Outputs for HA
+  - platform: template
+    name: "Path Person Position"
+    id: person_position
+    device_class: distance
+    unit_of_measurement: "m"
+    accuracy_decimals: 2
+    icon: mdi:map-marker-path
+  
+  # WiFi signal monitoring
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 30s
+  
+  # Light sensor (from existing config)
+  - platform: adc
+    pin: GPIO0
+    name: "Light Level Voltage"
+    id: light_level_voltage
+    update_interval: 2s
+    attenuation: 12db
+    filters:
+      - exponential_moving_average:
+          alpha: 0.1
+          send_every: 1
+    internal: true
+  
+  - platform: template
+    name: "Light Level"
+    id: light_level
+    update_interval: 2s
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    icon: mdi:brightness-6
+    lambda: |-
+      float volts = id(light_level_voltage).state;
+      if (isnan(volts)) return NAN;
+      float ratio = volts / 3.3f;
+      if (ratio < 0.0f) ratio = 0.0f;
+      if (ratio > 1.0f) ratio = 1.0f;
+      return ratio * 100.0f;
+
+# Tunable parameters exposed to HA
+number:
+  - platform: template
+    name: "Energy Margin"
+    id: energy_margin
+    min_value: 5
+    max_value: 60
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:signal-variant
+    set_action:
+      - globals.set:
+          id: energy_margin_pct
+          value: !lambda 'return x;'
+    lambda: 'return id(energy_margin_pct);'
+  
+  - platform: template
+    name: "Gate Trigger Floor"
+    id: gate_trigger_floor
+    min_value: 5
+    max_value: 60
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:gate
+    set_action:
+      - globals.set:
+          id: gate_trigger_floor_pct
+          value: !lambda 'return x;'
+    lambda: 'return id(gate_trigger_floor_pct);'
+  
+  - platform: template
+    name: "Gate Delta Margin"
+    id: gate_delta_margin
+    min_value: 2
+    max_value: 80
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:chart-line
+    set_action:
+      - globals.set:
+          id: gate_delta_margin_pct
+          value: !lambda 'return x;'
+    lambda: 'return id(gate_delta_margin_pct);'
+  
+  - platform: template
+    name: "Path Length"
+    id: path_length
+    min_value: 8
+    max_value: 20
+    step: 0.5
+    unit_of_measurement: "m"
+    icon: mdi:map-marker-distance
+    set_action:
+      - globals.set:
+          id: path_length_m
+          value: !lambda 'return x;'
+    lambda: 'return id(path_length_m);'
+
+output:
+  - platform: gpio
+    id: person_indicator_led
+    pin:
+      number: GPIO8
+    inverted: true
+
+light:
+  - platform: binary
+    name: "Person Indicator LED"
+    output: person_indicator_led
+    id: led
+

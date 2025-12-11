@@ -361,3 +361,6 @@ This is lightweight and shouldn't cause performance issues.
 
 Perfect for creating a true "following" effect where individual bulbs light up as you walk! 🎄✨
 
+
+
+ref: https://www.reddit.com/r/homeassistant/comments/1dt1ngp/tuya_scenes_in_home_assistant_for_rgbcw_light/

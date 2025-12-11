@@ -43,9 +43,9 @@ actions:
                     entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
                     below: 32
                   - condition: state
-                    entity_id: sensor.lyeklint_hancock_felix_needs_preparation_today_2
+                    entity_id: input_boolean.school_day
                     state:
-                      - "False"
+                      - "Off"
     then:
       - type: turn_on
         device_id: 91a58efc9daabbc41395d2adb4619c61
@@ -80,7 +80,7 @@ actions:
               {% if override_time in ['unknown', 'unavailable', 'none', ''] %}
                 true
               {% else %}
-                {{ now() > (override_time | as_datetime) }}
+                {{ now().timestamp() > (override_time | as_datetime | as_local).timestamp() }}
               {% endif %}
         then:
           - type: turn_off

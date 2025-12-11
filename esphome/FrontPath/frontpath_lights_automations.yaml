@@ -73,6 +73,22 @@ input_number:
     unit_of_measurement: "%"
     icon: mdi:gate
     initial: 18
+  frontpath_gate_delta_margin:
+    name: "Front Path Gate Delta Margin"
+    min: 2
+    max: 80
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:chart-line
+    initial: 8
+  frontpath_max_events_15min:
+    name: "Front Path Max Events (15min)"
+    min: 1
+    max: 100
+    step: 1
+    unit_of_measurement: "events"
+    icon: mdi:counter
+    initial: 12
   frontpath_darkness_threshold_pct:
     name: "Front Path Darkness Threshold"
     min: 5
@@ -82,21 +98,164 @@ input_number:
     icon: mdi:weather-night
     initial: 32
 
+input_text:
+  frontpath_gate_baselines:
+    name: "Front Path Gate Baselines"
+    initial: "{}"
+    max: 1024
+
 sensor:
   - platform: statistics
-    name: "FrontPath 7144 Motion Energy Avg"
-    entity_id: sensor.hlk_ld2410_7144_motion_energy
+    name: "FrontPath 7144 Moving Target Energy Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy
     state_characteristic: mean
     sampling_size: 120
     max_age:
       minutes: 10
   - platform: statistics
-    name: "FrontPath 6602 Motion Energy Avg"
-    entity_id: sensor.hlk_ld2410_6602_motion_energy
+    name: "FrontPath 6602 Moving Target Energy Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy
     state_characteristic: mean
     sampling_size: 120
     max_age:
       minutes: 10
+  # Per-gate statistics for adaptive baseline (18 sensors total)
+  # These track 10-minute rolling averages to adapt to weather
+  - platform: statistics
+    name: "FrontPath 7144 Gate 0 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_0
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 7144 Gate 1 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_1
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 7144 Gate 2 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_2
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 7144 Gate 3 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_3
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 7144 Gate 4 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_4
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 7144 Gate 5 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_5
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 7144 Gate 6 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_6
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 7144 Gate 7 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_7
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 7144 Gate 8 Avg"
+    entity_id: sensor.hlk_ld2410_7144_moving_target_energy_gate_8
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 0 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_0
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 1 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_1
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 2 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_2
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 3 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_3
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 4 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_4
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 5 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_5
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 6 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_6
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 7 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_7
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: statistics
+    name: "FrontPath 6602 Gate 8 Avg"
+    entity_id: sensor.hlk_ld2410_6602_moving_target_energy_gate_8
+    state_characteristic: mean
+    sampling_size: 120
+    max_age:
+      minutes: 10
+  - platform: history_stats
+    name: "FrontPath Events 15m"
+    entity_id: binary_sensor.frontpath_path_person_detected
+    state: "on"
+    type: count
+    end: "{{ now() }}"
+    duration:
+      minutes: 15
+    unique_id: frontpath_events_15m
 
 template:
   - sensor:
@@ -107,8 +266,8 @@ template:
         device_class: distance
         state_class: measurement
         availability: >-
-          {{ states('sensor.hlk_ld2410_7144_motion_energy_gate_0') not in ['unknown','unavailable']
-             and states('sensor.hlk_ld2410_6602_motion_energy_gate_0') not in ['unknown','unavailable']
+          {{ states('sensor.hlk_ld2410_7144_moving_target_energy_gate_0') not in ['unknown','unavailable']
+             and states('sensor.hlk_ld2410_6602_moving_target_energy_gate_0') not in ['unknown','unavailable']
              and states('input_number.frontpath_path_length') not in ['unknown','unavailable']
              and states('input_number.frontpath_gate_trigger_floor') not in ['unknown','unavailable'] }}
         state: >
@@ -118,15 +277,15 @@ template:
           {% set door = namespace(idx=-1, energy=0.0) %}
           {% set street = namespace(idx=-1, energy=0.0) %}
           {% set door_gates = [
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_0')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_1')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_2')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_3')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_4')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_5')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_6')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_7')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_8')|float(0)
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_8')|float(0)
           ] %}
           {% for val in door_gates %}
             {% if val > door.energy %}
@@ -135,15 +294,15 @@ template:
             {% endif %}
           {% endfor %}
           {% set street_gates = [
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_0')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_1')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_2')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_3')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_4')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_5')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_6')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_7')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_8')|float(0)
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_8')|float(0)
           ] %}
           {% for val in street_gates %}
             {% if val > street.energy %}
@@ -170,68 +329,122 @@ template:
       - name: "FrontPath Path Person Detected"
         unique_id: frontpath_path_person_detected
         device_class: occupancy
+        availability: >-
+          {{ states('sensor.hlk_ld2410_7144_moving_target_energy') not in ['unknown','unavailable']
+             and states('sensor.hlk_ld2410_6602_moving_target_energy') not in ['unknown','unavailable'] }}
         state: >
           {% set margin = states('input_number.frontpath_energy_margin') | float(22) %}
           {% set gate_floor = states('input_number.frontpath_gate_trigger_floor') | float(18) %}
-          {% set s1 = states('sensor.hlk_ld2410_7144_motion_energy') | float(0) %}
-          {% set s2 = states('sensor.hlk_ld2410_6602_motion_energy') | float(0) %}
-          {% set base1 = states('sensor.frontpath_7144_motion_energy_avg') | float(s1) %}
-          {% set base2 = states('sensor.frontpath_6602_motion_energy_avg') | float(s2) %}
+          {% set gate_delta_margin = states('input_number.frontpath_gate_delta_margin') | float(8) %}
+          
+          {# Overall energy check #}
+          {% set s1 = states('sensor.hlk_ld2410_7144_moving_target_energy') | float(0) %}
+          {% set s2 = states('sensor.hlk_ld2410_6602_moving_target_energy') | float(0) %}
+          {% set base1 = states('sensor.frontpath_7144_moving_target_energy_avg') | float(s1) %}
+          {% set base2 = states('sensor.frontpath_6602_moving_target_energy_avg') | float(s2) %}
           {% set delta1 = s1 - base1 %}
           {% set delta2 = s2 - base2 %}
           {% set moving1 = is_state('binary_sensor.hlk_ld2410_7144_has_moving_target', 'on') %}
           {% set moving2 = is_state('binary_sensor.hlk_ld2410_6602_has_moving_target', 'on') %}
+          
+          {# Collect all gate values and their baselines #}
           {% set gates = [
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_0')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_1')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_2')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_3')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_4')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_5')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_6')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_7')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_8')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_0')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_1')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_2')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_3')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_4')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_5')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_6')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_7')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_8')|float(0)
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_8')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_8')|float(0)
           ] %}
-          {% set gate_peak = gates | max %}
-          {# Person detected if: large energy spike above baseline OR gate spike with moving target confirmation #}
-          {{ (delta1 >= margin or delta2 >= margin) or (gate_peak >= gate_floor and (moving1 or moving2)) }}
+          
+          {% set gate_avgs = [
+            states('sensor.frontpath_7144_gate_0_avg')|float(0),
+            states('sensor.frontpath_7144_gate_1_avg')|float(0),
+            states('sensor.frontpath_7144_gate_2_avg')|float(0),
+            states('sensor.frontpath_7144_gate_3_avg')|float(0),
+            states('sensor.frontpath_7144_gate_4_avg')|float(0),
+            states('sensor.frontpath_7144_gate_5_avg')|float(0),
+            states('sensor.frontpath_7144_gate_6_avg')|float(0),
+            states('sensor.frontpath_7144_gate_7_avg')|float(0),
+            states('sensor.frontpath_7144_gate_8_avg')|float(0),
+            states('sensor.frontpath_6602_gate_0_avg')|float(0),
+            states('sensor.frontpath_6602_gate_1_avg')|float(0),
+            states('sensor.frontpath_6602_gate_2_avg')|float(0),
+            states('sensor.frontpath_6602_gate_3_avg')|float(0),
+            states('sensor.frontpath_6602_gate_4_avg')|float(0),
+            states('sensor.frontpath_6602_gate_5_avg')|float(0),
+            states('sensor.frontpath_6602_gate_6_avg')|float(0),
+            states('sensor.frontpath_6602_gate_7_avg')|float(0),
+            states('sensor.frontpath_6602_gate_8_avg')|float(0)
+          ] %}
+          
+          {# Calculate per-gate deltas #}
+          {% set gate_deltas = [] %}
+          {% for i in range(gates|count) %}
+            {% set gate_deltas = gate_deltas + [(gates[i] - gate_avgs[i])] %}
+          {% endfor %}
+          
+          {# Find max gate delta and peak #}
+          {% set gate_delta_max = (gate_deltas + [0]) | max %}
+          {% set gate_peak = (gates + [0]) | max %}
+          {% set gates_hot = gates | select('>=', gate_floor) | list | count %}
+          
+          {# Sequential detection: any gate significantly above its own baseline? #}
+          {% set sequential = gate_delta_max >= gate_delta_margin %}
+          
+          {# Detection logic: #}
+          {# 1. Overall energy spike with moving flag #}
+          {% set cond_energy = (delta1 >= margin or delta2 >= margin) and (moving1 or moving2) %}
+          {# 2. Gate spike with moving flag OR multiple hot gates #}
+          {% set cond_gate = (gate_peak >= gate_floor) and ((moving1 or moving2) or (gates_hot >= 2)) %}
+          {# 3. Sequential gate activation (person walking through) #}
+          {% set cond_sequential = sequential %}
+          
+          {{ cond_energy or cond_gate or cond_sequential }}
         delay_on: "00:00:01"
-        delay_off: "00:00:05"
+        delay_off: "00:00:08"
 
+  - sensor:
       - name: "FrontPath Active Gate"
         unique_id: frontpath_active_gate
+        availability: >-
+          {{ states('sensor.hlk_ld2410_7144_moving_target_energy_gate_0') not in ['unknown','unavailable']
+             and states('sensor.hlk_ld2410_6602_moving_target_energy_gate_0') not in ['unknown','unavailable'] }}
         state: >
           {% set gate_floor = states('input_number.frontpath_gate_trigger_floor') | float(18) %}
           {% set door_gates = [
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_0')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_1')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_2')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_3')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_4')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_5')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_6')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_7')|float(0),
-            states('sensor.hlk_ld2410_7144_motion_energy_gate_8')|float(0)
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_7144_moving_target_energy_gate_8')|float(0)
           ] %}
           {% set street_gates = [
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_0')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_1')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_2')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_3')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_4')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_5')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_6')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_7')|float(0),
-            states('sensor.hlk_ld2410_6602_motion_energy_gate_8')|float(0)
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_0')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_1')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_2')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_3')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_4')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_5')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_6')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_7')|float(0),
+            states('sensor.hlk_ld2410_6602_moving_target_energy_gate_8')|float(0)
           ] %}
           {% set door = namespace(idx=-1, energy=0.0) %}
           {% set street = namespace(idx=-1, energy=0.0) %}
@@ -255,25 +468,31 @@ template:
             none
           {% endif %}
 
-  - sensor:
+      - name: "FrontPath Tuya Scene Pattern"
       - name: "FrontPath Tuya Scene Pattern"
         unique_id: frontpath_tuya_scene_pattern
+        availability: >-
+          {{ states('sensor.hlk_ld2410_7144_moving_target_energy_gate_0') not in ['unknown','unavailable']
+             and states('sensor.hlk_ld2410_6602_moving_target_energy_gate_0') not in ['unknown','unavailable'] }}
         state: >-
           {% set gate_floor = states('input_number.frontpath_gate_trigger_floor') | float(18) %}
 
           {# Sum energies from both sensors for each gate 0-7 #}
           {% set combined_gates = [] %}
           {% for i in range(8) %}
-            {% set door_energy = states('sensor.hlk_ld2410_7144_motion_energy_gate_' ~ i) | float(0) %}
-            {% set street_energy = states('sensor.hlk_ld2410_6602_motion_energy_gate_' ~ i) | float(0) %}
+            {% set door_energy = states('sensor.hlk_ld2410_7144_moving_target_energy_gate_' ~ i) | float(0) %}
+            {% set street_energy = states('sensor.hlk_ld2410_6602_moving_target_energy_gate_' ~ i) | float(0) %}
             {% set combined = door_energy + street_energy %}
             {% set combined_gates = combined_gates + [combined] %}
           {% endfor %}
+          {% if combined_gates|count < 8 %}
+            {% set combined_gates = combined_gates + ([0] * (8 - combined_gates|count)) %}
+          {% endif %}
 
           {# Build dict of units #}
           {% set scene_units = namespace(val={}) %}
           {% for i in range(8) %}
-            {% set energy = combined_gates[i] %}
+            {% set energy = combined_gates[i] | default(0) %}
             {% if energy >= gate_floor %}
               {% if i < 2 %}
                 {% set h, s, v = 120, 255, (energy * 2.5) | int %}
@@ -303,12 +522,12 @@ automation:
       Maintains a low glow when it is genuinely dark, ramps brightness as a person
       walks the path, and maps Christmas colour washes to the active zone.
     mode: restart
-    trigger:
+trigger:
       - platform: state
-        entity_id:
+      entity_id:
           - binary_sensor.frontpath_path_person_detected
           - sensor.frontpath_path_person_position
-          - binary_sensor.frontpath_active_gate
+          - sensor.frontpath_active_gate
           - sensor.frontpath_tuya_scene_pattern
           - sensor.frontpath_light_level
           - binary_sensor.frontpath_path_is_dark
@@ -352,6 +571,9 @@ automation:
            or is_state('sun.sun', 'below_horizon')
            or (state_attr('sun.sun', 'elevation') | float(-10) <= 2) }}
       person_present: "{{ is_state('binary_sensor.frontpath_path_person_detected','on') }}"
+      recent_events: "{{ states('sensor.frontpath_events_15m') | float(0) }}"
+      max_events: "{{ states('input_number.frontpath_max_events_15min') | float(12) }}"
+      stormy: "{{ recent_events >= max_events }}"
       raw_pos: "{{ states('sensor.frontpath_path_person_position') }}"
       position: >
         {% if raw_pos in ['unknown','unavailable','none','', 'nan'] %}
@@ -359,7 +581,7 @@ automation:
         {% else %}
           {{ raw_pos | float(0) }}
         {% endif %}
-      active_gate: "{{ states('binary_sensor.frontpath_active_gate') }}"
+      active_gate: "{{ states('sensor.frontpath_active_gate') }}"
       target_pct: >
         {% if not (is_dark in [true, 'true', 'True']) %}
           0
@@ -409,22 +631,22 @@ automation:
       fairy_daytime_motion: "{{ is_state('input_boolean.frontpath_fairy_daytime_motion', 'on') }}"
       tuya_scene_data: "{{ states('sensor.frontpath_tuya_scene_pattern') }}"
       fairy_boost_pct: 15
-    action:
+action:
       - choose:
           - conditions:
               - condition: template
                 value_template: "{{ not (is_dark in [true, 'true', 'True']) and not person_present }}"
             sequence:
-              - service: light.turn_off
-                target:
-                  entity_id:
-                    - light.front_porch_local
-                    - light.fairy_lights
+  - service: light.turn_off
+    target:
+      entity_id:
+        - light.front_porch_local
+        - light.fairy_lights
               - stop: "Ambient light available, no movement"
-          - conditions:
-              - condition: template
+      - conditions:
+          - condition: template
                 value_template: "{{ not (is_dark in [true, 'true', 'True']) and person_present and not (fairy_daytime_motion in [true, 'true', 'True']) }}"
-            sequence:
+        sequence:
               - service: light.turn_off
                 target:
                   entity_id: light.fairy_lights
@@ -432,6 +654,19 @@ automation:
                 target:
                   entity_id: light.front_porch_local
               - stop: "Daytime, no motion override"
+              - conditions:
+                  - condition: template
+                value_template: "{{ stormy }}"
+                sequence:
+                  - service: light.turn_on
+                    target:
+                      entity_id:
+                        - light.front_porch_local
+                        - light.fairy_lights
+                    data:
+                  brightness_pct: "{{ [idle_pct + 10, 40] | min | round(0) }}"
+                  transition: 1.5
+              - stop: "Stormy mode: holding steady brightness"
           - conditions:
               - condition: template
                 value_template: "{{ person_present }}"
@@ -442,7 +677,7 @@ automation:
                 data:
                   brightness_pct: "{{ [target_pct, idle_pct] | max | round(0) }}"
                   transition: 1.2
-              - choose:
+      - choose:
                   - conditions:
                       - condition: template
                         value_template: >-
@@ -456,12 +691,12 @@ automation:
                           entity_id: text.fairy_lights_scene
                         data:
                           value: "{{ tuya_scene_data }}"
-                  - conditions:
-                      - condition: template
+          - conditions:
+              - condition: template
                         value_template: "{{ christmas_mode in [true, 'true', 'True'] }}"
-                    sequence:
-                      - service: light.turn_on
-                        target:
+            sequence:
+              - service: light.turn_on
+                target:
                           entity_id: light.fairy_lights
                         data:
                           brightness_pct: "{{ [target_pct + fairy_boost_pct, 100] | min | round(0) }}"
@@ -533,9 +768,9 @@ automation:
           - service: light.turn_on
             target:
               entity_id: light.front_porch_local
-            data:
+                data:
               brightness_pct: "{{ idle_pct | round(0) }}"
-              transition: 2
+                  transition: 2
           - choose:
               - conditions:
                   - condition: template
@@ -550,9 +785,9 @@ automation:
                       entity_id: text.fairy_lights_scene
                     data:
                       value: "{{ tuya_scene_data }}"
-            default:
+        default:
               - service: light.turn_on
-                target:
+            target:
                   entity_id: light.fairy_lights
                 data:
                   brightness_pct: "{{ [idle_pct + 5, 30] | min | round(0) }}"

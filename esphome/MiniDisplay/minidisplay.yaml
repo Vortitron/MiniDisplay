@@ -93,6 +93,7 @@ i2c:
 one_wire:
   - platform: gpio
     pin: GPIO4
+    id: onewire_bus
 
 # Font for display
 font:
@@ -106,6 +107,7 @@ display:
     id: oled_display
     model: "SSD1306 128x64"
     address: 0x3C
+    contrast: 50%  # Lower default contrast for OLED longevity
     lambda: |-
       const int base_count = id(base_entity_count);
       const int notification_count = id(notifications_count);
@@ -117,13 +119,17 @@ display:
 
       // Only show screensaver if there are no active notifications
       if (id(screensaver_active) && notification_count == 0) {
+        // Get pixel offset for burn-in prevention
+        const int offset_x = id(display_offset_x);
+        const int offset_y = id(display_offset_y);
+        
         auto time = id(ha_time).now();
         if (!time.is_valid()) {
           time = id(sntp_time).now();
         }
         char time_str[20];
         snprintf(time_str, sizeof(time_str), "%02d:%02d", time.hour, time.minute);
-        it.printf(0, 0, id(default_font), "Prices %s", time_str);
+        it.printf(0 + offset_x, 0 + offset_y, id(default_font), "Prices %s", time_str);
 
         int y_offset = 16;
         char line_buf[32];
@@ -136,7 +142,7 @@ display:
         } else {
           snprintf(line_buf, sizeof(line_buf), "Now: --     --/24");
         }
-        it.print(0, y_offset, id(default_font), line_buf);
+        it.print(0 + offset_x, y_offset + offset_y, id(default_font), line_buf);
         y_offset += 12;
 
         // Line 3: 4h: [avg_price] [rank/24]
@@ -147,13 +153,19 @@ display:
         } else {
           snprintf(line_buf, sizeof(line_buf), "4h:  --     --/24");
         }
-        it.print(0, y_offset, id(default_font), line_buf);
+        it.print(0 + offset_x, y_offset + offset_y, id(default_font), line_buf);
         y_offset += 12;
 
         // Line 4: Night or Day info (only show day rank if < 12)
         int hour = time.hour;
         if (hour < 6 || hour >= 22) {
-          it.print(0, y_offset, id(default_font), "Night");
+          // Night time - show "Night" with optional "School"
+          bool is_school_day = id(school_day).state;
+          if (is_school_day) {
+            it.print(0 + offset_x, y_offset + offset_y, id(default_font), "Night School");
+          } else {
+            it.print(0 + offset_x, y_offset + offset_y, id(default_font), "Night");
+          }
         } else if (id(electricity_price_rank_daytime).has_state() && id(electricity_price_rank_daytime).state < 12.0f) {
           // Day time with good rank - show rank and school status
           int day_rank = (int)id(electricity_price_rank_daytime).state;
@@ -163,7 +175,42 @@ display:
           } else {
             snprintf(line_buf, sizeof(line_buf), "Day %2d/12", day_rank);
           }
-          it.print(0, y_offset, id(default_font), line_buf);
+          it.print(0 + offset_x, y_offset + offset_y, id(default_font), line_buf);
+        }
+        y_offset += 12;
+        
+        // Line 5: Price position progress bar (graphical, based on actual price)
+        if (id(nordpool_price).has_state() && id(nordpool_price_min).has_state() && id(nordpool_price_max).has_state()) {
+          float current_price = id(nordpool_price).state;
+          float min_price = id(nordpool_price_min).state;
+          float max_price = id(nordpool_price_max).state;
+          
+          // Draw bar background (outline)
+          const int bar_x = 10;
+          const int bar_y = y_offset;
+          const int bar_width = 108;
+          const int bar_height = 8;
+          
+          it.rectangle(bar_x + offset_x, bar_y + offset_y, bar_width, bar_height);
+          
+          // Calculate fill position based on price (min = leftmost, max = rightmost)
+          int fill_width = 0;
+          if (max_price > min_price) {
+            float price_ratio = (current_price - min_price) / (max_price - min_price);
+            // Clamp to 0.0 - 1.0
+            if (price_ratio < 0.0f) price_ratio = 0.0f;
+            if (price_ratio > 1.0f) price_ratio = 1.0f;
+            fill_width = (int)(price_ratio * (bar_width - 4));  // -4 for 2px padding on each side
+          }
+          
+          // Draw filled portion
+          if (fill_width > 0) {
+            it.filled_rectangle(bar_x + 2 + offset_x, bar_y + 2 + offset_y, fill_width, bar_height - 4);
+          }
+          
+          // Draw labels
+          it.print(0 + offset_x, bar_y + offset_y, id(default_font), "€");
+          it.print(120 + offset_x, bar_y + offset_y, id(default_font), "£");
         }
         return;
       }
@@ -518,9 +565,14 @@ sensor:
   - platform: dallas_temp
     name: "Fish Tank Temperature"
     id: ambient_temperature
+    one_wire_id: onewire_bus
     filters:
       - filter_out: nan
     update_interval: 30s
+    on_value:
+      then:
+        - lambda: |-
+            ESP_LOGI("sensor", "Fish Tank Temperature: %.2fC", x);
 
 # Home Assistant sensors to read entity states
   - platform: homeassistant
@@ -667,6 +719,16 @@ sensor:
   - platform: homeassistant
     id: nordpool_price
     entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+
+  - platform: homeassistant
+    id: nordpool_price_min
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+    attribute: min
+
+  - platform: homeassistant
+    id: nordpool_price_max
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+    attribute: max
 
   - platform: homeassistant
     id: nordpool_average_price_4h
@@ -1207,33 +1269,55 @@ globals:
     restore_value: no
     initial_value: 'true'
 
+  - id: display_offset_x
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: display_offset_y
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: display_inverted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
 interval:
   - interval: 100ms
     then:
       - lambda: |-
           const int mode = id(alarm_led_mode);
           bool led_on = false;
+          bool display_invert = false;
           const uint32_t now = millis();
           switch (mode) {
-            case 0:  // OK - LED off
+            case 0:  // OK - LED off, display normal
               led_on = false;
+              display_invert = false;
               break;
-            case 1:  // Notify - single 300ms flash every 60 seconds
+            case 1:  // Notify - single 300ms flash every 60 seconds (LED + display)
               led_on = (now % 60000u) < 300u;
+              display_invert = led_on;
               break;
-            case 2: {  // Take Action - double flash every 20 seconds
+            case 2: {  // Take Action - double flash every 20 seconds (LED + display)
               const uint32_t phase = now % 20000u;
               led_on = (phase < 200u) || (phase >= 300u && phase < 500u);
+              display_invert = led_on;
               break;
             }
-            case 3:  // Emergency - constant quick flash (200ms on/off)
+            case 3:  // Emergency - constant quick flash (200ms on/off, LED + display)
               led_on = (now % 400u) < 200u;
+              display_invert = led_on;
               break;
             default:
               led_on = false;
+              display_invert = false;
               break;
           }
 
+          // Update LED
           if (led_on != id(status_led_is_on)) {
             if (led_on) {
               id(status_led).turn_on();
@@ -1241,6 +1325,12 @@ interval:
               id(status_led).turn_off();
             }
             id(status_led_is_on) = led_on;
+          }
+
+          // Update display inversion for alarms
+          if (display_invert != id(display_inverted)) {
+            id(display_inverted) = display_invert;
+            id(oled_display)->set_invert(display_invert);
           }
 
           // Screensaver activation and refresh
@@ -1259,6 +1349,50 @@ interval:
             id(update_display).execute();
           }
 
+  # Pixel shifting for OLED burn-in prevention (screensaver only)
+  - interval: 30s
+    then:
+      - lambda: |-
+          if (id(screensaver_active) && id(alarm_led_mode) == 0) {
+            // Cycle through small offsets: (0,0), (2,0), (2,2), (0,2), (0,0)
+            static int shift_state = 0;
+            shift_state = (shift_state + 1) % 4;
+            
+            switch (shift_state) {
+              case 0:
+                id(display_offset_x) = 0;
+                id(display_offset_y) = 0;
+                break;
+              case 1:
+                id(display_offset_x) = 2;
+                id(display_offset_y) = 0;
+                break;
+              case 2:
+                id(display_offset_x) = 2;
+                id(display_offset_y) = 2;
+                break;
+              case 3:
+                id(display_offset_x) = 0;
+                id(display_offset_y) = 2;
+                break;
+            }
+            
+            id(update_display).execute();
+            ESP_LOGD("display", "Pixel shift: (%d, %d)", id(display_offset_x), id(display_offset_y));
+          }
+
+  # Periodic screensaver inversion for OLED burn-in prevention
+  - interval: 180s
+    then:
+      - lambda: |-
+          // Only invert if screensaver is active and no alarms
+          if (id(screensaver_active) && id(alarm_led_mode) == 0) {
+            bool should_invert = !id(display_inverted);
+            id(display_inverted) = should_invert;
+            id(oled_display)->set_invert(should_invert);
+            ESP_LOGD("display", "Screensaver inversion: %s", should_invert ? "inverted" : "normal");
+          }
+
 # Scripts for entity control and display management
 script:
   - id: mark_activity
@@ -1270,6 +1404,17 @@ script:
           if (id(screensaver_active)) {
             id(screensaver_active) = false;
             id(screensaver_exit_ignore_until_ms) = now_ms + 1000u;  // Ignore inputs for 1000ms after exit
+            
+            // Reset display offset for normal use
+            id(display_offset_x) = 0;
+            id(display_offset_y) = 0;
+            
+            // Reset display inversion if it was from screensaver (not alarm)
+            if (id(alarm_led_mode) == 0 && id(display_inverted)) {
+              id(display_inverted) = false;
+              id(oled_display)->set_invert(false);
+            }
+            
             ESP_LOGI("script", "Screensaver deactivated by user input");
             id(update_display).execute();
           }

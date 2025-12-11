@@ -1,0 +1,271 @@
+# Front Path Lighting - Simplified (BLE Processing on ESP32)
+# All detection logic, rolling averages, and person tracking happen on the ESP32.
+# Home Assistant just controls lights based on clean binary states.
+#
+# Network traffic reduced by ~90%:
+# - Before: 36+ entities updating every 200ms
+# - After: 4 entities updating only on state change
+
+input_boolean:
+  frontpath_christmas_mode:
+    name: "Front Path Christmas Mode"
+    icon: mdi:string-lights
+    initial: true
+  frontpath_tuya_pattern_mode:
+    name: "Front Path Tuya Pattern Mode"
+    icon: mdi:led-strip-variant
+    initial: false
+  frontpath_fairy_daytime_motion:
+    name: "Front Path Fairy Lights Daytime Motion"
+    icon: mdi:weather-sunny
+    initial: true
+
+input_number:
+  frontpath_idle_brightness:
+    name: "Front Path Idle Brightness"
+    min: 0
+    max: 40
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:brightness-4
+    initial: 12
+  frontpath_darkness_threshold_pct:
+    name: "Front Path Darkness Threshold"
+    min: 5
+    max: 90
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:weather-night
+    initial: 32
+
+# Note: Tuning parameters moved to ESP32 (energy_margin, gate_floor, gate_delta, path_length)
+# Adjust them via: number.frontpath_energy_margin, etc.
+
+automation:
+  - id: frontpath_adaptive_seasonal_simple
+    alias: "Front Path - Adaptive + Seasonal (BLE)"
+    description: >
+      Simplified automation using ESP32-computed person detection and position.
+      All heavy lifting (averages, detection logic) happens on the ESP32.
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.frontpath_ble_processing_path_person_detected
+          - sensor.frontpath_ble_processing_path_person_position
+          - text_sensor.frontpath_ble_processing_active_gate
+          - text_sensor.frontpath_ble_processing_gate_pattern_binary
+          - sensor.frontpath_ble_processing_light_level
+          - sun.sun
+          - input_boolean.frontpath_christmas_mode
+          - input_boolean.frontpath_fairy_daytime_motion
+          - input_number.frontpath_idle_brightness
+          - input_number.frontpath_darkness_threshold_pct
+      - platform: time_pattern
+        minutes: "/5"
+    
+    variables:
+      idle_pct: "{{ states('input_number.frontpath_idle_brightness') | float(12) }}"
+      path_length: "{{ states('number.frontpath_ble_processing_path_length') | float(16) }}"
+      light_pct: "{{ states('sensor.frontpath_ble_processing_light_level') | float(100) }}"
+      darkness_threshold: "{{ states('input_number.frontpath_darkness_threshold_pct') | float(32) }}"
+      
+      is_dark: >
+        {{ light_pct <= darkness_threshold
+           or is_state('sun.sun', 'below_horizon')
+           or (state_attr('sun.sun', 'elevation') | float(-10) <= 2) }}
+      
+      person_present: "{{ is_state('binary_sensor.frontpath_ble_processing_path_person_detected','on') }}"
+      
+      raw_pos: "{{ states('sensor.frontpath_ble_processing_path_person_position') }}"
+      position: >
+        {% if raw_pos in ['unknown','unavailable','none','', 'nan'] %}
+          {{ '' }}
+        {% else %}
+          {{ raw_pos | float(0) }}
+        {% endif %}
+      
+      target_pct: >
+        {% if not (is_dark in [true, 'true', 'True']) %}
+          0
+        {% elif not person_present %}
+          {{ idle_pct }}
+        {% elif position == '' or position == 0 %}
+          {# No position but person detected - use gate-based brightness #}
+          {% set gate = states('text_sensor.frontpath_ble_processing_active_gate') %}
+          {% if gate.startswith('door_') %}
+            {% set gate_num = gate.split('_')[1] | int(0) %}
+            {% set result = idle_pct + (gate_num / 8.0) * (100 - idle_pct) %}
+            {{ [result, 70] | max | round(0) }}
+          {% elif gate.startswith('street_') %}
+            {% set gate_num = gate.split('_')[1] | int(0) %}
+            {% set result = idle_pct + ((8 - gate_num) / 8.0) * (100 - idle_pct) %}
+            {{ [result, 50] | max | round(0) }}
+          {% else %}
+            {{ [idle_pct + 40, 70] | max | round(0) }}
+          {% endif %}
+        {% else %}
+          {% set pos = position | float(0) %}
+          {% if pos < 0 %}{% set pos = 0 %}{% endif %}
+          {% if pos > path_length %}{% set pos = path_length %}{% endif %}
+          {% set result = idle_pct + (pos / path_length) * (100 - idle_pct) %}
+          {{ result | round(0) }}
+        {% endif %}
+      
+      zone: >
+        {% if position == '' %}
+          none
+        {% else %}
+          {% set pos = position | float(0) %}
+          {% if pos < path_length * 0.35 %}
+            far
+          {% elif pos < path_length * 0.75 %}
+            mid
+          {% else %}
+            door
+          {% endif %}
+        {% endif %}
+      
+      christmas_mode: "{{ is_state('input_boolean.frontpath_christmas_mode', 'on') }}"
+      fairy_daytime_motion: "{{ is_state('input_boolean.frontpath_fairy_daytime_motion', 'on') }}"
+      
+    
+    action:
+      # ALWAYS log state first for debugging
+      - service: logbook.log
+        data:
+          name: "FrontPath Automation Triggered"
+          message: >
+            Trigger: {{ trigger.entity_id | default('time_pattern') }}
+            Person: {{ person_present }} ({{ states('binary_sensor.frontpath_ble_processing_path_person_detected') }})
+            Position: {{ position }}m
+            Dark: {{ is_dark }}
+            Target: {{ target_pct }}%
+            Christmas: {{ christmas_mode }}
+      
+      - choose:
+          # Not dark, no movement -> lights off
+          - conditions:
+              - condition: template
+                value_template: "{{ not (is_dark in [true, 'true', 'True']) and not person_present }}"
+            sequence:
+              - service: light.turn_off
+                target:
+                  entity_id:
+                    - light.front_porch_local
+                    - light.fairy_lights
+              - stop: "Daylight, no movement"
+          
+          # Daytime + movement (but daytime override off)
+          - conditions:
+              - condition: template
+                value_template: "{{ not (is_dark in [true, 'true', 'True']) and person_present and not (fairy_daytime_motion in [true, 'true', 'True']) }}"
+            sequence:
+              - service: light.turn_off
+                target:
+                  entity_id:
+                    - light.fairy_lights
+                    - light.front_porch_local
+              - stop: "Daytime, no override"
+          
+          # Person present -> adaptive lighting
+          - conditions:
+              - condition: template
+                value_template: "{{ person_present }}"
+            sequence:
+              # Debug logging
+              - service: logbook.log
+                data:
+                  name: "FrontPath Debug"
+                  message: >
+                    Person detected! Position: {{ position }}m, 
+                    Target brightness: {{ target_pct }}%, Christmas mode: {{ christmas_mode }}
+              
+              # Porch light - brightness based on position along path
+              - service: light.turn_on
+                target:
+                  entity_id: light.front_porch_local
+                data:
+                  brightness_pct: "{{ [target_pct, idle_pct] | max | round(0) }}"
+                  transition: 1.2
+              
+              # Fairy lights
+              - choose:
+                  # Christmas Mode: Green (street) to Red (door) fade at 100% brightness
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ christmas_mode in [true, 'true', 'True'] }}"
+                    sequence:
+                      - service: light.turn_on
+                        target:
+                          entity_id: light.fairy_lights
+                        data:
+                          brightness_pct: 100
+                          transition: 0.5
+                          rgb_color: >
+                            {# Use gate pattern binary string - more reliable than active_gate #}
+                            {# Format: "001000000000000000" where 1 = active gate #}
+                            {% set pattern = states('text_sensor.frontpath_ble_processing_gate_pattern_binary') %}
+                            {% set gate = states('text_sensor.frontpath_ble_processing_active_gate') %}
+                            
+                            {# Parse gate from pattern or fallback to active_gate #}
+                            {% set ratio = 0.5 %}  {# Default to middle (yellow) #}
+                            
+                            {# Try to use active_gate first (most reliable when held) #}
+                            {% if gate.startswith('street_') %}
+                              {% set gate_num = gate.split('_')[1] | int(1) %}
+                              {# Street: gate 1 = green (0.0), gate 8 = yellow (0.44) #}
+                              {% set ratio = (gate_num - 1) / 16.0 %}
+                            {% elif gate.startswith('door_') %}
+                              {% set gate_num = gate.split('_')[1] | int(1) %}
+                              {# Door: gate 1 = yellow (0.5), gate 8 = red (0.94) #}
+                              {% set ratio = 0.5 + ((gate_num - 1) / 16.0) %}
+                            {% elif pattern not in ['', 'unknown', 'unavailable'] and pattern != '000000000000000000' %}
+                              {# Parse pattern: find highest '1' position #}
+                              {# Pattern: street_1..8 (pos 0-7), door_1..8 (pos 8-15) #}
+                              {% set highest_gate = -1 %}
+                              {% for i in range(pattern|length) %}
+                                {% if pattern[i] == '1' %}
+                                  {% set highest_gate = i %}
+                                {% endif %}
+                              {% endfor %}
+                              {% if highest_gate >= 0 %}
+                                {% set ratio = highest_gate / 16.0 %}
+                              {% endif %}
+                            {% endif %}
+                            
+                            {# Smooth fade: green (0,255,0) at street to red (255,0,0) at door #}
+                            {% set red = (ratio * 255) | int %}
+                            {% set green = ((1 - ratio) * 255) | int %}
+                            [{{ red }}, {{ green }}, 0]
+                default:
+                  # Default: Non-Christmas warm white
+                  - service: light.turn_on
+                    target:
+                      entity_id: light.fairy_lights
+                    data:
+                      brightness_pct: "{{ [target_pct + 10, 100] | min | round(0) }}"
+                      transition: 0.8
+                      rgb_color: [255, 200, 160]
+              
+              - stop: "Motion handled"
+        
+        # Default: idle lighting (no motion)
+        default:
+          - service: light.turn_on
+            target:
+              entity_id: light.front_porch_local
+            data:
+              brightness_pct: "{{ idle_pct | round(0) }}"
+              transition: 2
+          
+          # Fairy lights idle state (Christmas or not, use warm white)
+          - service: light.turn_on
+            target:
+              entity_id: light.fairy_lights
+            data:
+              brightness_pct: "{{ [idle_pct + 5, 30] | min | round(0) }}"
+              transition: 2
+              rgb_color: [255, 190, 140]
+
+
