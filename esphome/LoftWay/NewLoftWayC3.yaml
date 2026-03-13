@@ -133,7 +133,7 @@ sensor:
 binary_sensor:
   - platform: template
     id: mq2_digital
-    name: "LoftC3 MQ2 Smoke/Gas Alarm"
+    name: "LoftC3 MQ2 Smoke Alarm"
     device_class: smoke
     lambda: |-
       static bool alarm_state = false;

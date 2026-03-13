@@ -89,6 +89,7 @@ for idx, raw_notif in enumerate(notifications):
 	try:
 		raw_title = raw_notif.get('title', 'Notification') or 'Notification'
 		raw_message = raw_notif.get('message', '') or ''
+		raw_created = raw_notif.get('created', '') or ''
 		data_block = raw_notif.get('data') or {}
 	except Exception:
 		logger.warning("Skipping notification %s with invalid structure", notif_id)
@@ -96,6 +97,7 @@ for idx, raw_notif in enumerate(notifications):
 
 	title = normalise_text(raw_title)
 	message = normalise_text(raw_message)
+	created = normalise_text(raw_created)
 
 	alarm_from_data = 0
 	if 'Alarm' in data_block:
@@ -116,14 +118,21 @@ for idx, raw_notif in enumerate(notifications):
 	alarm_level = max(0, min(3, max(alarm_from_data, alarm_from_message)))
 
 	display_title_prefix = ALARM_TITLE_PREFIXES.get(alarm_level)
-	# If title is generic/empty and we have an alarm prefix, just use the prefix
-	if display_title_prefix:
-		if title in ('Notification', '', 'None', 'none'):
+	title_is_generic = title in ('Notification', '', 'None', 'none')
+	if title_is_generic:
+		if created:
+			effective_title = created
+		elif display_title_prefix:
 			effective_title = display_title_prefix
 		else:
-			effective_title = f"{display_title_prefix} - {title}"
+			effective_title = ''
 	else:
-		effective_title = title if title not in ('', 'None', 'none') else 'Notification'
+		if created:
+			effective_title = f"{created} {title}"
+		elif display_title_prefix:
+			effective_title = f"{display_title_prefix} - {title}"
+		else:
+			effective_title = title
 	display_message = strip_alarm_marker(message)
 
 	entries_data.append({

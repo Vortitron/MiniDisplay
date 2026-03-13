@@ -1,3 +1,23 @@
+substitutions:
+  # LD2410 BLE MAC address to monitor
+  ld2410_mac: "23:69:7C:F1:5F:83"
+
+  # Optional: watch a Home Assistant entity for "unavailable" and only then run recovery.
+  # This avoids treating "no advertisements seen" as a failure (some BLE devices stop advertising while connected).
+  #
+  # Set `ld2410_ha_watchdog_enabled: "true"` and `ld2410_ha_watchdog_entity_id` to your LD2410 entity
+  # (e.g. the "Allrum Motion Motion" entity_id).
+  ld2410_ha_watchdog_enabled: "true"
+  ld2410_ha_watchdog_entity_id: "binary_sensor.hlk_ld2410_5f83_motion"
+
+  # Optional: Home Assistant config entry_id for the LD2410 BLE integration.
+  # If set (non-empty), ESPHome will auto-call `homeassistant.reload_config_entry`
+  # when the LD2410 goes missing.
+  #
+  # How to find it: open the integration in HA UI and copy the `config_entry=...`
+  # value from the URL.
+  ld2410_ha_entry_id: ""
+
 esphome:
   name: downstairs-allrum
   friendly_name: Downstairs Allrum
@@ -6,6 +26,14 @@ esp32:
   board: esp32-c3-devkitm-1
   framework:
     type: esp-idf
+
+# BLE stack tuning (important for Bluetooth Proxy stability)
+esp32_ble:
+  # Must be >= bluetooth_proxy.connection_slots
+  # Default is 3, which can cause active-connection starvation (devices briefly go unavailable).
+  max_connections: 5
+  # Keep aligned with HA client timeout so failed connects free a slot quickly (default is 20s).
+  connection_timeout: 20s
 
 # Enable logging
 logger:
@@ -16,6 +44,16 @@ logger:
 api:
   encryption:
     key: !secret downstairs_encryption_key
+  reboot_timeout: 15min
+  # ESP32-C3 is single-core; scanning continuously alongside WiFi can be flaky.
+  # Start BLE scanning only while the native API is connected (recommended by ESPHome docs).
+  on_client_connected:
+    - logger.log: "HA API connected -> starting BLE scan"
+    - esp32_ble_tracker.start_scan:
+        continuous: true
+  on_client_disconnected:
+    - logger.log: "HA API disconnected -> stopping BLE scan"
+    - esp32_ble_tracker.stop_scan:
 
 ota:
   - platform: esphome
@@ -32,6 +70,8 @@ wifi:
 # Bluetooth Proxy (extends HA BLE range)
 bluetooth_proxy:
   active: true
+  cache_services: true
+  connection_slots: 5
 
 globals:
   - id: ld2410_last_seen_ms
@@ -44,9 +84,21 @@ globals:
     restore_value: no
     initial_value: 'false'
 
+  - id: ld2410_recovery_attempted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: ld2410_last_recover_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
 esp32_ble_tracker:
+  scan_parameters:
+    continuous: false
   on_ble_advertise:
-    - mac_address: 23:69:7C:F1:5F:83
+    - mac_address: ${ld2410_mac}
       then:
         - lambda: |-
             const char *TAG = "ld2410_keepalive";
@@ -56,8 +108,9 @@ esp32_ble_tracker:
             
             if (id(ld2410_was_missing)) {
               float minutes_missing = previous == 0 ? 0.0f : (now - previous) / 60000.0f;
-              ESP_LOGI(TAG, "LD2410 (23:69:7C:F1:5F:83) has reconnected after %.1f minutes", minutes_missing);
+              ESP_LOGI(TAG, "LD2410 (%s) advertisements resumed after %.1f minutes", "${ld2410_mac}", minutes_missing);
               id(ld2410_was_missing) = false;
+              id(ld2410_recovery_attempted) = false;
               id(ld2410_connected).publish_state(true);
             }
 
@@ -66,6 +119,36 @@ text_sensor:
     name: "LD2410 Connection Status"
     id: ld2410_status
     icon: "mdi:bluetooth"
+
+  # Optional HA watchdog: read an entity state and trigger recovery only when HA says it is "unavailable".
+  - platform: homeassistant
+    id: ld2410_ha_watchdog_state
+    entity_id: ${ld2410_ha_watchdog_entity_id}
+    internal: true
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: |-
+                if (std::string("${ld2410_ha_watchdog_enabled}") != "true") {
+                  return false;
+                }
+                // Trigger only on the real failure mode we care about.
+                return x == "unavailable";
+            then:
+              - lambda: |-
+                  const uint32_t MIN_RESTART_GAP_MS = 10UL * 60UL * 1000UL;  // 10 minutes
+                  uint32_t now = millis();
+                  uint32_t last = id(ld2410_last_recover_ms);
+                  if (last != 0 && (now - last) < MIN_RESTART_GAP_MS) {
+                    ESP_LOGW("ld2410_watchdog", "HA entity is unavailable but recovery is rate-limited (last run %.1f min ago)",
+                             (now - last) / 60000.0f);
+                    return;
+                  }
+                  id(ld2410_last_recover_ms) = now;
+                  ESP_LOGW("ld2410_watchdog", "HA entity '%s' is unavailable -> running LD2410 recovery",
+                           "${ld2410_ha_watchdog_entity_id}");
+              - script.execute: ld2410_recover
 
 binary_sensor:
   - platform: template
@@ -101,6 +184,27 @@ binary_sensor:
       - delayed_on: 2s  # Must be high for 2s to trigger (prevents spikes)
       - delayed_off: 10s  # Stays on for 10s after clearing (latching)
 
+script:
+  - id: ld2410_recover
+    mode: restart
+    then:
+      # Soft-recover: reset BLE scan (often enough to un-stick proxy scanning on ESP32-C3)
+      - esp32_ble_tracker.stop_scan:
+      - delay: 750ms
+      - esp32_ble_tracker.start_scan:
+          continuous: true
+
+      # Optional: reload the HA integration automatically (if entry_id configured)
+      - if:
+          condition:
+            lambda: |-
+              return std::string("${ld2410_ha_entry_id}").size() > 0;
+          then:
+            - homeassistant.service:
+                service: homeassistant.reload_config_entry
+                data:
+                  entry_id: "${ld2410_ha_entry_id}"
+
 interval:
   - interval: 60s
     then:
@@ -125,10 +229,11 @@ interval:
             id(ld2410_status).publish_state("Connected");
             id(ld2410_connected).publish_state(true);
             id(ld2410_was_missing) = false;
+            id(ld2410_recovery_attempted) = false;
           } else if (elapsed < STALE_TIMEOUT_MS) {
             // Missing but not stale yet - warn user
             if (!id(ld2410_was_missing)) {
-              ESP_LOGW(TAG, "LD2410 (23:69:7C:F1:5F:83) not seen for %.1f minutes - may need HA integration reload", minutes);
+              ESP_LOGW(TAG, "LD2410 (%s) not seen for %.1f minutes (advertisements)", "${ld2410_mac}", minutes);
               id(ld2410_was_missing) = true;
               id(ld2410_connected).publish_state(false);
             }
@@ -142,6 +247,9 @@ interval:
             id(ld2410_status).publish_state(status_msg);
             id(ld2410_connected).publish_state(false);
           }
+
+    # Note: We intentionally do NOT auto-recover based solely on "no advertisements seen".
+    # Some BLE devices stop advertising while connected, and forcing scan resets can cause extra drops.
 
 sensor:
   # MQ2 Gas Sensor - Raw Analog Voltage
@@ -177,3 +285,9 @@ sensor:
         return percentage;
       }
       return NAN;
+
+button:
+  - platform: restart
+    name: "Downstairs Allrum Restart"
+    id: restart_node
+    entity_category: diagnostic

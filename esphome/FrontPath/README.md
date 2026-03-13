@@ -26,11 +26,27 @@ This project supports **two different configurations**:
 
 ## Hardware Configuration
 
-This configuration uses an ESP32-C3 SuperMini board with two LD2410C millimetre-wave radar sensors in a single enclosure positioned at the middle of a 12m outdoor path:
-- **Sensor 1**: `B8:BE:51:7D:71:44` - Points towards the door/house
-- **Sensor 2**: `14:AA:8C:58:66:02` - Points away from the door/house (towards the far end)
+This configuration uses an ESP32-C3 SuperMini board with two LD2410C millimetre-wave radar sensors in a single enclosure positioned at the middle of an outdoor path:
+- **Sensor 1**: `B8:BE:51:7D:71:44` - Points towards the **street end** (`street_1..street_8`)
+- **Sensor 2**: `14:AA:8C:58:66:02` - Points towards the **door end** (`door_1..door_8`)
 
 Both sensors are mounted in the same box at the path's midpoint, pointing in opposite directions to provide full coverage of the 12m path length and enable direction/position tracking.
+
+### Windy-day noise hardening (UART processing YAML)
+
+- Detection can only be triggered/held by **motion-backed conditions**; a raw “gate delta” noise spike is no longer allowed to latch `person_detected` on its own (prevents wind from getting it “stuck detected”).
+- **Near-gate wind guard (new)**: if activity is **only** in the near gates (defaults: gates 1–3) the firmware now requires a short **streak** of consecutive hits before it will trigger `Path Person Detected`. This is aimed at wind/LED-string flutter close to the radars, while keeping far-end/door detection responsive.
+  - HA controls (in `FrontPath_BLE_Processing_v2.yaml`):
+    - `Near Gate Guard (Wind Hardening)` (switch)
+    - `Near Gate Max Index` (default 3)
+    - `Near Gate Streak Required` (default 2; with 500ms throttle ≈ ~1s)
+    - `Near Gate Streak Window` (default 1200ms)
+  - If detection feels too slow when someone is near the sensor box (mid-path), set **Streak Required = 1**.
+- **Static confirmation only for near gates**: `static_confirmation_max_gate` controls up to which gate index we require static confirmation for motion to be considered valid. Far gates often do not produce strong stationary energy for walking people, so allowing moving-only there improves detection at the ends without reintroducing near-gate wind chatter.
+
+### v3 “Hardcoded tuning” file
+
+`FrontPath_BLE_Processing_v3.yaml` is a copy of v2 with **most HA-exposed tuning sliders/switches removed**. The important tuning values are hardcoded in `globals` with `restore_value: no`, so you can adjust behaviour by editing the YAML (and reflashing) without Home Assistant “remembering” old slider values.
 
 ## Wiring Connections
 

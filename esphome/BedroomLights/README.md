@@ -104,9 +104,12 @@ When `sensor.mama_s_mobile_active_notification_count` > 0 AND time is after 5am:
 ### Pending Command Pulse
 
 - Whenever a latching switch is pressed or released, the firmware compares the requested light state with the latest Home Assistant state.
-- If HA hasn’t reflected the change yet, the corresponding switch LED pulses between `switch_led_pending_low_ratio` (default 35% of the active cap) and the full cap to show that the command is queued.
-- The pulse stops automatically once HA confirms the light has moved, and it also suspends manual LED overrides so the feedback stays truthful.
-- Fast visual feedback reduces the temptation to spam the switches if the light or network takes a moment to respond.
+- There are now three feedback patterns so you can distinguish where the command stalled:
+  - **Waiting for acknowledgement**: normal pulse between `switch_led_pending_low_ratio` and full cap.
+  - **Cannot send to Home Assistant**: rapid double blink (HA API disconnected).
+  - **No acknowledgement timeout**: slow-low + short-high pattern after `switch_command_ack_timeout_ms` (default 8000 ms), usually meaning HA accepted the call but the light state did not converge.
+- The pulse stops automatically once HA confirms the requested state, and it also suspends manual LED overrides so feedback stays truthful.
+- Timing knobs are exposed in `BedroomLights.yaml` substitutions: `switch_led_pending_step`, `switch_led_ha_error_on_step`, `switch_led_ha_error_off_step`, `switch_led_ha_error_pause_step`, `switch_led_bulb_timeout_low_ratio`, `switch_led_bulb_timeout_low_step`, `switch_led_bulb_timeout_high_step`, and `switch_command_ack_timeout_ms`.
 
 ## Network Configuration
 
@@ -139,8 +142,12 @@ It subscribes to:
 
 ## Switch Reliability Guard
 
-- Both latching switches now route through `command_stand_light` / `command_bedroom_light` scripts so stale commands are dropped instead of being queued.
-- Each switch interaction launches a `guard_*_switch_alignment` script which, for `8 × 500 ms` (currently 4 s), re-checks the Home Assistant light state and re-sends the command if it drifted; both values live in the new `switch_guard_iterations` / `switch_guard_interval` substitutions.
+- Both latching switches route through `command_stand_light` / `command_bedroom_light` scripts (`mode: single`) which inline the `homeassistant.service` call directly so it cannot be killed mid-flight.
+- Each switch interaction launches a `guard_*_switch_alignment` script which, for 8 x 500 ms (currently 4 s), re-checks the Home Assistant light state and re-sends the command **only if no command is already pending** -- this prevents the guard from interrupting an in-flight service call.
 - Guard activity is logged under the `switch_guard` tag, making it easy to correlate with any observed bounce in the ESPHome logs.
 - Adjust the guard timing via the `substitutions` block at the top of `BedroomLights.yaml` if the hardware ever needs a longer or shorter stabilisation window.
+
+### Previous Bug (Fixed)
+
+The command scripts were previously `mode: restart` and delegated to `set_stand_light_colour` / `set_bedroom_light_colour` (also `mode: restart`) via `.execute()`.  The guard would re-call the command script every 500 ms, which restarted the entire chain -- killing the `homeassistant.service` action before it could complete.  This caused the lights to appear unresponsive even though HA was connected and reachable.
 

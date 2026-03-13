@@ -7,10 +7,14 @@
 # - After: 4 entities updating only on state change
 
 input_boolean:
-  frontpath_christmas_mode:
-    name: "Front Path Christmas Mode"
-    icon: mdi:string-lights
+  frontpath_frost_warning_mode:
+    name: "Front Path Frost Warning Mode"
+    icon: mdi:snowflake-alert
     initial: true
+  frontpath_frost_expected_12h:
+    name: "Front Path Frost Expected (12h)"
+    icon: mdi:snowflake-alert
+    initial: false
   frontpath_tuya_pattern_mode:
     name: "Front Path Tuya Pattern Mode"
     icon: mdi:led-strip-variant
@@ -19,6 +23,11 @@ input_boolean:
     name: "Front Path Fairy Lights Daytime Motion"
     icon: mdi:weather-sunny
     initial: true
+  
+  frontpath_colour_test_mode:
+    name: "Front Path Colour Test Mode"
+    icon: mdi:palette
+    initial: false
 
 input_number:
   frontpath_idle_brightness:
@@ -29,6 +38,96 @@ input_number:
     unit_of_measurement: "%"
     icon: mdi:brightness-4
     initial: 12
+  frontpath_last_porch_target_pct:
+    name: "Front Path Last Porch Target"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:brightness-percent
+    initial: 0
+  frontpath_target_porch_pct:
+    name: "Front Path Target Porch Brightness"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:brightness-5
+    initial: 0
+  frontpath_target_fairy_pct:
+    name: "Front Path Target Fairy Brightness"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:string-lights
+    initial: 0
+  frontpath_last_fairy_target_pct:
+    name: "Front Path Last Fairy Target"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:string-lights
+    initial: 0
+  frontpath_target_fairy_r:
+    name: "Front Path Target Fairy R"
+    min: 0
+    max: 255
+    step: 1
+    icon: mdi:palette
+    initial: 255
+  frontpath_target_fairy_g:
+    name: "Front Path Target Fairy G"
+    min: 0
+    max: 255
+    step: 1
+    icon: mdi:palette
+    initial: 190
+  frontpath_target_fairy_b:
+    name: "Front Path Target Fairy B"
+    min: 0
+    max: 255
+    step: 1
+    icon: mdi:palette
+    initial: 140
+  frontpath_last_fairy_r:
+    name: "Front Path Last Fairy R"
+    min: 0
+    max: 255
+    step: 1
+    icon: mdi:palette
+    initial: 255
+  frontpath_last_fairy_g:
+    name: "Front Path Last Fairy G"
+    min: 0
+    max: 255
+    step: 1
+    icon: mdi:palette
+    initial: 190
+  frontpath_last_fairy_b:
+    name: "Front Path Last Fairy B"
+    min: 0
+    max: 255
+    step: 1
+    icon: mdi:palette
+    initial: 140
+  frontpath_last_position_m:
+    name: "Front Path Last Position (Smoothed)"
+    min: 0
+    max: 25
+    step: 0.1
+    unit_of_measurement: "m"
+    icon: mdi:map-marker-distance
+    initial: 0
+  frontpath_forecast_min_temp_12h:
+    name: "Front Path Forecast Min Temp (12h)"
+    min: -40
+    max: 60
+    step: 0.1
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer
+    initial: 10
   frontpath_darkness_threshold_pct:
     name: "Front Path Darkness Threshold"
     min: 5
@@ -37,16 +136,336 @@ input_number:
     unit_of_measurement: "%"
     icon: mdi:weather-night
     initial: 32
+  
+  # Colour test helper:
+  # 0 = warm white, 50 = blue (frost), 100 = red (warm)
+  frontpath_colour_test_slider:
+    name: "Front Path Colour Test"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:palette-swatch
+    initial: 50
+
+input_datetime:
+  frontpath_last_porch_target_time:
+    name: "Front Path Last Porch Target Time"
+    has_date: true
+    has_time: true
+  frontpath_last_fairy_target_time:
+    name: "Front Path Last Fairy Target Time"
+    has_date: true
+    has_time: true
+  frontpath_last_position_time:
+    name: "Front Path Last Position Time"
+    has_date: true
+    has_time: true
 
 # Note: Tuning parameters moved to ESP32 (energy_margin, gate_floor, gate_delta, path_length)
 # Adjust them via: number.frontpath_energy_margin, etc.
 
 automation:
+  - id: frontpath_colour_test_helper
+    alias: "Front Path - Colour Test Helper"
+    description: >
+      Manual colour test: when enabled, a slider directly drives fairy light RGB.
+      0 = warm white, 50 = blue (frost), 100 = red (warm). This allows testing colour behaviour without walking the path.
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - input_boolean.frontpath_colour_test_mode
+          - input_number.frontpath_colour_test_slider
+    condition:
+      - condition: state
+        entity_id: input_boolean.frontpath_colour_test_mode
+        state: "on"
+    action:
+      - service: light.turn_on
+        target:
+          entity_id: light.fairy_lights
+        data:
+          brightness_pct: 100
+          transition: 2.0
+          rgb_color: >
+            {% set s = states('input_number.frontpath_colour_test_slider') | float(50) %}
+            {% if s < 0 %}{% set s = 0 %}{% endif %}
+            {% if s > 100 %}{% set s = 100 %}{% endif %}
+            {# 0-50 = warm white to blue, 50-100 = blue to red #}
+            {% if s < 50 %}
+              {% set ratio = s / 50.0 %}
+              {% set red = (255 - ratio * 155) | int %}
+              {% set green = (200 - ratio * 100) | int %}
+              {% set blue = (ratio * 255) | int %}
+            {% else %}
+              {% set ratio = (s - 50) / 50.0 %}
+              {% set red = (100 + ratio * 155) | int %}
+              {% set green = (100 - ratio * 100) | int %}
+              {% set blue = (255 - ratio * 255) | int %}
+            {% endif %}
+            [{{ red }}, {{ green }}, {{ blue }}]
+
+  - id: frontpath_update_frost_forecast
+    alias: "Front Path - Update Frost Forecast"
+    description: >
+      Fetch OpenWeatherMap hourly forecast and cache min temp (next 12h) + frost boolean.
+      Newer HA versions don't expose forecast on the weather entity state, so we call `weather.get_forecasts`.
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+      - platform: time_pattern
+        minutes: "/30"
+      - platform: state
+        entity_id: input_boolean.frontpath_frost_warning_mode
+    action:
+      - service: weather.get_forecasts
+        data:
+          type: hourly
+        target:
+          entity_id: weather.openweathermap
+        response_variable: frontpath_forecast_response
+      - variables:
+          forecast_data: "{{ frontpath_forecast_response['weather.openweathermap'].forecast }}"
+          min_temp_12h: >-
+            {% set now_ts = as_timestamp(now()) %}
+            {% set end_ts = now_ts + (12 * 3600) %}
+            {% set ns = namespace(found=false, min=99.0) %}
+            {% for entry in (forecast_data or []) %}
+              {% set ts = as_timestamp(entry.datetime) %}
+              {% if ts is not none and ts >= now_ts and ts <= end_ts %}
+                {% set temps = [] %}
+                {% if entry.templow is defined and entry.templow is not none %}
+                  {% set temps = temps + [entry.templow | float] %}
+                {% endif %}
+                {% if entry.temperature is defined and entry.temperature is not none %}
+                  {% set temps = temps + [entry.temperature | float] %}
+                {% endif %}
+                {% for t in temps %}
+                  {% if (not ns.found) or (t < ns.min) %}
+                    {% set ns.min = t %}
+                    {% set ns.found = true %}
+                  {% endif %}
+                {% endfor %}
+              {% endif %}
+            {% endfor %}
+            {% if ns.found %}
+              {{ ns.min | round(1) }}
+            {% else %}
+              99
+            {% endif %}
+          frost_expected: "{{ (min_temp_12h | float(99)) < 1 }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.frontpath_forecast_min_temp_12h
+        data:
+          value: "{{ min_temp_12h | float(99) }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ frost_expected in [true, 'true', 'True'] }}"
+            sequence:
+              - service: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.frontpath_frost_expected_12h
+        default:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.frontpath_frost_expected_12h
+
+  - id: frontpath_light_smoother
+    alias: "Front Path - Light Smoother"
+    description: >
+      Applies rate-limited brightness/color updates using the last commanded values (not device state).
+      This prevents flicker and ensures smooth fade-down even when detection drops.
+    mode: restart
+    trigger:
+      - platform: time_pattern
+        seconds: "/1"
+      - platform: state
+        entity_id:
+          - input_number.frontpath_target_porch_pct
+          - input_number.frontpath_target_fairy_pct
+          - input_number.frontpath_target_fairy_r
+          - input_number.frontpath_target_fairy_g
+          - input_number.frontpath_target_fairy_b
+          - input_boolean.frontpath_colour_test_mode
+    variables:
+      allow_fairy: "{{ not is_state('input_boolean.frontpath_colour_test_mode', 'on') }}"
+      target_porch: "{{ states('input_number.frontpath_target_porch_pct') | float(0) }}"
+      target_fairy: "{{ states('input_number.frontpath_target_fairy_pct') | float(0) }}"
+      target_r: "{{ states('input_number.frontpath_target_fairy_r') | float(0) }}"
+      target_g: "{{ states('input_number.frontpath_target_fairy_g') | float(0) }}"
+      target_b: "{{ states('input_number.frontpath_target_fairy_b') | float(0) }}"
+      last_porch: "{{ states('input_number.frontpath_last_porch_target_pct') | float(0) }}"
+      last_fairy: "{{ states('input_number.frontpath_last_fairy_target_pct') | float(0) }}"
+      last_r: "{{ states('input_number.frontpath_last_fairy_r') | float(0) }}"
+      last_g: "{{ states('input_number.frontpath_last_fairy_g') | float(0) }}"
+      last_b: "{{ states('input_number.frontpath_last_fairy_b') | float(0) }}"
+      porch_dt_s: >-
+        {% set t = states('input_datetime.frontpath_last_porch_target_time') %}
+        {% set ts = as_timestamp(t) %}
+        {% if ts is none %}
+          1
+        {% else %}
+          {% set dt = as_timestamp(now()) - ts %}
+          {% if dt < 1 %}1{% else %}{{ dt }}{% endif %}
+        {% endif %}
+      fairy_dt_s: >-
+        {% set t = states('input_datetime.frontpath_last_fairy_target_time') %}
+        {% set ts = as_timestamp(t) %}
+        {% if ts is none %}
+          1
+        {% else %}
+          {% set dt = as_timestamp(now()) - ts %}
+          {% if dt < 1 %}1{% else %}{{ dt }}{% endif %}
+        {% endif %}
+      drop_rate_pct: 10
+      color_rate: 30
+      next_porch: >-
+        {% if target_porch >= last_porch %}
+          {{ target_porch }}
+        {% else %}
+          {{ [target_porch, last_porch - (drop_rate_pct * porch_dt_s)] | max }}
+        {% endif %}
+      next_fairy: >-
+        {% if target_fairy >= last_fairy %}
+          {{ target_fairy }}
+        {% else %}
+          {{ [target_fairy, last_fairy - (drop_rate_pct * fairy_dt_s)] | max }}
+        {% endif %}
+      next_r: >-
+        {% set delta = target_r - last_r %}
+        {% if delta == 0 %}
+          {{ last_r }}
+        {% else %}
+          {% set step = color_rate * fairy_dt_s %}
+          {% if delta > 0 %}
+            {{ [target_r, last_r + step] | min }}
+          {% else %}
+            {{ [target_r, last_r - step] | max }}
+          {% endif %}
+        {% endif %}
+      next_g: >-
+        {% set delta = target_g - last_g %}
+        {% if delta == 0 %}
+          {{ last_g }}
+        {% else %}
+          {% set step = color_rate * fairy_dt_s %}
+          {% if delta > 0 %}
+            {{ [target_g, last_g + step] | min }}
+          {% else %}
+            {{ [target_g, last_g - step] | max }}
+          {% endif %}
+        {% endif %}
+      next_b: >-
+        {% set delta = target_b - last_b %}
+        {% if delta == 0 %}
+          {{ last_b }}
+        {% else %}
+          {% set step = color_rate * fairy_dt_s %}
+          {% if delta > 0 %}
+            {{ [target_b, last_b + step] | min }}
+          {% else %}
+            {{ [target_b, last_b - step] | max }}
+          {% endif %}
+        {% endif %}
+      porch_update_needed: "{{ (next_porch | round(0)) != (last_porch | round(0)) }}"
+      fairy_update_needed: >-
+        {{ allow_fairy and (
+           (next_fairy | round(0)) != (last_fairy | round(0))
+           or (next_r | int) != (last_r | int)
+           or (next_g | int) != (last_g | int)
+           or (next_b | int) != (last_b | int)
+        ) }}
+    action:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ porch_update_needed }}"
+            sequence:
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ next_porch | float(0) <= 0 }}"
+                    sequence:
+                      - service: light.turn_off
+                        target:
+                          entity_id: light.front_porch_local
+                default:
+                  - service: light.turn_on
+                    target:
+                      entity_id: light.front_porch_local
+                    data:
+                      brightness_pct: "{{ next_porch | round(0) }}"
+                      transition: 1
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_last_porch_target_pct
+                data:
+                  value: "{{ next_porch | round(0) }}"
+              - service: input_datetime.set_datetime
+                target:
+                  entity_id: input_datetime.frontpath_last_porch_target_time
+                data:
+                  datetime: "{{ now().isoformat() }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ fairy_update_needed }}"
+            sequence:
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ next_fairy | float(0) <= 0 }}"
+                    sequence:
+                      - service: light.turn_off
+                        target:
+                          entity_id: light.fairy_lights
+                default:
+                  - service: light.turn_on
+                    target:
+                      entity_id: light.fairy_lights
+                    data:
+                      brightness_pct: "{{ next_fairy | round(0) }}"
+                      transition: 1
+                      rgb_color:
+                        - "{{ next_r | int }}"
+                        - "{{ next_g | int }}"
+                        - "{{ next_b | int }}"
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_last_fairy_target_pct
+                data:
+                  value: "{{ next_fairy | round(0) }}"
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_last_fairy_r
+                data:
+                  value: "{{ next_r | int }}"
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_last_fairy_g
+                data:
+                  value: "{{ next_g | int }}"
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_last_fairy_b
+                data:
+                  value: "{{ next_b | int }}"
+              - service: input_datetime.set_datetime
+                target:
+                  entity_id: input_datetime.frontpath_last_fairy_target_time
+                data:
+                  datetime: "{{ now().isoformat() }}"
+
   - id: frontpath_adaptive_seasonal_simple
-    alias: "Front Path - Adaptive + Seasonal (BLE)"
+    alias: "Front Path - Adaptive + Frost Warning (BLE)"
     description: >
       Simplified automation using ESP32-computed person detection and position.
       All heavy lifting (averages, detection logic) happens on the ESP32.
+      Uses weather forecast to show frost warning (blue) when temp < 1°C expected.
     mode: restart
     trigger:
       - platform: state
@@ -57,34 +476,59 @@ automation:
           - text_sensor.frontpath_ble_processing_gate_pattern_binary
           - sensor.frontpath_ble_processing_light_level
           - sun.sun
-          - input_boolean.frontpath_christmas_mode
+          - input_boolean.frontpath_frost_warning_mode
+          - input_boolean.frontpath_frost_expected_12h
+          - input_number.frontpath_forecast_min_temp_12h
           - input_boolean.frontpath_fairy_daytime_motion
+          - input_boolean.frontpath_colour_test_mode
+          - input_number.frontpath_colour_test_slider
           - input_number.frontpath_idle_brightness
           - input_number.frontpath_darkness_threshold_pct
       - platform: time_pattern
         minutes: "/5"
-    
     variables:
       idle_pct: "{{ states('input_number.frontpath_idle_brightness') | float(12) }}"
       path_length: "{{ states('number.frontpath_ble_processing_path_length') | float(16) }}"
       light_pct: "{{ states('sensor.frontpath_ble_processing_light_level') | float(100) }}"
       darkness_threshold: "{{ states('input_number.frontpath_darkness_threshold_pct') | float(32) }}"
-      
+
       is_dark: >
         {{ light_pct <= darkness_threshold
            or is_state('sun.sun', 'below_horizon')
            or (state_attr('sun.sun', 'elevation') | float(-10) <= 2) }}
-      
+
       person_present: "{{ is_state('binary_sensor.frontpath_ble_processing_path_person_detected','on') }}"
-      
+      frost_min_temp_12h: "{{ states('input_number.frontpath_forecast_min_temp_12h') | float(99) }}"
+      frost_expected: "{{ is_state('input_boolean.frontpath_frost_expected_12h', 'on') }}"
+      frost_warning_enabled: "{{ is_state('input_boolean.frontpath_frost_warning_mode', 'on') }}"
+      active_gate: "{{ states('text_sensor.frontpath_ble_processing_active_gate') }}"
+
       raw_pos: "{{ states('sensor.frontpath_ble_processing_path_person_position') }}"
       position: >
         {% if raw_pos in ['unknown','unavailable','none','', 'nan'] %}
           {{ '' }}
         {% else %}
-          {{ raw_pos | float(0) }}
+          {# Anti-flicker position smoothing: clamp movement away from the door to 1 m/s #}
+          {% set pos = raw_pos | float(0) %}
+          {% set last_raw = states('input_number.frontpath_last_position_m') %}
+          {% set last_pos = last_raw | float(pos) %}
+          {% set t_raw = states('input_datetime.frontpath_last_position_time') %}
+          {% set last_ts = as_timestamp(t_raw) %}
+          {% set dt = 0 %}
+          {% if last_ts is not none %}
+            {% set dt = as_timestamp(now()) - last_ts %}
+            {% if dt < 0 %}{% set dt = 0 %}{% endif %}
+          {% endif %}
+          {% set door_thresh = (path_length | float(16)) * 0.75 %}
+          {% if person_present and dt > 0 and last_pos >= door_thresh and pos < last_pos %}
+            {% set min_allowed = last_pos - (1.0 * dt) %}
+            {% if min_allowed < 0 %}{% set min_allowed = 0 %}{% endif %}
+            {{ [pos, min_allowed] | max }}
+          {% else %}
+            {{ pos }}
+          {% endif %}
         {% endif %}
-      
+
       target_pct: >
         {% if not (is_dark in [true, 'true', 'True']) %}
           0
@@ -92,13 +536,12 @@ automation:
           {{ idle_pct }}
         {% elif position == '' or position == 0 %}
           {# No position but person detected - use gate-based brightness #}
-          {% set gate = states('text_sensor.frontpath_ble_processing_active_gate') %}
-          {% if gate.startswith('door_') %}
-            {% set gate_num = gate.split('_')[1] | int(0) %}
+          {% if active_gate.startswith('door_') %}
+            {% set gate_num = active_gate.split('_')[1] | int(0) %}
             {% set result = idle_pct + (gate_num / 8.0) * (100 - idle_pct) %}
             {{ [result, 70] | max | round(0) }}
-          {% elif gate.startswith('street_') %}
-            {% set gate_num = gate.split('_')[1] | int(0) %}
+          {% elif active_gate.startswith('street_') %}
+            {% set gate_num = active_gate.split('_')[1] | int(0) %}
             {% set result = idle_pct + ((8 - gate_num) / 8.0) * (100 - idle_pct) %}
             {{ [result, 50] | max | round(0) }}
           {% else %}
@@ -111,161 +554,250 @@ automation:
           {% set result = idle_pct + (pos / path_length) * (100 - idle_pct) %}
           {{ result | round(0) }}
         {% endif %}
-      
-      zone: >
-        {% if position == '' %}
-          none
-        {% else %}
+
+      warm_ratio: >
+        {% if position != '' %}
           {% set pos = position | float(0) %}
-          {% if pos < path_length * 0.35 %}
-            far
-          {% elif pos < path_length * 0.75 %}
-            mid
+          {% if pos < 0 %}{% set pos = 0 %}{% endif %}
+          {% if pos > path_length %}{% set pos = path_length %}{% endif %}
+          {% if path_length | float(0) > 0 %}
+            {{ pos / path_length }}
           {% else %}
-            door
+            0.5
           {% endif %}
+        {% elif active_gate.startswith('street_') %}
+          {% set gate_num = active_gate.split('_')[1] | int(1) %}
+          {{ (gate_num - 1) / 14.0 }}
+        {% elif active_gate.startswith('door_') %}
+          {% set gate_num = active_gate.split('_')[1] | int(1) %}
+          {{ 0.5 + ((gate_num - 1) / 14.0) }}
+        {% else %}
+          0.5
         {% endif %}
-      
-      christmas_mode: "{{ is_state('input_boolean.frontpath_christmas_mode', 'on') }}"
+
       fairy_daytime_motion: "{{ is_state('input_boolean.frontpath_fairy_daytime_motion', 'on') }}"
-      
-    
+
     action:
-      # ALWAYS log state first for debugging
-      - service: logbook.log
-        data:
-          name: "FrontPath Automation Triggered"
-          message: >
-            Trigger: {{ trigger.entity_id | default('time_pattern') }}
-            Person: {{ person_present }} ({{ states('binary_sensor.frontpath_ble_processing_path_person_detected') }})
-            Position: {{ position }}m
-            Dark: {{ is_dark }}
-            Target: {{ target_pct }}%
-            Christmas: {{ christmas_mode }}
-      
+      # Log state for debugging (skip time_pattern ticks)
       - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.platform != 'time_pattern' }}"
+            sequence:
+              - service: logbook.log
+                data:
+                  name: "FrontPath Automation Triggered"
+                  message: >
+                    Trigger: {{ trigger.entity_id | default('time_pattern') }}
+                    Person: {{ person_present }} ({{ states('binary_sensor.frontpath_ble_processing_path_person_detected') }})
+                    Position: {{ position }}m
+                    Dark: {{ is_dark }}
+                    Target: {{ target_pct }}%
+                    Frost: {{ frost_expected }} (min12h={{ frost_min_temp_12h }}°C, enabled={{ frost_warning_enabled }})
+
+      - choose:
+          # Colour test mode: do not fight the helper automation
+          - conditions:
+              - condition: state
+                entity_id: input_boolean.frontpath_colour_test_mode
+                state: "on"
+            sequence:
+              - stop: "Colour test mode active"
+
           # Not dark, no movement -> lights off
           - conditions:
               - condition: template
                 value_template: "{{ not (is_dark in [true, 'true', 'True']) and not person_present }}"
             sequence:
-              - service: light.turn_off
+              - service: input_number.set_value
                 target:
-                  entity_id:
-                    - light.front_porch_local
-                    - light.fairy_lights
+                  entity_id: input_number.frontpath_target_porch_pct
+                data:
+                  value: 0
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_target_fairy_pct
+                data:
+                  value: 0
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_target_fairy_r
+                data:
+                  value: 255
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_target_fairy_g
+                data:
+                  value: 190
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_target_fairy_b
+                data:
+                  value: 140
               - stop: "Daylight, no movement"
-          
+
           # Daytime + movement (but daytime override off)
           - conditions:
               - condition: template
                 value_template: "{{ not (is_dark in [true, 'true', 'True']) and person_present and not (fairy_daytime_motion in [true, 'true', 'True']) }}"
             sequence:
-              - service: light.turn_off
+              - service: input_number.set_value
                 target:
-                  entity_id:
-                    - light.fairy_lights
-                    - light.front_porch_local
+                  entity_id: input_number.frontpath_target_porch_pct
+                data:
+                  value: 0
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_target_fairy_pct
+                data:
+                  value: 0
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_target_fairy_r
+                data:
+                  value: 255
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_target_fairy_g
+                data:
+                  value: 190
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.frontpath_target_fairy_b
+                data:
+                  value: 140
               - stop: "Daytime, no override"
-          
-          # Person present -> adaptive lighting
+
+          # Person present -> set target values (smoother handles the fade)
           - conditions:
               - condition: template
                 value_template: "{{ person_present }}"
             sequence:
-              # Debug logging
               - service: logbook.log
                 data:
                   name: "FrontPath Debug"
                   message: >
-                    Person detected! Position: {{ position }}m, 
-                    Target brightness: {{ target_pct }}%, Christmas mode: {{ christmas_mode }}
-              
-              # Porch light - brightness based on position along path
-              - service: light.turn_on
+                    Person detected! Position: {{ position }}m,
+                    Target brightness: {{ target_pct }}%, Frost warning: {{ frost_expected }}
+
+              - service: input_number.set_value
                 target:
-                  entity_id: light.front_porch_local
+                  entity_id: input_number.frontpath_target_porch_pct
                 data:
-                  brightness_pct: "{{ [target_pct, idle_pct] | max | round(0) }}"
-                  transition: 1.2
-              
-              # Fairy lights
+                  value: "{{ [target_pct, idle_pct] | max | round(0) }}"
+
               - choose:
-                  # Christmas Mode: Green (street) to Red (door) fade at 100% brightness
                   - conditions:
                       - condition: template
-                        value_template: "{{ christmas_mode in [true, 'true', 'True'] }}"
+                        value_template: "{{ frost_warning_enabled in [true, 'true', 'True'] }}"
                     sequence:
-                      - service: light.turn_on
+                      - service: input_number.set_value
                         target:
-                          entity_id: light.fairy_lights
+                          entity_id: input_number.frontpath_target_fairy_pct
                         data:
-                          brightness_pct: 100
-                          transition: 0.5
-                          rgb_color: >
-                            {# Use gate pattern binary string - more reliable than active_gate #}
-                            {# Format: "001000000000000000" where 1 = active gate #}
-                            {% set pattern = states('text_sensor.frontpath_ble_processing_gate_pattern_binary') %}
-                            {% set gate = states('text_sensor.frontpath_ble_processing_active_gate') %}
-                            
-                            {# Parse gate from pattern or fallback to active_gate #}
-                            {% set ratio = 0.5 %}  {# Default to middle (yellow) #}
-                            
-                            {# Try to use active_gate first (most reliable when held) #}
-                            {% if gate.startswith('street_') %}
-                              {% set gate_num = gate.split('_')[1] | int(1) %}
-                              {# Street: gate 1 = green (0.0), gate 8 = yellow (0.44) #}
-                              {% set ratio = (gate_num - 1) / 16.0 %}
-                            {% elif gate.startswith('door_') %}
-                              {% set gate_num = gate.split('_')[1] | int(1) %}
-                              {# Door: gate 1 = yellow (0.5), gate 8 = red (0.94) #}
-                              {% set ratio = 0.5 + ((gate_num - 1) / 16.0) %}
-                            {% elif pattern not in ['', 'unknown', 'unavailable'] and pattern != '000000000000000000' %}
-                              {# Parse pattern: find highest '1' position #}
-                              {# Pattern: street_1..8 (pos 0-7), door_1..8 (pos 8-15) #}
-                              {% set highest_gate = -1 %}
-                              {% for i in range(pattern|length) %}
-                                {% if pattern[i] == '1' %}
-                                  {% set highest_gate = i %}
-                                {% endif %}
-                              {% endfor %}
-                              {% if highest_gate >= 0 %}
-                                {% set ratio = highest_gate / 16.0 %}
-                              {% endif %}
-                            {% endif %}
-                            
-                            {# Smooth fade: green (0,255,0) at street to red (255,0,0) at door #}
-                            {% set red = (ratio * 255) | int %}
-                            {% set green = ((1 - ratio) * 255) | int %}
-                            [{{ red }}, {{ green }}, 0]
+                          value: 100
+                      - choose:
+                          - conditions:
+                              - condition: template
+                                value_template: "{{ frost_expected in [true, 'true', 'True'] }}"
+                            sequence:
+                              - service: input_number.set_value
+                                target:
+                                  entity_id: input_number.frontpath_target_fairy_r
+                                data:
+                                  value: 100
+                              - service: input_number.set_value
+                                target:
+                                  entity_id: input_number.frontpath_target_fairy_g
+                                data:
+                                  value: 150
+                              - service: input_number.set_value
+                                target:
+                                  entity_id: input_number.frontpath_target_fairy_b
+                                data:
+                                  value: 255
+                        default:
+                          - service: input_number.set_value
+                            target:
+                              entity_id: input_number.frontpath_target_fairy_r
+                            data:
+                              value: 255
+                          - service: input_number.set_value
+                            target:
+                              entity_id: input_number.frontpath_target_fairy_g
+                            data:
+                              value: "{{ (220 - (warm_ratio | float(0)) * 60) | int }}"
+                          - service: input_number.set_value
+                            target:
+                              entity_id: input_number.frontpath_target_fairy_b
+                            data:
+                              value: "{{ (180 - (warm_ratio | float(0)) * 100) | int }}"
                 default:
-                  # Default: Non-Christmas warm white
-                  - service: light.turn_on
+                  - service: input_number.set_value
                     target:
-                      entity_id: light.fairy_lights
+                      entity_id: input_number.frontpath_target_fairy_pct
                     data:
-                      brightness_pct: "{{ [target_pct + 10, 100] | min | round(0) }}"
-                      transition: 0.8
-                      rgb_color: [255, 200, 160]
-              
+                      value: "{{ [target_pct + 10, 100] | min | round(0) }}"
+                  - service: input_number.set_value
+                    target:
+                      entity_id: input_number.frontpath_target_fairy_r
+                    data:
+                      value: 255
+                  - service: input_number.set_value
+                    target:
+                      entity_id: input_number.frontpath_target_fairy_g
+                    data:
+                      value: 200
+                  - service: input_number.set_value
+                    target:
+                      entity_id: input_number.frontpath_target_fairy_b
+                    data:
+                      value: 160
+
+              # Persist last position for smoothing when position is available
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ position != '' }}"
+                    sequence:
+                      - service: input_number.set_value
+                        target:
+                          entity_id: input_number.frontpath_last_position_m
+                        data:
+                          value: "{{ position | float(0) }}"
+                      - service: input_datetime.set_datetime
+                        target:
+                          entity_id: input_datetime.frontpath_last_position_time
+                        data:
+                          datetime: "{{ now().isoformat() }}"
+
               - stop: "Motion handled"
-        
+
         # Default: idle lighting (no motion)
         default:
-          - service: light.turn_on
+          - service: input_number.set_value
             target:
-              entity_id: light.front_porch_local
+              entity_id: input_number.frontpath_target_porch_pct
             data:
-              brightness_pct: "{{ idle_pct | round(0) }}"
-              transition: 2
-          
-          # Fairy lights idle state (Christmas or not, use warm white)
-          - service: light.turn_on
+              value: "{{ idle_pct | round(0) }}"
+          - service: input_number.set_value
             target:
-              entity_id: light.fairy_lights
+              entity_id: input_number.frontpath_target_fairy_pct
             data:
-              brightness_pct: "{{ [idle_pct + 5, 30] | min | round(0) }}"
-              transition: 2
-              rgb_color: [255, 190, 140]
-
-
+              value: "{{ [idle_pct + 5, 30] | min | round(0) }}"
+          - service: input_number.set_value
+            target:
+              entity_id: input_number.frontpath_target_fairy_r
+            data:
+              value: 255
+          - service: input_number.set_value
+            target:
+              entity_id: input_number.frontpath_target_fairy_g
+            data:
+              value: 190
+          - service: input_number.set_value
+            target:
+              entity_id: input_number.frontpath_target_fairy_b
+            data:
+              value: 140
+          - stop: "Idle lighting"

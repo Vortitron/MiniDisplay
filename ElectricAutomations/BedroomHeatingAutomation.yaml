@@ -26,28 +26,37 @@ actions:
       current_hour: "{{ now().hour }}"
       # Electricity price rank (0=cheapest, 4=most expensive)
       price_rank: "{{ states('input_number.electricity_price_rank') | int(99) }}"
+      # Comfort tuning (bedroom runs a bit warm): apply this offset to all targets
+      comfort_offset_c: -1
+      # Safety floor for bedroom target (avoids drifting too low if schedule changes)
+      min_target_c: 13
+      # Avoid re-sending the same setpoint (some thermostats react poorly to repeats)
+      set_temp_epsilon_c: 0.1
+      current_setpoint_raw: "{{ state_attr('climate.mama_bedroom_thermostat', 'temperature') }}"
+      current_setpoint: "{{ current_setpoint_raw | float(0) }}"
       # Calculate target temperature
       target_temp: >-
-        {% set hour = now().hour %}
-        {% set media_on = states('media_player.ceol_piccolo') in ['playing', 'on', 'idle'] %}
-        {% set rank = states('input_number.electricity_price_rank') | int(99) %}
+        {% set hour = current_hour | int(0) %}
+        {% set media_on = media_playing | bool(false) %}
+        {% set rank = price_rank | int(99) %}
+        {% set ns = namespace(base=14) %}
         
         {# Night period (22:00-04:00): Base 16C #}
         {% if hour >= 22 or hour < 4 %}
-          16
+          {% set ns.base = 16 %}
         
         {# Morning preheat (04:00-09:00): 22C base, drop with price rank #}
         {% elif hour >= 4 and hour < 9 %}
           {% if rank == 0 %}
-            22
+            {% set ns.base = 22 %}
           {% elif rank == 1 %}
-            21
+            {% set ns.base = 21 %}
           {% elif rank == 2 %}
-            20
+            {% set ns.base = 20 %}
           {% elif rank == 3 %}
-            19
+            {% set ns.base = 19 %}
           {% else %}
-            18
+            {% set ns.base = 18 %}
           {% endif %}
         
         {# Daytime (09:00-22:00): 14C base, boost if media playing #}
@@ -55,23 +64,40 @@ actions:
           {% if media_on %}
             {# Someone in room - at least 17C, higher if cheap #}
             {% if rank == 0 %}
-              20
+              {% set ns.base = 20 %}
             {% elif rank == 1 %}
-              19
+              {% set ns.base = 19 %}
             {% elif rank == 2 %}
-              18
+              {% set ns.base = 18 %}
             {% else %}
-              17
+              {% set ns.base = 17 %}
             {% endif %}
           {% else %}
             {# Empty room during day #}
-            14
+            {% set ns.base = 14 %}
           {% endif %}
         {% endif %}
-  - action: climate.set_temperature
-    target:
-      entity_id: climate.mama_bedroom_thermostat
-    data:
-      temperature: "{{ target_temp }}"
+        {% set adjusted = (ns.base | float(0)) + (comfort_offset_c | float(0)) %}
+        {{ [adjusted, (min_target_c | float(0))] | max | round(0) | int }}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {% if current_setpoint_raw is none %}
+                false
+              {% else %}
+                {% set desired = target_temp | float(0) %}
+                {% set current = current_setpoint | float(0) %}
+                {{ (desired - current) | abs < set_temp_epsilon_c }}
+              {% endif %}
+        sequence:
+          - stop: "Thermostat setpoint already matches target"
+    default:
+      - action: climate.set_temperature
+        target:
+          entity_id: climate.mama_bedroom_thermostat
+        data:
+          temperature: "{{ target_temp }}"
 mode: restart
 

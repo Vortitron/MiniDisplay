@@ -24,10 +24,14 @@
           {% if notif_id != '' %}
             {% if trigger.update_type in ['added', 'current'] %}
               {# Add or update notification - remove any existing with same ID first #}
+              {% set existing = current | selectattr('notification_id', 'eq', notif_id) | list %}
+              {% set existing_created = existing[0].created if existing | length > 0 and existing[0].created is defined else '' %}
+              {% set created_time = existing_created if existing_created != '' else now().strftime('%H:%M') %}
               {% set new_notif = {
                 'notification_id': notif_id,
                 'title': notif.get('title', 'Notification') | string,
                 'message': notif.get('message', '') | string,
+                'created': created_time,
                 'data': notif.get('data', {})
               } %}
               {% set filtered = current | rejectattr('notification_id', 'eq', notif_id) | list %}

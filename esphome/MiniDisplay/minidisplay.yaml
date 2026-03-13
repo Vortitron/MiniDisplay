@@ -2,15 +2,31 @@
 esphome:
   name: minidisplay
   friendly_name: MiniDisplay Controller
+  includes:
+    - onewire_power.h
   on_boot:
-    priority: 600
-    then:
-      - output.turn_on: ds18b20_power
-      - logger.log: "MiniDisplay Controller booted, LED controlled by alarm mode"
+    - priority: 900
+      then:
+        - lambda: |-
+            // Pre-enable DS18B20 power as early as possible for OneWire scan
+            pre_enable_ds18b20_power();
+        - logger.log: "DS18B20 power pre-enabled (early boot)"
+    - priority: 600
+      then:
+        - switch.turn_on: ds18b20_power
+        - logger.log: "MiniDisplay Controller booted, LED controlled by alarm mode"
+    - priority: -100
+      then:
+        - delay: 5s
+        - if:
+            condition:
+              lambda: 'return !id(ambient_temperature).has_state();'
+            then:
+              - script.execute: onewire_resync
   on_shutdown:
     then:
       - output.turn_off: status_led
-      - output.turn_off: ds18b20_power
+      - switch.turn_off: ds18b20_power
       - lambda: 'id(status_led_is_on) = false;'
       - logger.log: "MiniDisplay Controller shutting down"
 
@@ -77,11 +93,25 @@ output:
     id: button_led
     inverted: true
 
+switch:
   # GPIO16 as 3.3V power source for DS18B20 (always HIGH)
   - platform: gpio
     pin: GPIO16
     id: ds18b20_power
-    inverted: false
+    restore_mode: ALWAYS_ON
+    internal: true
+
+  - platform: restart
+    id: restart_device
+    name: "MiniDisplay Restart"
+    internal: true
+
+button:
+  - platform: template
+    name: "OneWire Manual Scan"
+    id: onewire_manual_scan_button
+    on_press:
+      - script.execute: onewire_manual_scan
 
 # I2C for OLED display
 i2c:
@@ -127,9 +157,13 @@ display:
         if (!time.is_valid()) {
           time = id(sntp_time).now();
         }
-        char time_str[20];
-        snprintf(time_str, sizeof(time_str), "%02d:%02d", time.hour, time.minute);
-        it.printf(0 + offset_x, 0 + offset_y, id(default_font), "Prices %s", time_str);
+        char time_str[64];
+        if (id(fish_tank_temperature).has_state()) {
+          snprintf(time_str, sizeof(time_str), "%02d:%02d  Tank:%.1fC", time.hour, time.minute, id(fish_tank_temperature).state);
+        } else {
+          snprintf(time_str, sizeof(time_str), "%02d:%02d", time.hour, time.minute);
+        }
+        it.printf(0 + offset_x, 0 + offset_y, id(default_font), "%s", time_str);
 
         int y_offset = 16;
         char line_buf[32];
@@ -572,6 +606,10 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            if (!isnan(x)) {
+              id(fish_temp_last_ok_ms) = millis();
+              id(fish_temp_reset_attempts) = 0;
+            }
             ESP_LOGI("sensor", "Fish Tank Temperature: %.2fC", x);
 
 # Home Assistant sensors to read entity states
@@ -749,6 +787,10 @@ sensor:
   - platform: homeassistant
     id: electricity_price_rank_4h_avg
     entity_id: input_number.electricity_price_rank_4h_avg
+
+  - platform: homeassistant
+    id: fish_tank_temperature
+    entity_id: sensor.minidisplay_controller_fish_tank_temperature
 
 # Binary sensors for reading entity on/off states (hardware buttons)
 binary_sensor:
@@ -1284,6 +1326,21 @@ globals:
     restore_value: no
     initial_value: 'false'
 
+  - id: fish_temp_last_ok_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: fish_temp_last_reset_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: fish_temp_reset_attempts
+    type: int
+    restore_value: no
+    initial_value: '0'
+
 interval:
   - interval: 100ms
     then:
@@ -1292,6 +1349,7 @@ interval:
           bool led_on = false;
           bool display_invert = false;
           const uint32_t now = millis();
+          const bool has_notifications = id(notifications_count) > 0;
           switch (mode) {
             case 0:  // OK - LED off, display normal
               led_on = false;
@@ -1315,6 +1373,9 @@ interval:
               led_on = false;
               display_invert = false;
               break;
+          }
+          if (!has_notifications) {
+            display_invert = false;
           }
 
           // Update LED
@@ -1393,8 +1454,60 @@ interval:
             ESP_LOGD("display", "Screensaver inversion: %s", should_invert ? "inverted" : "normal");
           }
 
+  # Fish tank temperature watchdog (power-cycle DS18B20 if readings stop)
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const uint32_t now = millis();
+              const uint32_t last_ok = id(fish_temp_last_ok_ms);
+              const uint32_t last_reset = id(fish_temp_last_reset_ms);
+              if (now - last_reset < 120000u) {
+                return false;
+              }
+              if (last_ok == 0u) {
+                return now > 60000u;
+              }
+              return (now - last_ok) > 90000u;
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(fish_temp_reset_attempts) >= 3;'
+                then:
+                  - logger.log: "Fish tank temperature still missing, restarting device"
+                  - switch.turn_on: restart_device
+                else:
+                  - lambda: |-
+                      id(fish_temp_last_reset_ms) = millis();
+                      id(fish_temp_reset_attempts) += 1;
+                      ESP_LOGW("sensor", "Fish tank temperature stale, power-cycling DS18B20 (attempt %d)", id(fish_temp_reset_attempts));
+                  - switch.turn_off: ds18b20_power
+                  - delay: 2s
+                  - switch.turn_on: ds18b20_power
+                  - delay: 1s
+                  - component.update: ambient_temperature
+
 # Scripts for entity control and display management
 script:
+  - id: onewire_resync
+    mode: restart
+    then:
+      - logger.log: "OneWire resync: power-cycling DS18B20 and updating"
+      - switch.turn_off: ds18b20_power
+      - delay: 2s
+      - switch.turn_on: ds18b20_power
+      - delay: 2s
+      - component.update: ambient_temperature
+
+  - id: onewire_manual_scan
+    mode: restart
+    then:
+      - logger.log: "Manual OneWire scan: warming DS18B20 before reboot"
+      - switch.turn_on: ds18b20_power
+      - delay: 20s
+      - switch.turn_on: restart_device
+
   - id: mark_activity
     then:
       - lambda: |-
@@ -1526,36 +1639,69 @@ script:
 
   - id: dismiss_current_notification
     then:
-      - lambda: |-
-          const int base = id(base_entity_count);
-          const int count = id(notifications_count);
-          int index = id(current_entity_index);
-          
-          if (count <= 0 || index < base) {
-            ESP_LOGI("script", "Dismiss requested but no notification selected (index %d, count %d)", index, count);
-            return;
-          }
-
-          const int target = index - base;
-          if (target < 0 || target >= static_cast<int>(id(notification_ids).size())) {
-            ESP_LOGW("script", "Notification index %d out of range", target);
-            return;
-          }
-          
-          std::string notif_id = id(notification_ids)[target];
-          ESP_LOGI("script", "Dismissing notification %s (index %d)", notif_id.c_str(), target);
-      - homeassistant.service:
-          service: persistent_notification.dismiss
-          data:
-            notification_id: !lambda |-
+      - if:
+          condition:
+            lambda: |-
               const int base = id(base_entity_count);
-              const int target = id(current_entity_index) - base;
-              if (target >= 0 && target < static_cast<int>(id(notification_ids).size())) {
-                return id(notification_ids)[target];
+              const int count = id(notifications_count);
+              int index = id(current_entity_index);
+              
+              if (count <= 0 || index < base) {
+                ESP_LOGI("script", "Dismiss requested but no notification selected (index %d, count %d)", index, count);
+                return false;
               }
-              return std::string("");
-      - delay: 100ms
-      - script.execute: update_display
+
+              const int target = index - base;
+              if (target < 0 || target >= static_cast<int>(id(notification_ids).size())) {
+                ESP_LOGW("script", "Notification index %d out of range", target);
+                return false;
+              }
+              return true;
+          then:
+            - lambda: |-
+                const int base = id(base_entity_count);
+                const int target = id(current_entity_index) - base;
+                std::string notif_id = id(notification_ids)[target];
+                ESP_LOGI("script", "Dismissing notification %s (index %d)", notif_id.c_str(), target);
+            - homeassistant.service:
+                service: persistent_notification.dismiss
+                data:
+                  notification_id: !lambda |-
+                    const int base = id(base_entity_count);
+                    const int target = id(current_entity_index) - base;
+                    if (target >= 0 && target < static_cast<int>(id(notification_ids).size())) {
+                      return id(notification_ids)[target];
+                    }
+                    return std::string("");
+            - lambda: |-
+                const int base = id(base_entity_count);
+                const int target = id(current_entity_index) - base;
+                auto &ids = id(notification_ids);
+                auto &titles = id(notification_titles);
+                auto &messages = id(notification_messages);
+                auto &alarms = id(notification_alarm_levels);
+                if (target < 0 || target >= static_cast<int>(ids.size())) {
+                  return;
+                }
+                ids.erase(ids.begin() + target);
+                if (target < static_cast<int>(titles.size())) {
+                  titles.erase(titles.begin() + target);
+                }
+                if (target < static_cast<int>(messages.size())) {
+                  messages.erase(messages.begin() + target);
+                }
+                if (target < static_cast<int>(alarms.size())) {
+                  alarms.erase(alarms.begin() + target);
+                }
+                id(notifications_count) = ids.size();
+                int total = base + id(notifications_count);
+                if (total <= 0) total = base;
+                if (total <= 0) total = 1;
+                if (id(current_entity_index) >= total) {
+                  id(current_entity_index) = total - 1;
+                }
+            - delay: 100ms
+            - script.execute: update_display
 
   - id: adjust_brightness
     mode: queued
@@ -1877,7 +2023,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.gold_light
-                  color_temp: "454"
+                  color_temp_kelvin: "2200"
                   brightness_pct: "100"
       - if:
           condition:
@@ -1887,7 +2033,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.gold_light
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
                   brightness_pct: "100"
       - if:
           condition:
@@ -1897,7 +2043,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.gold_light
-                  color_temp: "153"
+                  color_temp_kelvin: "6500"
                   brightness_pct: "100"
       - if:
           condition:
@@ -1907,7 +2053,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.gold_light
-                  color_temp: "370"
+                  color_temp_kelvin: "2700"
                   brightness_pct: "100"
 
   - id: apply_led_flood_color
@@ -1984,7 +2130,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.led_flood_light
-                  color_temp: "454"
+                  color_temp_kelvin: "2200"
                   brightness_pct: "100"
       - if:
           condition:
@@ -1994,7 +2140,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.led_flood_light
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
                   brightness_pct: "100"
       - if:
           condition:
@@ -2004,7 +2150,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.led_flood_light
-                  color_temp: "153"
+                  color_temp_kelvin: "6500"
                   brightness_pct: "100"
       - if:
           condition:
@@ -2014,7 +2160,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.led_flood_light
-                  color_temp: "370"
+                  color_temp_kelvin: "2700"
                   brightness_pct: "100"
 
   - id: apply_bio_flood_color
@@ -2098,7 +2244,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.bio_floodlight
-                  color_temp: "454"
+                  color_temp_kelvin: "2200"
                   brightness_pct: "100"
       - if:
           condition:
@@ -2108,7 +2254,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.bio_floodlight
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
                   brightness_pct: "100"
       - if:
           condition:
@@ -2118,7 +2264,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.bio_floodlight
-                  color_temp: "153"
+                  color_temp_kelvin: "6500"
                   brightness_pct: "100"
       - if:
           condition:
@@ -2128,7 +2274,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.bio_floodlight
-                  color_temp: "370"
+                  color_temp_kelvin: "2700"
                   brightness_pct: "100"
 
   - id: apply_office_light_color
@@ -2145,7 +2291,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.living_office_stand
-                  color_temp: "454"
+                  color_temp_kelvin: "2200"
       - if:
           condition:
             lambda: 'return id(light_color_indices)[3] == 7;'
@@ -2154,7 +2300,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.living_office_stand
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
       - if:
           condition:
             lambda: 'return id(light_color_indices)[3] == 8;'
@@ -2163,7 +2309,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.living_office_stand
-                  color_temp: "153"
+                  color_temp_kelvin: "6500"
       - if:
           condition:
             lambda: 'return id(light_color_indices)[3] == 9;'
@@ -2172,7 +2318,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.living_office_stand
-                  color_temp: "370"
+                  color_temp_kelvin: "2700"
 
   - id: apply_isolde_bed_color
     then:
@@ -2248,7 +2394,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.isp_ba4bb8_4bb8
-                  color_temp: "454"
+                  color_temp_kelvin: "2200"
                   brightness_pct: "100"
       - if:
           condition:
@@ -2258,7 +2404,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.isp_ba4bb8_4bb8
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
                   brightness_pct: "100"
       - if:
           condition:
@@ -2268,7 +2414,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.isp_ba4bb8_4bb8
-                  color_temp: "153"
+                  color_temp_kelvin: "6500"
                   brightness_pct: "100"
       - if:
           condition:
@@ -2278,7 +2424,7 @@ script:
                 service: light.turn_on
                 data:
                   entity_id: light.isp_ba4bb8_4bb8
-                  color_temp: "370"
+                  color_temp_kelvin: "2700"
                   brightness_pct: "100"
 
   - id: cycle_tv_source
@@ -2354,7 +2500,7 @@ script:
                 data:
                   entity_id: light.gold_light
                   brightness_pct: "100"
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
       - if:
           condition:
             lambda: 'return id(current_entity_index) == 1;'
@@ -2364,7 +2510,7 @@ script:
                 data:
                   entity_id: light.led_flood_light
                   brightness_pct: "100"
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
       - if:
           condition:
             lambda: 'return id(current_entity_index) == 2;'
@@ -2374,7 +2520,7 @@ script:
                 data:
                   entity_id: light.bio_floodlight
                   brightness_pct: "100"
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
       - if:
           condition:
             lambda: 'return id(current_entity_index) == 3;'
@@ -2384,7 +2530,7 @@ script:
                 data:
                   entity_id: light.living_office_stand
                   brightness_pct: "100"
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
       - if:
           condition:
             lambda: 'return id(current_entity_index) == 7;'
@@ -2394,7 +2540,7 @@ script:
                 data:
                   entity_id: light.isp_ba4bb8_4bb8
                   brightness_pct: "100"
-                  color_temp: "250"
+                  color_temp_kelvin: "4000"
       - delay: 500ms
       - script.execute: update_display
 
@@ -2440,14 +2586,15 @@ script:
       - lambda: |-
           // Ignore encoder push briefly after exiting screensaver
           uint32_t now = millis();
-          if (now < id(screensaver_exit_ignore_until_ms)) {
+          int index = id(current_entity_index);
+          int base = id(base_entity_count);
+          bool is_notification = (index >= base && id(notifications_count) > 0);
+          if (!is_notification && now < id(screensaver_exit_ignore_until_ms)) {
             ESP_LOGD("script", "Ignoring encoder push (screensaver exit delay)");
             return;
           }
-          int index = id(current_entity_index);
-          int base = id(base_entity_count);
           ESP_LOGI("script", "Encoder push pressed for entity %d", index);
-          if (index >= base && id(notifications_count) > 0) {
+          if (is_notification) {
             id(dismiss_current_notification).execute();
           } else {
             // Encoder push toggles entity state (on/off)

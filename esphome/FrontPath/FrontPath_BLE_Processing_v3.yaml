@@ -166,32 +166,32 @@ globals:
   # If we see valid motion in far gates, treat it as a person immediately.
   - id: door_quick_trigger_raw_gate_max
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '8'
   
   - id: door_quick_trigger_raw_gate_min
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '7'
   
   - id: energy_margin_pct
     type: float
-    restore_value: yes
-    initial_value: '25.0'  # Simplified: easier detection threshold
+    restore_value: no
+    initial_value: '12.0'  # Hardcoded (v3): match current tuned value
   
   - id: gate_trigger_floor_pct
     type: float
-    restore_value: yes
-    initial_value: '20.0'  # Simplified: lower floor for easier detection
+    restore_value: no
+    initial_value: '10.0'  # Hardcoded (v3): match current tuned value
   
   - id: gate_delta_margin_pct
     type: float
-    restore_value: yes
-    initial_value: '15.0'  # Simplified: lower threshold for easier detection
+    restore_value: no
+    initial_value: '2.0'  # Hardcoded (v3): match current tuned value
   
   - id: path_length_m
     type: float
-    restore_value: yes
+    restore_value: no
     initial_value: '16.0'
   
   - id: avg_alpha
@@ -202,24 +202,24 @@ globals:
   # When energy drops below baseline, decay baseline faster so calm days recover quickly
   - id: avg_alpha_down
     type: float
-    restore_value: yes
+    restore_value: no
     initial_value: '0.05'
 
   # Require stationary/static confirmation to count as "real" movement (filters wind/string)
   - id: require_static_confirmation
     type: bool
-    restore_value: yes
+    restore_value: no
     initial_value: 'true'
 
   - id: static_energy_min
     type: float
-    restore_value: yes
-    initial_value: '15.0'
+    restore_value: no
+    initial_value: '23.0'
 
   # Require static energy to rise above its baseline by this amount (adaptive vs wind)
   - id: static_energy_delta_min
     type: float
-    restore_value: yes
+    restore_value: no
     initial_value: '12.0'
 
   # Static confirmation is very effective against wind flutter, but it can be too strict at long range.
@@ -227,7 +227,7 @@ globals:
   # 0 disables this feature (static confirmation applies to all gates if require_static_confirmation is on).
   - id: static_confirmation_max_gate
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '3'
 
   # NOTE (legacy): kept for backwards-compatibility with older configs.
@@ -235,116 +235,116 @@ globals:
   # This value is no longer used for clamping/merging.
   - id: door_max_gate_reported
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '8'
 
   # Adaptive sensitivity bias for the door-side sensor (sensor2).
   # Negative = more sensitive (smaller LD2410 sensitivity values).
   - id: door_sensitivity_bias
     type: int
-    restore_value: yes
-    initial_value: '0'
+    restore_value: no
+    initial_value: '-3'
 
   # Door-end (far gates 7-8) extra sensitivity boost for the DOOR-pointing sensor (sensor2).
   # This is applied on top of the existing distance bias. Higher = more sensitive.
   - id: door_far_sensitivity_boost
     type: int
-    restore_value: yes
-    initial_value: '16'
+    restore_value: no
+    initial_value: '22'
   
   # Door-end (gates 7-8) extra floor bonus (reduces dynamic gate floor, making it easier to trigger).
   - id: door_far_floor_bonus
     type: float
-    restore_value: yes
-    initial_value: '10.0'
+    restore_value: no
+    initial_value: '14.5'
 
   # Street-side tuning (sensor1): increase sensitivity for far gates, and reduce sensitivity for near gates.
   - id: street_far_sensitivity_boost
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '8'
   
   - id: street_near_sensitivity_penalty
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '6'
   
   - id: street_far_floor_bonus
     type: float
-    restore_value: yes
+    restore_value: no
     initial_value: '6.0'
   
   - id: ignore_gate0
     type: bool
-    restore_value: yes
+    restore_value: no
     initial_value: 'true'  # Completely ignore gate 0 (0-75cm) from both sensors
   
   - id: ignore_gate1
     type: bool
-    restore_value: yes
+    restore_value: no
     initial_value: 'false'  # Optionally ignore gate 1 (75-150cm) from both sensors
   
   - id: require_sequential_gates
     type: bool
-    restore_value: yes
-    initial_value: 'false'  # Simplified: allow any gate to trigger
+    restore_value: no
+    initial_value: 'true'
   
   - id: enable_overall_energy_detection
     type: bool
-    restore_value: yes
-    initial_value: 'true'  # Simplified: enable all detection paths
+    restore_value: no
+    initial_value: 'false'
 
   # Wind hardening: near gates (closest to the radars) can spike with small flutter.
   # This adds a small "persistence" requirement ONLY when the activity is near-only
   # (i.e., no far gates are active). Far-end/door detection remains immediate.
   - id: near_gate_guard_enabled
     type: bool
-    restore_value: yes
+    restore_value: no
     initial_value: 'true'
   
   # Gates <= this index are treated as "near" (1 is near sensor, 8 is far/end).
   - id: near_gate_idx_max
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '3'
   
   # How many consecutive near-only hits are required to trigger (with 500ms throttle, 2 ~= ~1s).
   - id: near_gate_streak_required
     type: int
-    restore_value: yes
-    initial_value: '2'
+    restore_value: no
+    initial_value: '3'
   
   # Time window for consecutive near-only hits to count as a streak.
   - id: near_gate_streak_window_ms
     type: uint32_t
-    restore_value: yes
+    restore_value: no
     initial_value: '1200'
   
   # Near-only trigger hardening: a single near gate can chatter in wind. Require it to look "person-like".
   - id: near_gate_hot_required
     type: int
-    restore_value: yes
+    restore_value: no
     initial_value: '1'   # keep default permissive; tune to 2 if you want stricter near-only behaviour
   
   - id: near_gate_change_window_ms
     type: uint32_t
-    restore_value: yes
+    restore_value: no
     initial_value: '1500'
   
   # If only one near gate is hot, require at least this moving energy to allow triggering.
   - id: near_single_gate_energy_min
     type: float
-    restore_value: yes
+    restore_value: no
     initial_value: '55.0'
   
   - id: light_min_voltage
     type: float
-    restore_value: yes
+    restore_value: no
     initial_value: '0.05'  # Nighttime voltage (V)
   
   - id: light_max_voltage
     type: float
-    restore_value: yes
+    restore_value: no
     initial_value: '2.0'  # Bright day voltage (V)
   
   - id: last_active_gate_str
@@ -359,7 +359,7 @@ globals:
   
   - id: gate_hold_time_ms
     type: uint32_t
-    restore_value: yes
+    restore_value: no
     initial_value: '5000'  # Hold active gate for 5 seconds after it drops
   
   # Track when gate 2+ was last active (for sequential validation with history)
@@ -375,8 +375,8 @@ globals:
   
   - id: sequential_lookback_ms
     type: uint32_t
-    restore_value: yes
-    initial_value: '3000'  # Allow gate 1 if gate 2+ was active in last 3 seconds
+    restore_value: no
+    initial_value: '5000'  # Hardcoded (v3): match current tuned value
   
   # Track last active gate number for sequential validation
   - id: last_triggered_gate
@@ -392,12 +392,12 @@ globals:
   # Adaptive sensitivity settings
   - id: adaptive_sensitivity_enabled
     type: bool
-    restore_value: yes
+    restore_value: no
     initial_value: 'true'
   
   - id: sensitivity_update_interval_ms
     type: uint32_t
-    restore_value: yes
+    restore_value: no
     initial_value: '300000'  # 5 minutes default
   
   - id: last_sensitivity_update
@@ -1350,91 +1350,7 @@ ble_client:
             }
 
 switch:
-  - platform: template
-    name: "Ignore Gate 0"
-    id: ignore_gate0_switch
-    icon: mdi:gate-remove
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - globals.set:
-          id: ignore_gate0
-          value: 'true'
-    turn_off_action:
-      - globals.set:
-          id: ignore_gate0
-          value: 'false'
-    lambda: 'return id(ignore_gate0);'
-  
-  - platform: template
-    name: "Ignore Gate 1"
-    id: ignore_gate1_switch
-    icon: mdi:gate-remove
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    turn_on_action:
-      - globals.set:
-          id: ignore_gate1
-          value: 'true'
-    turn_off_action:
-      - globals.set:
-          id: ignore_gate1
-          value: 'false'
-    lambda: 'return id(ignore_gate1);'
-  
-  - platform: template
-    name: "Require Sequential Gates"
-    id: require_sequential_switch
-    icon: mdi:gate-arrow-right
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
-    turn_on_action:
-      - globals.set:
-          id: require_sequential_gates
-          value: 'true'
-    turn_off_action:
-      - globals.set:
-          id: require_sequential_gates
-          value: 'false'
-    lambda: 'return id(require_sequential_gates);'
-  
-  - platform: template
-    name: "Overall Energy Detection"
-    id: overall_energy_detection_switch
-    icon: mdi:lightning-bolt
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - globals.set:
-          id: enable_overall_energy_detection
-          value: 'true'
-    turn_off_action:
-      - globals.set:
-          id: enable_overall_energy_detection
-          value: 'false'
-    lambda: 'return id(enable_overall_energy_detection);'
-  
-  - platform: template
-    name: "Near Gate Guard (Wind Hardening)"
-    id: near_gate_guard_switch
-    icon: mdi:weather-windy
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - globals.set:
-          id: near_gate_guard_enabled
-          value: 'true'
-    turn_off_action:
-      - globals.set:
-          id: near_gate_guard_enabled
-          value: 'false'
-    lambda: 'return id(near_gate_guard_enabled);'
-  
+  # v3: keep HA controls minimal. Tuning switches are hardcoded in `globals` above.
   - platform: template
     name: "Enable Sensor 1 BLE"
     id: enable_sensor1_ble
@@ -1471,42 +1387,6 @@ switch:
           ESP_LOGI("ble_control", "Sensor 2 BLE disabled - HLKRadarTool app can now connect");
     lambda: 'return id(ld2410_sensor2)->enabled;'
   
-  - platform: template
-    name: "Require Static Confirmation"
-    id: require_static_confirmation_switch
-    icon: mdi:account-check
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - globals.set:
-          id: require_static_confirmation
-          value: 'true'
-    turn_off_action:
-      - globals.set:
-          id: require_static_confirmation
-          value: 'false'
-    lambda: 'return id(require_static_confirmation);'
-
-  - platform: template
-    name: "Adaptive Sensitivity"
-    id: adaptive_sensitivity_switch
-    icon: mdi:tune-vertical
-    entity_category: config
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
-    turn_on_action:
-      - globals.set:
-          id: adaptive_sensitivity_enabled
-          value: 'true'
-      - logger.log: "Adaptive sensitivity enabled - will auto-adjust based on weather"
-    turn_off_action:
-      - globals.set:
-          id: adaptive_sensitivity_enabled
-          value: 'false'
-      - logger.log: "Adaptive sensitivity disabled"
-    lambda: 'return id(adaptive_sensitivity_enabled);'
-
 button:
   - platform: template
     name: "Auto Calibrate Sensor 1"
@@ -1782,396 +1662,6 @@ sensor:
   - platform: wifi_signal
     name: "WiFi Signal"
     update_interval: 30s
-
-number:
-  - platform: template
-    name: "Energy Margin"
-    id: energy_margin
-    min_value: 5
-    max_value: 60
-    step: 1
-    unit_of_measurement: "%"
-    icon: mdi:signal-variant
-    set_action:
-      - globals.set:
-          id: energy_margin_pct
-          value: !lambda 'return x;'
-    lambda: 'return id(energy_margin_pct);'
-  
-  - platform: template
-    name: "Gate Trigger Floor"
-    id: gate_trigger_floor
-    min_value: 5
-    max_value: 60
-    step: 1
-    unit_of_measurement: "%"
-    icon: mdi:gate
-    set_action:
-      - globals.set:
-          id: gate_trigger_floor_pct
-          value: !lambda 'return x;'
-    lambda: 'return id(gate_trigger_floor_pct);'
-
-  - platform: template
-    name: "Static Energy Min"
-    id: static_energy_min_number
-    min_value: 0
-    max_value: 100
-    step: 1
-    unit_of_measurement: "%"
-    icon: mdi:account-filter
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: static_energy_min
-          value: !lambda 'return x;'
-    lambda: 'return id(static_energy_min);'
-
-  - platform: template
-    name: "Static Energy Delta Min"
-    id: static_energy_delta_min_number
-    min_value: 0
-    max_value: 80
-    step: 1
-    unit_of_measurement: "%"
-    icon: mdi:delta
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: static_energy_delta_min
-          value: !lambda 'return x;'
-    lambda: 'return id(static_energy_delta_min);'
-
-  - platform: template
-    name: "Door Max Gate"
-    id: door_max_gate_number
-    min_value: 1
-    max_value: 8
-    step: 1
-    icon: mdi:door
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: door_max_gate_reported
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(door_max_gate_reported);'
-
-  - platform: template
-    name: "Door Quick Trigger Gate Max"
-    id: door_quick_trigger_gate_max_number
-    min_value: 0
-    max_value: 8
-    step: 1
-    icon: mdi:run-fast
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: door_quick_trigger_raw_gate_max
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(door_quick_trigger_raw_gate_max);'
-
-  - platform: template
-    name: "Door Quick Trigger Gate Min"
-    id: door_quick_trigger_gate_min_number
-    min_value: 0
-    max_value: 8
-    step: 1
-    icon: mdi:run-fast
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: door_quick_trigger_raw_gate_min
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(door_quick_trigger_raw_gate_min);'
-  - platform: template
-    name: "Near Gate Max Index"
-    id: near_gate_idx_max_number
-    min_value: 1
-    max_value: 8
-    step: 1
-    icon: mdi:arrow-expand-horizontal
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: near_gate_idx_max
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(near_gate_idx_max);'
-  
-  - platform: template
-    name: "Near Gate Streak Required"
-    id: near_gate_streak_required_number
-    min_value: 1
-    max_value: 6
-    step: 1
-    icon: mdi:counter
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: near_gate_streak_required
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(near_gate_streak_required);'
-  
-  - platform: template
-    name: "Near Gate Streak Window"
-    id: near_gate_streak_window_number
-    min_value: 250
-    max_value: 3000
-    step: 50
-    unit_of_measurement: "ms"
-    icon: mdi:timer-outline
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: near_gate_streak_window_ms
-          value: !lambda 'return (uint32_t) x;'
-    lambda: 'return id(near_gate_streak_window_ms);'
-
-  - platform: template
-    name: "Near Gate Hot Required"
-    id: near_gate_hot_required_number
-    min_value: 1
-    max_value: 3
-    step: 1
-    icon: mdi:counter
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: near_gate_hot_required
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(near_gate_hot_required);'
-  
-  - platform: template
-    name: "Near Gate Change Window"
-    id: near_gate_change_window_number
-    min_value: 250
-    max_value: 3000
-    step: 50
-    unit_of_measurement: "ms"
-    icon: mdi:timer-outline
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: near_gate_change_window_ms
-          value: !lambda 'return (uint32_t) x;'
-    lambda: 'return id(near_gate_change_window_ms);'
-  
-  - platform: template
-    name: "Near Single Gate Energy Min"
-    id: near_single_gate_energy_min_number
-    min_value: 0
-    max_value: 100
-    step: 1
-    unit_of_measurement: "%"
-    icon: mdi:signal
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: near_single_gate_energy_min
-          value: !lambda 'return x;'
-    lambda: 'return id(near_single_gate_energy_min);'
-
-  - platform: template
-    name: "Door Sensitivity Bias"
-    id: door_sensitivity_bias_number
-    min_value: -30
-    max_value: 30
-    step: 1
-    icon: mdi:tune
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: door_sensitivity_bias
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(door_sensitivity_bias);'
-
-  - platform: template
-    name: "Street Far Sensitivity Boost"
-    id: street_far_sensitivity_boost_number
-    min_value: 0
-    max_value: 20
-    step: 1
-    icon: mdi:signal-distance-variant
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: street_far_sensitivity_boost
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(street_far_sensitivity_boost);'
-
-  - platform: template
-    name: "Street Near Sensitivity Penalty"
-    id: street_near_sensitivity_penalty_number
-    min_value: 0
-    max_value: 20
-    step: 1
-    icon: mdi:signal-off
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: street_near_sensitivity_penalty
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(street_near_sensitivity_penalty);'
-
-  - platform: template
-    name: "Street Far Floor Bonus"
-    id: street_far_floor_bonus_number
-    min_value: 0
-    max_value: 20
-    step: 0.5
-    unit_of_measurement: "%"
-    icon: mdi:gate-open
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: street_far_floor_bonus
-          value: !lambda 'return x;'
-    lambda: 'return id(street_far_floor_bonus);'
-
-  - platform: template
-    name: "Door Far Sensitivity Boost"
-    id: door_far_sensitivity_boost_number
-    min_value: 0
-    max_value: 30
-    step: 1
-    icon: mdi:signal-distance-variant
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: door_far_sensitivity_boost
-          value: !lambda 'return (int) x;'
-    lambda: 'return id(door_far_sensitivity_boost);'
-
-  - platform: template
-    name: "Door Far Floor Bonus"
-    id: door_far_floor_bonus_number
-    min_value: 0
-    max_value: 20
-    step: 0.5
-    unit_of_measurement: "%"
-    icon: mdi:gate-open
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: door_far_floor_bonus
-          value: !lambda 'return x;'
-    lambda: 'return id(door_far_floor_bonus);'
-
-  - platform: template
-    name: "Baseline Decay Speed"
-    id: avg_alpha_down_number
-    min_value: 0.001
-    max_value: 0.2
-    step: 0.001
-    icon: mdi:chart-line-variant
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: avg_alpha_down
-          value: !lambda 'return x;'
-    lambda: 'return id(avg_alpha_down);'
-  
-  - platform: template
-    name: "Gate Delta Margin"
-    id: gate_delta_margin
-    min_value: 2
-    max_value: 80
-    step: 1
-    unit_of_measurement: "%"
-    icon: mdi:chart-line
-    set_action:
-      - globals.set:
-          id: gate_delta_margin_pct
-          value: !lambda 'return x;'
-    lambda: 'return id(gate_delta_margin_pct);'
-  
-  - platform: template
-    name: "Path Length"
-    id: path_length
-    min_value: 8
-    max_value: 20
-    step: 0.5
-    unit_of_measurement: "m"
-    icon: mdi:map-marker-distance
-    set_action:
-      - globals.set:
-          id: path_length_m
-          value: !lambda 'return x;'
-    lambda: 'return id(path_length_m);'
-  
-  - platform: template
-    name: "Light Min Voltage"
-    id: light_min_volt
-    min_value: 0.0
-    max_value: 3.3
-    step: 0.01
-    unit_of_measurement: "V"
-    icon: mdi:brightness-1
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: light_min_voltage
-          value: !lambda 'return x;'
-    lambda: 'return id(light_min_voltage);'
-  
-  - platform: template
-    name: "Light Max Voltage"
-    id: light_max_volt
-    min_value: 0.0
-    max_value: 3.3
-    step: 0.01
-    unit_of_measurement: "V"
-    icon: mdi:brightness-7
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: light_max_voltage
-          value: !lambda 'return x;'
-    lambda: 'return id(light_max_voltage);'
-  
-  - platform: template
-    name: "Gate Hold Time"
-    id: gate_hold_time
-    min_value: 0
-    max_value: 30
-    step: 1
-    unit_of_measurement: "s"
-    icon: mdi:timer-sand
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: gate_hold_time_ms
-          value: !lambda 'return x * 1000;'
-    lambda: 'return id(gate_hold_time_ms) / 1000.0;'
-  
-  - platform: template
-    name: "Sequential Lookback Time"
-    id: sequential_lookback
-    min_value: 0
-    max_value: 10
-    step: 0.5
-    unit_of_measurement: "s"
-    icon: mdi:history
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: sequential_lookback_ms
-          value: !lambda 'return x * 1000;'
-    lambda: 'return id(sequential_lookback_ms) / 1000.0;'
-  
-  - platform: template
-    name: "Sensitivity Update Interval"
-    id: sensitivity_update_interval
-    min_value: 1
-    max_value: 60
-    step: 1
-    unit_of_measurement: "min"
-    icon: mdi:timer
-    entity_category: config
-    set_action:
-      - globals.set:
-          id: sensitivity_update_interval_ms
-          value: !lambda 'return x * 60000;'
-    lambda: 'return id(sensitivity_update_interval_ms) / 60000.0;'
 
 interval:
   # Periodically update adaptive sensitivity
