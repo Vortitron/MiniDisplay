@@ -1,0 +1,124 @@
+# Home Assistant helper entities for the Sam HVAC, Hot Water, and Thermal Model automations.
+#
+# Paste each top-level section (input_number:, input_datetime:, input_text:, input_boolean:)
+# into your configuration.yaml. If you already have one of these top-level keys defined,
+# merge the child entries into it rather than duplicating the key.
+#
+# Alternatively, save this file as /config/packages/automations_helpers.yaml and enable
+# packages in configuration.yaml:
+#
+#   homeassistant:
+#     packages: !include_dir_named packages
+
+input_number:
+  # ---- Sam HVAC control ---------------------------------------------------
+  sam_control_temperature:
+    name: Sam Control Temperature
+    min: 10
+    max: 30
+    step: 1
+    unit_of_measurement: "°C"
+    icon: mdi:thermostat
+
+  sam_desired_temperature:
+    name: Sam Desired Temperature
+    min: 10
+    max: 30
+    step: 1
+    unit_of_measurement: "°C"
+    icon: mdi:home-thermometer
+
+  # ---- House thermal model ------------------------------------------------
+  house_heat_loss_k:
+    name: House Heat Loss Coefficient (k)
+    min: 0
+    max: 3
+    step: 0.0001
+    unit_of_measurement: "1/h"
+    icon: mdi:snowflake-thermometer
+    initial: 0.2
+
+  house_heat_rate:
+    name: Sam Heating Rate (h)
+    min: 0
+    max: 30
+    step: 0.001
+    unit_of_measurement: "°C/h"
+    icon: mdi:fire
+    initial: 2.0
+
+  house_thermal_tau:
+    name: House Thermal Time Constant
+    min: 0
+    max: 100
+    step: 0.01
+    unit_of_measurement: "h"
+    icon: mdi:clock-outline
+    initial: 5.0
+
+  thermal_last_inside:
+    name: Thermal Model Last Inside Temp
+    min: -50
+    max: 50
+    step: 0.01
+    unit_of_measurement: "°C"
+    icon: mdi:history
+
+  thermal_last_outside:
+    name: Thermal Model Last Outside Temp
+    min: -50
+    max: 50
+    step: 0.01
+    unit_of_measurement: "°C"
+    icon: mdi:history
+
+  hours_to_evening_target:
+    name: Hours to Reach Evening Target
+    min: 0
+    max: 24
+    step: 0.01
+    unit_of_measurement: "h"
+    icon: mdi:clock-time-eight-outline
+
+  forecast_outside_4h:
+    name: Forecast Outside Temperature (next 4h avg)
+    min: -50
+    max: 50
+    step: 0.01
+    unit_of_measurement: "°C"
+    icon: mdi:weather-partly-cloudy
+
+input_datetime:
+  # ---- Hot water ----------------------------------------------------------
+  hot_water_manual_override_until:
+    name: Hot Water Manual Override Until
+    has_date: true
+    has_time: true
+
+  # ---- House thermal model ------------------------------------------------
+  thermal_last_sample:
+    name: Thermal Model Last Sample
+    has_date: true
+    has_time: true
+
+input_text:
+  sam_hvac_status:
+    name: Sam HVAC Status
+    max: 255
+
+  house_thermal_status:
+    name: House Thermal Model Status
+    max: 255
+
+input_boolean:
+  holiday_mode:
+    name: Holiday Mode
+    icon: mdi:palm-tree
+
+  hot_water_notified:
+    name: Hot Water Notified
+    icon: mdi:water-alert
+
+  daytime_cheap_7_21:
+    name: Daytime Cheap 7-21
+    icon: mdi:cash-clock

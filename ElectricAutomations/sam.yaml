@@ -1,5 +1,8 @@
 alias: Sync Sam HVAC with Desired Temperature and Energy Saving
-description: Control Sam HVAC with remote sensor, desired temp, and dynamic fan-only
+description: >-
+  Control Sam HVAC with remote sensor, price-adjusted control temp, and
+  dynamic fan-only. Uses sam_control_temperature (set by DaytimeCheapHeat)
+  as the base target.
 variables:
   cool_indoor_threshold: 26
   cool_outdoor_threshold: 25
@@ -20,21 +23,26 @@ triggers:
       - sensor.bedroomlights_bedroomlights_temperature
       - sensor.sam_outside_temperature
       - sensor.sam_inside_temperature
-      - input_number.sam_desired_temperature
+      - input_number.sam_control_temperature
     for:
       seconds: 30
   - trigger: state
-    entity_id: climate.circulation_fan
+    entity_id:
+      - climate.circulation_fan
+      - input_boolean.holiday_mode
   - trigger: state
     entity_id: climate.mama_bedroom_thermostat
     attribute: temperature
 actions:
   - variables:
+      holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
+      sam_preset: "{{ state_attr('climate.sam', 'preset_mode') | default('none', true) }}"
       living_room_temp_state: "{{ states('sensor.t_h_sensor_temperature') }}"
       bedroom_temp_state: "{{ states('sensor.bedroomlights_bedroomlights_temperature') }}"
       sam_outdoor_state: "{{ states('sensor.sam_outside_temperature') }}"
       sam_internal_state: "{{ states('sensor.sam_inside_temperature') }}"
       sam_desired_state: "{{ states('input_number.sam_desired_temperature') }}"
+      sam_control_state: "{{ states('input_number.sam_control_temperature') }}"
       bedroom_target_raw: "{{ state_attr('climate.mama_bedroom_thermostat', 'temperature') }}"
       fan_state: "{{ states('climate.circulation_fan') }}"
       fan_running: "{{ fan_state not in ['off', 'unknown', 'unavailable', 'none', ''] }}"
@@ -43,19 +51,19 @@ actions:
       bedroom_temp_ok: "{{ bedroom_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
       outdoor_ok: "{{ sam_outdoor_state not in ['unknown', 'unavailable', 'none', ''] }}"
       internal_ok: "{{ sam_internal_state not in ['unknown', 'unavailable', 'none', ''] }}"
-      desired_ok: "{{ sam_desired_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      control_ok: "{{ sam_control_state not in ['unknown', 'unavailable', 'none', ''] }}"
 
       living_room_temp: "{{ living_room_temp_state | float(0) }}"
       bedroom_temp: "{{ bedroom_temp_state | float(0) }}"
       outdoor: "{{ sam_outdoor_state | float(0) }}"
       internal: "{{ sam_internal_state | float(0) }}"
-      desired_base: "{{ sam_desired_state | float(0) }}"
+      desired_base: "{{ sam_control_state | float(0) }}"
       bedroom_target: "{{ bedroom_target_raw | float(0) }}"
       sam_min_temp: "{{ state_attr('climate.sam', 'min_temp') | float(sam_min_temp_fallback) }}"
       sam_max_temp: "{{ state_attr('climate.sam', 'max_temp') | float(sam_max_temp_fallback) }}"
 
       # Sam should heat for whichever needs more:
-      # - the living-room desired temperature (input_number.sam_desired_temperature), or
+      # - the price-adjusted control temperature (input_number.sam_control_temperature), or
       # - the bedroom thermostat target (climate.mama_bedroom_thermostat.temperature)
       desired_effective: >-
         {% if bedroom_target_raw is not none %}
@@ -121,14 +129,61 @@ actions:
         {% endif %}
   - if:
       - condition: template
-        value_template: "{{ not (outdoor_ok and internal_ok and desired_ok and (living_room_temp_ok or bedroom_temp_ok)) }}"
+        value_template: "{{ not (outdoor_ok and internal_ok and control_ok and (living_room_temp_ok or bedroom_temp_ok)) }}"
     then:
       - action: logbook.log
         data:
           name: Sam HVAC
           message: >-
-            Skipping update (missing data). fan={{ fan_state }}, living={{ living_room_temp_state }}, bedroom={{ bedroom_temp_state }}, outdoor={{ sam_outdoor_state }}, internal={{ sam_internal_state }}, desired={{ sam_desired_state }}, bedroom_target={{ bedroom_target_raw }}
+            Skipping update (missing data). fan={{ fan_state }}, living={{ living_room_temp_state }}, bedroom={{ bedroom_temp_state }}, outdoor={{ sam_outdoor_state }}, internal={{ sam_internal_state }}, desired={{ sam_desired_state }}, control={{ sam_control_state }}, bedroom_target={{ bedroom_target_raw }}
       - stop: "Missing sensor data"
+  - if:
+      - condition: template
+        value_template: "{{ holiday_mode }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ sam_preset != 'heat_8_15' }}"
+        then:
+          - action: climate.set_preset_mode
+            target:
+              entity_id: climate.sam
+            data:
+              preset_mode: heat_8_15
+      - action: climate.set_hvac_mode
+        target:
+          entity_id: climate.sam
+        data:
+          hvac_mode: heat
+      - action: climate.set_temperature
+        target:
+          entity_id: climate.sam
+        data:
+          temperature: 10
+          hvac_mode: heat
+      - action: logbook.log
+        data:
+          name: Sam HVAC
+          message: >-
+            Holiday mode: preset=heat_8_15, mode=heat, setpoint=10°C,
+            living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.sam_hvac_status
+        data:
+          value: >-
+            Holiday mode: preset=heat_8_15, mode=heat, setpoint=10°C,
+            living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
+      - stop: "Holiday mode active"
+  - if:
+      - condition: template
+        value_template: "{{ sam_preset == 'heat_8_15' and not holiday_mode }}"
+    then:
+      - action: climate.set_preset_mode
+        target:
+          entity_id: climate.sam
+        data:
+          preset_mode: none
   - choose:
       - conditions:
           - condition: template

@@ -1,0 +1,86 @@
+alias: Daytime Cheap Heat
+description: >-
+  Sets sam_desired_temperature based on occupancy, time of day, and holiday mode.
+  Computes sam_control_temperature by adjusting desired for electricity price:
+  overheat when cheap, pre-warm before evening, reduce to 16 when expensive.
+  Manual changes to sam_desired_temperature are preserved.
+triggers:
+  - trigger: state
+    entity_id:
+      - media_player.lgnano_55
+      - input_number.electricity_price_rank
+      - input_number.electricity_price_rank_4h
+      - input_boolean.daytime_cheap_7_21
+      - input_number.sam_desired_temperature
+      - input_boolean.holiday_mode
+  - trigger: time_pattern
+    minutes: "/15"
+conditions: []
+actions:
+  - variables:
+      tv_on: >-
+        {{ states('media_player.lgnano_55') in ['on', 'playing', 'idle', 'paused'] }}
+      outside_temp: "{{ states('sensor.sam_outside_temperature') | float(10) }}"
+      price_rank: "{{ states('input_number.electricity_price_rank') | int(12) }}"
+      price_rank_4h: "{{ states('input_number.electricity_price_rank_4h') | int(12) }}"
+      current_desired: >-
+        {{ states('input_number.sam_desired_temperature') | float(16) }}
+      triggered_by_desired: >-
+        {{ trigger.entity_id == 'input_number.sam_desired_temperature' }}
+      holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
+      current_hour: "{{ now().hour }}"
+      evening_hours: "{{ current_hour | int >= 19 and current_hour | int < 23 }}"
+      approaching_evening: "{{ current_hour | int >= 15 and current_hour | int < 19 }}"
+      electricity_cheap_now: "{{ price_rank < price_rank_4h }}"
+      desired: >-
+        {% if holiday_mode %}
+          10
+        {% elif triggered_by_desired %}
+          {{ current_desired }}
+        {% elif evening_hours or tv_on %}
+          20
+        {% else %}
+          16
+        {% endif %}
+      control: >-
+        {% set d = desired | int %}
+        {% if holiday_mode %}
+          10
+        {% elif electricity_cheap_now and outside_temp < 10 %}
+          25
+        {% elif electricity_cheap_now and approaching_evening %}
+          25
+        {% elif electricity_cheap_now %}
+          {{ [d + 3, 25] | min }}
+        {% elif price_rank > price_rank_4h and not tv_on and not evening_hours %}
+          16
+        {% else %}
+          {{ d }}
+        {% endif %}
+  - if:
+      - condition: template
+        value_template: "{{ (desired | float) != current_desired }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.sam_desired_temperature
+        data:
+          value: "{{ desired }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.sam_control_temperature
+    data:
+      value: "{{ control }}"
+  - action: logbook.log
+    data:
+      name: Daytime Cheap Heat
+      message: >-
+        desired={{ desired }}°C, control={{ control }}°C,
+        tv={{ tv_on }}, evening={{ evening_hours }},
+        pre_evening={{ approaching_evening }},
+        outside={{ outside_temp | round(1) }}°C,
+        rank={{ price_rank }}, rank_4h={{ price_rank_4h }},
+        cheap_now={{ electricity_cheap_now }},
+        holiday={{ holiday_mode }},
+        triggered_by_desired={{ triggered_by_desired }}
+mode: single

@@ -1,0 +1,212 @@
+alias: House Thermal Model
+description: >-
+  Samples inside/outside temperatures every 10 minutes and estimates the
+  house's heat loss coefficient (k, in 1/hour) and Sam's effective heating
+  rate (h, in °C/hour at zero ΔT), using exponential moving averages.
+  Model: dT/dt = h (when heating) - k * (T_inside - T_outside).
+  Uses weather forecast for pre-heat planning so we account for expected
+  outside temperature during the heating window, not just right now.
+triggers:
+  - trigger: time_pattern
+    minutes: "/10"
+conditions:
+  - condition: template
+    value_template: >-
+      {{ states('sensor.t_h_sensor_temperature') not in ['unknown', 'unavailable', 'none', ''] }}
+  - condition: template
+    value_template: >-
+      {{ states('sensor.sam_outside_temperature') not in ['unknown', 'unavailable', 'none', ''] }}
+variables:
+  ema_alpha: 0.05
+  min_sample_minutes: 5
+  max_sample_minutes: 30
+  max_dt_per_sample: 2.0
+  min_delta_temp: 2.0
+  min_k: 0.01
+  max_k: 2.0
+  min_h: 0.1
+  max_h: 20.0
+  forecast_hours: 4
+actions:
+  - action: weather.get_forecasts
+    data:
+      type: hourly
+    target:
+      entity_id: weather.openweathermap
+    response_variable: forecast_response
+  - variables:
+      now_iso: "{{ now().isoformat() }}"
+      inside_now: "{{ states('sensor.t_h_sensor_temperature') | float }}"
+      outside_now: "{{ states('sensor.sam_outside_temperature') | float }}"
+      hvac_action: "{{ state_attr('climate.sam', 'hvac_action') | default('unknown', true) }}"
+      last_inside: "{{ states('input_number.thermal_last_inside') | float(-999) }}"
+      last_outside: "{{ states('input_number.thermal_last_outside') | float(-999) }}"
+      last_sample_iso: "{{ states('input_datetime.thermal_last_sample') }}"
+      last_sample_valid: >-
+        {{ last_sample_iso not in ['unknown', 'unavailable', 'none', ''] and last_inside > -100 }}
+      dt_minutes: >-
+        {% if last_sample_valid %}
+          {{ ((now().timestamp() - (last_sample_iso | as_datetime | as_local).timestamp()) / 60) | round(2) }}
+        {% else %}
+          0
+        {% endif %}
+      dt_hours: "{{ dt_minutes / 60 }}"
+      delta_inside: "{{ inside_now - last_inside }}"
+      delta_temp: "{{ last_inside - last_outside }}"
+      dT_per_hour: >-
+        {% if dt_hours > 0 %}
+          {{ (delta_inside / dt_hours) | round(3) }}
+        {% else %}
+          0
+        {% endif %}
+      current_k: "{{ states('input_number.house_heat_loss_k') | float(0.2) }}"
+      current_h: "{{ states('input_number.house_heat_rate') | float(2.0) }}"
+      sample_valid: >-
+        {{ last_sample_valid
+           and dt_minutes >= min_sample_minutes
+           and dt_minutes <= max_sample_minutes
+           and delta_inside | abs <= max_dt_per_sample
+           and delta_temp | abs >= min_delta_temp }}
+      is_passive: "{{ hvac_action in ['idle', 'fan', 'off', 'cooling'] }}"
+      is_heating: "{{ hvac_action == 'heating' }}"
+      new_k: >-
+        {% if sample_valid and is_passive and delta_temp > min_delta_temp %}
+          {% set observed_k = (-dT_per_hour) / delta_temp %}
+          {% if observed_k >= min_k and observed_k <= max_k %}
+            {{ ((1 - ema_alpha) * current_k + ema_alpha * observed_k) | round(4) }}
+          {% else %}
+            {{ current_k }}
+          {% endif %}
+        {% else %}
+          {{ current_k }}
+        {% endif %}
+      new_h: >-
+        {% if sample_valid and is_heating %}
+          {% set observed_h = dT_per_hour + current_k * delta_temp %}
+          {% if observed_h >= min_h and observed_h <= max_h %}
+            {{ ((1 - ema_alpha) * current_h + ema_alpha * observed_h) | round(3) }}
+          {% else %}
+            {{ current_h }}
+          {% endif %}
+        {% else %}
+          {{ current_h }}
+        {% endif %}
+      tau_hours: >-
+        {% if new_k | float > 0 %}
+          {{ (1 / (new_k | float)) | round(2) }}
+        {% else %}
+          0
+        {% endif %}
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.thermal_last_inside
+    data:
+      value: "{{ inside_now }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.thermal_last_outside
+    data:
+      value: "{{ outside_now }}"
+  - action: input_datetime.set_datetime
+    target:
+      entity_id: input_datetime.thermal_last_sample
+    data:
+      datetime: "{{ now_iso }}"
+  - if:
+      - condition: template
+        value_template: "{{ new_k != current_k }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.house_heat_loss_k
+        data:
+          value: "{{ new_k }}"
+  - if:
+      - condition: template
+        value_template: "{{ new_h != current_h }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.house_heat_rate
+        data:
+          value: "{{ new_h }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.house_thermal_tau
+    data:
+      value: "{{ tau_hours }}"
+  - variables:
+      target_temp: 20
+      t_in: "{{ inside_now }}"
+      forecast_data: >-
+        {{ forecast_response['weather.openweathermap'].forecast if forecast_response is defined else [] }}
+      forecast_avg_outside: >-
+        {% set ns = namespace(total=0, count=0, cutoff=(now().timestamp() + forecast_hours * 3600)) %}
+        {% for entry in forecast_data %}
+          {% if entry.datetime is defined and entry.temperature is defined and entry.temperature is not none %}
+            {% set ts = entry.datetime | as_datetime | as_local %}
+            {% if ts.timestamp() <= ns.cutoff and ts.timestamp() >= now().timestamp() - 1800 %}
+              {% set ns.total = ns.total + (entry.temperature | float) %}
+              {% set ns.count = ns.count + 1 %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {% if ns.count > 0 %}
+          {{ (ns.total / ns.count) | round(2) }}
+        {% else %}
+          {{ outside_now | round(2) }}
+        {% endif %}
+      t_out_effective: "{{ forecast_avg_outside | float(outside_now) }}"
+      k_val: "{{ new_k | float }}"
+      h_val: "{{ new_h | float }}"
+      equilibrium_with_heat: >-
+        {% if k_val > 0 %}
+          {{ (t_out_effective + h_val / k_val) | round(2) }}
+        {% else %}
+          99
+        {% endif %}
+      hours_to_target: >-
+        {% if t_in >= target_temp %}
+          0
+        {% elif k_val <= 0 or (equilibrium_with_heat | float) <= target_temp + 0.5 %}
+          99
+        {% else %}
+          {% set num = (equilibrium_with_heat | float) - t_in %}
+          {% set den = (equilibrium_with_heat | float) - target_temp %}
+          {% set ratio = num / den %}
+          {% set log_ratio = ratio | log %}
+          {{ ((1 / k_val) * log_ratio) | round(2) }}
+        {% endif %}
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.forecast_outside_4h
+    data:
+      value: "{{ forecast_avg_outside }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.hours_to_evening_target
+    data:
+      value: "{{ [hours_to_target | float, 24] | min }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.house_thermal_status
+    data:
+      value: >-
+        k={{ new_k }}/h (τ={{ tau_hours }}h), h={{ new_h }}°C/h,
+        eq_w_heat={{ equilibrium_with_heat }}°C,
+        hours_to_{{ target_temp }}°C={{ hours_to_target }},
+        inside={{ inside_now | round(1) }}°C,
+        outside_now={{ outside_now | round(1) }}°C,
+        outside_4h_fc={{ forecast_avg_outside }}°C
+  - action: logbook.log
+    data:
+      name: House Thermal Model
+      message: >-
+        inside={{ inside_now | round(2) }}°C, outside={{ outside_now | round(2) }}°C
+        (fc_{{ forecast_hours }}h={{ forecast_avg_outside }}°C),
+        dT={{ delta_inside | round(2) }}°C over {{ dt_minutes | round(1) }}min
+        ({{ dT_per_hour }}°C/h),
+        action={{ hvac_action }}, valid={{ sample_valid }},
+        k={{ new_k }} (τ={{ tau_hours }}h), h={{ new_h }}°C/h,
+        eq={{ equilibrium_with_heat }}°C, hrs_to_20°C={{ hours_to_target }}
+mode: single

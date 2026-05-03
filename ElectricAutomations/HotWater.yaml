@@ -1,17 +1,36 @@
-alias: Hot Water on Cheap El
-description: ""
+alias: Hot Water on Cheap Electricity
+description: >-
+  Price-optimised hot water boiler control (1500W, 100L).
+  Deterministic daily schedule computed from today's Nordpool prices:
+    - Heats during the 2 cheapest hours within 00:00-05:59 (guaranteed
+      morning reheat — this is the fix for the rank-rollover bug at midnight)
+    - Heats during the 4 cheapest hours within 06:00-23:59
+    - = 6 hours total heating per day, always at the cheapest prices,
+      always with at least 2 overnight hours.
+  Pre-evening reheat: if hot_water_notified is on and it's before 18:00,
+    additionally heats during the 2 cheapest hours in [now, 18:00) so the
+    tank is hot in time for an evening shower. Auto-disengages when the
+    pipe sensor sees warm water again (flag cleared by HotWaterTemperature).
+  Sunday: ON all day unless holiday mode.
+  Holiday mode: no scheduled heating (manual override still works).
+  Manual override: 3 hours when someone toggles the switch in the UI.
+  Fallback (if Nordpool data unavailable): heats 01:00-04:00.
 triggers:
+  - trigger: time_pattern
+    minutes: "/15"
   - trigger: state
-    entity_id:
-      - input_number.electricity_price_rank
-  - trigger: state
-    entity_id:
-      - switch.smart_plug_2_socket_1
+    entity_id: switch.smart_plug_2_socket_1
     to: "on"
     id: manual_on
+  - trigger: state
+    entity_id:
+      - input_boolean.holiday_mode
+      - input_boolean.hot_water_notified
+  - trigger: state
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
+    attribute: raw_today
 conditions: []
 actions:
-  # If hot water was manually turned on, set override timer for 3 hours
   - if:
       - condition: trigger
         id: manual_on
@@ -25,66 +44,107 @@ actions:
           entity_id: input_datetime.hot_water_manual_override_until
         data:
           datetime: "{{ (now() + timedelta(hours=3)).isoformat() }}"
-      - stop: "Hot water manually turned on - override active for 3 hours"
+      - stop: "Hot water manually turned on — override active for 3 hours"
+  - variables:
+      current_hour: "{{ now().hour | int }}"
+      is_sunday: "{{ now().weekday() == 6 }}"
+      holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
+      shower_detected: "{{ is_state('input_boolean.hot_water_notified', 'on') }}"
+      manual_override_active: >-
+        {% set override_time = states('input_datetime.hot_water_manual_override_until') %}
+        {% if override_time in ['unknown', 'unavailable', 'none', ''] %}
+          false
+        {% else %}
+          {{ now().timestamp() < (override_time | as_datetime | as_local).timestamp() }}
+        {% endif %}
+      today_raw: "{{ state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] }}"
+      hourly_prices: >-
+        {% set ns = namespace(hours=[], accum=0.0, count=0, idx=0) %}
+        {% for slot in today_raw %}
+          {% if slot is mapping and 'value' in slot %}
+            {% set ns.accum = ns.accum + (slot['value'] | float(0)) %}
+            {% set ns.count = ns.count + 1 %}
+            {% if ns.count == 4 %}
+              {% set ns.hours = ns.hours + [{'hour': ns.idx, 'avg': ns.accum / ns.count}] %}
+              {% set ns.accum = 0 %}
+              {% set ns.count = 0 %}
+              {% set ns.idx = ns.idx + 1 %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.hours }}
+      has_today_data: "{{ hourly_prices | length >= 20 }}"
+      cheapest_2_overnight: >-
+        {% set overnight = hourly_prices | selectattr('hour', 'lt', 6) | list %}
+        {% set sorted_n = overnight | sort(attribute='avg') %}
+        {{ sorted_n[:2] | map(attribute='hour') | list }}
+      cheapest_4_daytime: >-
+        {% set daytime = hourly_prices | selectattr('hour', 'ge', 6) | list %}
+        {% set sorted_d = daytime | sort(attribute='avg') %}
+        {{ sorted_d[:4] | map(attribute='hour') | list }}
+      cheapest_2_pre_evening: >-
+        {% if shower_detected and current_hour < 18 %}
+          {% set window = hourly_prices
+              | selectattr('hour', 'ge', current_hour)
+              | selectattr('hour', 'lt', 18) | list %}
+          {% set sorted_w = window | sort(attribute='avg') %}
+          {{ sorted_w[:2] | map(attribute='hour') | list }}
+        {% else %}
+          []
+        {% endif %}
+      in_cheap_overnight: "{{ current_hour in cheapest_2_overnight }}"
+      in_cheap_daytime: "{{ current_hour in cheapest_4_daytime }}"
+      in_cheap_pre_evening: "{{ current_hour in cheapest_2_pre_evening }}"
+      scheduled_heat: >-
+        {% if has_today_data %}
+          {{ in_cheap_overnight or in_cheap_daytime or in_cheap_pre_evening }}
+        {% else %}
+          {{ current_hour >= 1 and current_hour < 4 }}
+        {% endif %}
+      should_heat: >-
+        {% if manual_override_active %}
+          true
+        {% elif holiday_mode %}
+          false
+        {% elif is_sunday %}
+          true
+        {% else %}
+          {{ scheduled_heat }}
+        {% endif %}
   - if:
-      - condition: or
-        conditions:
-          - condition: numeric_state
-            entity_id: input_number.electricity_price_rank
-            below: 8
-          - condition: and
-            conditions:
-              - condition: numeric_state
-                entity_id: input_number.electricity_price_rank_daytime
-                below: 6
-              - condition: or
-                conditions:
-                  - condition: numeric_state
-                    entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
-                    below: 32
-                  - condition: state
-                    entity_id: input_boolean.school_day
-                    state:
-                      - "Off"
+      - condition: template
+        value_template: "{{ should_heat }}"
     then:
-      - type: turn_on
-        device_id: 91a58efc9daabbc41395d2adb4619c61
-        entity_id: ad378be22033f2f4c26aa9609e286c6a
-        domain: switch
+      - action: switch.turn_on
+        target:
+          entity_id: switch.smart_plug_2_socket_1
       - delay:
-          hours: 0
           minutes: 1
-          seconds: 0
-          milliseconds: 0
       - if:
-          - condition: device
-            type: is_off
-            device_id: 91a58efc9daabbc41395d2adb4619c61
-            entity_id: ad378be22033f2f4c26aa9609e286c6a
-            domain: switch
+          - condition: state
+            entity_id: switch.smart_plug_2_socket_1
+            state: "off"
             for:
-              hours: 0
-              minutes: 0
               seconds: 10
         then:
           - action: notify.persistent_notification
-            metadata: {}
             data:
-              message: "Hot Water Not Reacting - Alarm: 2"
+              message: "Hot Water Not Reacting — Alarm: 2"
     else:
-      # Only turn off if not within manual override period
-      - if:
-          - condition: template
-            value_template: >-
-              {% set override_time = states('input_datetime.hot_water_manual_override_until') %}
-              {% if override_time in ['unknown', 'unavailable', 'none', ''] %}
-                true
-              {% else %}
-                {{ now().timestamp() > (override_time | as_datetime | as_local).timestamp() }}
-              {% endif %}
-        then:
-          - type: turn_off
-            device_id: 91a58efc9daabbc41395d2adb4619c61
-            entity_id: ad378be22033f2f4c26aa9609e286c6a
-            domain: switch
+      - action: switch.turn_off
+        target:
+          entity_id: switch.smart_plug_2_socket_1
+  - action: logbook.log
+    data:
+      name: Hot Water
+      message: >-
+        should_heat={{ should_heat }}, hour={{ current_hour }},
+        cheap_overnight={{ cheapest_2_overnight }},
+        cheap_daytime={{ cheapest_4_daytime }},
+        cheap_pre_evening={{ cheapest_2_pre_evening }},
+        in_overnight={{ in_cheap_overnight }}, in_daytime={{ in_cheap_daytime }},
+        in_pre_evening={{ in_cheap_pre_evening }},
+        sunday={{ is_sunday }}, holiday={{ holiday_mode }},
+        shower={{ shower_detected }}, override={{ manual_override_active }},
+        has_data={{ has_today_data }}
 mode: single
