@@ -1,29 +1,79 @@
+substitutions:
+  lcd_i2c_address: "0x27"
+  # GPIO that the AM312 PIR OUT pin is connected to. If detection
+  # never fires on the default pin, try moving the OUT wire to a
+  # different GPIO and updating this value.
+  pir_pin: "GPIO3"
+  # Internal pull configuration for the PIR input. Most AM312 modules
+  # actively drive the OUT pin so no pull is needed (defaults below).
+  # If the line drifts when idle set pir_pulldown to "true". If the
+  # module is open-collector active-low, set pir_pullup to "true" and
+  # also flip pir_inverted. Never set both to "true".
+  pir_pullup: "false"
+  pir_pulldown: "false"
+  # Set to "true" if your AM312 PIR is active-low (text "true"/"false").
+  pir_inverted: "false"
+  weather_temperature_entity: "sensor.sam_outside_temperature"
+  weather_condition_entity: "sensor.openweathermap_condition"
+  forecast_today_max_entity: "sensor.forecast_today_max"
+  forecast_tonight_min_entity: "sensor.forecast_tonight_min"
+  notification_ids_entity: "input_text.minidisplay_notification_ids"
+  notification_titles_entity: "input_text.minidisplay_notification_titles"
+  notification_messages_entity: "input_text.minidisplay_notification_messages"
+  calendar_1_entity: "calendar.webcal_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_f0d28bc2_1243_4b0e_962c_02243eeea583"
+  calendar_2_entity: "calendar.http_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_8cd9caaa_3f4e_4ee4_b8e8_662e4aa39f09"
+  calendar_3_entity: "calendar.handl_f"
+  handl_f_slots_entity: "sensor.handl_f_loft_calendar_slots"
+  # HA `sun.sun` entity is used for sunset detection. Night mode is
+  # entered when the sun is below horizon OR clock hits 23:00, whichever
+  # comes first; day mode resumes at 07:00 each morning.
+  sun_entity: "sun.sun"
+  # Day/night LCD brightness from HA input_number helpers (0-100). The
+  # PCF8574 LCD backpack cannot dim via I2C, so the firmware currently
+  # treats > 0 as "backlight ON" and 0 as "backlight OFF" - the slider
+  # values are exposed and read so a future hardware-PWM mod can be
+  # wired in without touching HA.
+  day_brightness_entity: "input_number.loftc3_lcd_brightness_day"
+  night_brightness_entity: "input_number.loftc3_lcd_brightness_night"
+  # Motion must be ON continuously for this many seconds before the
+  # backlight is allowed to turn on. Prevents brief night-time blips
+  # from lighting the display.
+  pir_continuous_on_seconds: "5"
+  # How long the backlight stays on after the last continuous motion
+  # window expires.
+  backlight_hold_seconds: "20"
+  # Seconds each calendar event stays on screen before advancing.
+  cal_event_dwell_seconds: "4"
+  # Seconds on non-calendar pages before rotating.
+  page_dwell_seconds: "8"
+
 esphome:
   name: loftc3
   friendly_name: LoftC3
   on_boot:
-    # High priority - wait for WiFi before initialising I2C sensors
+    # High priority - wait for WiFi before initialising I2C sensors.
     - priority: 600
       then:
         - wait_until:
             wifi.connected:
         - logger.log: "WiFi connected, enabling environmental sensors"
-        # Start sensor polling now that WiFi is stable
         - component.update: aht10_sensor
+    # Keep LCD lit briefly after boot so setup is visible.
+    - priority: 200
+      then:
+        - lambda: |-
+            id(lcd_backlight_until_ms) = millis() + 30000UL;
     - priority: -100
       then:
         - logger.log: "LoftC3 boot complete"
-
 
 esp32:
   board: esp32-c3-devkitm-1
   framework:
     type: esp-idf
 
-# Enable logging
 logger:
 
-# Enable Home Assistant API
 api:
   encryption:
       key: !secret loftc3_encryption_key
@@ -40,43 +90,87 @@ wifi:
   reboot_timeout: 5min
   output_power: 8.5dbm
 
-# Bluetooth Proxy (extends HA BLE range)
 bluetooth_proxy:
   active: true
 
-# I2C bus for environmental sensors
-# SDA/SCL on safe pins (avoiding strapping pins GPIO2/8/9)
-i2c:  
-  id: bedroom_i2c_bus
+# Shared I2C bus for AHT20 + LCD1602 PCF8574 backpack.
+# 400kHz keeps the per-frame LCD write well under 30ms so the
+# component scheduler stops warning about long display ops.
+i2c:
+  id: loft_i2c_bus
   sda: GPIO1
   scl: GPIO2
   scan: true
-  frequency: 100kHz
+  frequency: 400kHz
 
-
-# Time component for potential future use
 time:
   - platform: homeassistant
     id: ha_time
+    timezone: Europe/Stockholm
 
-# Interval to poll environmental sensors (only after WiFi connected)
-interval:
-  - interval: 2min
-    then:
-      - if:
-          condition:
-            wifi.connected:
-          then:
-            - component.update: aht10_sensor
+globals:
+  - id: display_page_index
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: cal_event_titles
+    type: std::vector<std::string>
+    restore_value: no
+  - id: cal_event_times
+    type: std::vector<std::string>
+    restore_value: no
+  - id: cal_event_index
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: notification_ids
+    type: std::vector<std::string>
+    restore_value: no
+  - id: notification_titles
+    type: std::vector<std::string>
+    restore_value: no
+  - id: notification_messages
+    type: std::vector<std::string>
+    restore_value: no
+  - id: notification_times
+    type: std::vector<std::string>
+    restore_value: no
+  - id: current_notification_index
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: lcd_backlight_until_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: lcd_last_advance_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: lcd_last_page_index
+    type: int
+    restore_value: no
+    initial_value: "-1"
+  # millis() when the PIR most recently went OFF -> ON. Reset to 0 by
+  # the on_state handler when motion stops. The 1s "continuous motion"
+  # interval below uses this to decide when to refresh the backlight
+  # window.
+  - id: pir_motion_start_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
 
-# Environmental sensors (AHT10 for temp/humidity)
-# Delayed startup to avoid interfering with WiFi connection
+switch:
+  - platform: restart
+    name: "Loft C3 Restart"
+
 sensor:
+  # Environmental sensor.
   - platform: aht10
     id: aht10_sensor
-    variant: AHT20  # Specify the model as AHT20
-    i2c_id: bedroom_i2c_bus
-    update_interval: never  # Manual control to prevent boot-time polling
+    variant: AHT20
+    i2c_id: loft_i2c_bus
+    update_interval: never
     temperature:
       name: "LoftC3 Temperature"
       id: loft_aht10_temperature
@@ -85,29 +179,27 @@ sensor:
         - calibrate_linear:
             - 0.0 -> 0.0
             - 100.0 -> 100.0
-        # Adjust the offset below if sensor reads high (negative) or low (positive)
-        #- offset: -10.0
     humidity:
       name: "LoftC3 Humidity"
       id: loft_aht10_humidity
       accuracy_decimals: 1
 
-  # MQ2 Gas Sensor - Raw Analog Voltage
+  # MQ2 Gas Sensor - Raw Analog Voltage.
   - platform: adc
     name: "LoftC3 MQ2 Gas/Smoke Level - Raw Analog Voltage"
-    pin: GPIO0  # Analog input pin on ESP32-C3
+    pin: GPIO0
     id: mq2_analog_raw
     unit_of_measurement: "V"
     accuracy_decimals: 3
     update_interval: 2s
-    attenuation: 12db  # Allows reading 0-3.3V range
-    internal: true  # Hide raw voltage from HA
+    attenuation: 12db
+    internal: true
     filters:
       - sliding_window_moving_average:
           window_size: 15
           send_every: 5
-  
-  # MQ2 Gas Sensor - Percentage (template sensor to avoid device_class conflict)
+
+  # MQ2 Gas Sensor - Percentage (template sensor to avoid device_class conflict).
   - platform: template
     name: "LoftC3 MQ2 Gas/Smoke Level"
     id: mq2_analog
@@ -115,37 +207,1065 @@ sensor:
     accuracy_decimals: 1
     update_interval: 2s
     lambda: |-
-      if (id(mq2_analog_raw).state != NAN) {
-        // Convert voltage (0-3.3V) to percentage (0-100%)
-        float percentage = (id(mq2_analog_raw).state / 3.3) * 100.0;
-        // Apply baseline offset (25% = clean air baseline after several days of observation)
-        percentage = percentage - 25.0;
-        // Clamp between 0-100%
-        if (percentage < 0.0) return 0.0;
-        if (percentage > 100.0) return 100.0;
-        percentage = roundf(percentage * 10.0) / 10.0;
-        return percentage;
+      if (!id(mq2_analog_raw).has_state()) {
+        return NAN;
       }
-      return NAN;
+      float raw = id(mq2_analog_raw).state;
+      if (raw != raw) {
+        return NAN;
+      }
+      float percentage = (raw / 3.3f) * 100.0f;
+      percentage = percentage - 25.0f;  // baseline offset
+      if (percentage < 0.0f) {
+        return 0.0f;
+      }
+      if (percentage > 100.0f) {
+        return 100.0f;
+      }
+      return roundf(percentage * 10.0f) / 10.0f;
 
-# MQ2 Gas Sensor - Software Alarm (based on analog percentage)
-# Uses hysteresis to prevent oscillation: triggers at 15% above baseline, clears at 5%
+  # Outside temperature from Home Assistant for weather page.
+  - platform: homeassistant
+    id: outside_temperature
+    entity_id: ${weather_temperature_entity}
+    internal: true
+
+  # Forecast extremes used by the weather page. Each template sensor in
+  # HA must yield a number (e.g. derived from `weather.get_forecasts`).
+  - platform: homeassistant
+    id: forecast_today_max
+    entity_id: ${forecast_today_max_entity}
+    internal: true
+  - platform: homeassistant
+    id: forecast_tonight_min
+    entity_id: ${forecast_tonight_min_entity}
+    internal: true
+
+  # Day / night brightness sliders (input_number helpers). Optional - if
+  # the helpers don't exist in HA the defaults baked into the display
+  # lambda (`100` for day, `0` for night) are used.
+  - platform: homeassistant
+    id: lcd_brightness_day
+    entity_id: ${day_brightness_entity}
+    internal: true
+  - platform: homeassistant
+    id: lcd_brightness_night
+    entity_id: ${night_brightness_entity}
+    internal: true
+
+text_sensor:
+  - platform: homeassistant
+    id: openweathermap_condition
+    entity_id: ${weather_condition_entity}
+    internal: true
+
+  # `above_horizon` / `below_horizon` - drives the night-mode decision
+  # together with the 23:00 hard cap.
+  - platform: homeassistant
+    id: sun_state
+    entity_id: ${sun_entity}
+    internal: true
+
+  # Notifications: comma-separated IDs maintained by HA automation.
+  - platform: homeassistant
+    id: notification_ids_csv
+    entity_id: ${notification_ids_entity}
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            std::vector<std::string> old_ids = id(notification_ids);
+            std::vector<std::string> old_times = id(notification_times);
+            std::string csv = id(notification_ids_csv).state;
+            if (csv == "unknown" || csv == "unavailable" || csv == "none") {
+              csv.clear();
+            }
+            id(notification_ids).clear();
+            id(notification_times).clear();
+            if (!csv.empty()) {
+              size_t start = 0;
+              while (start < csv.size()) {
+                size_t comma = csv.find(',', start);
+                std::string part = (comma == std::string::npos)
+                  ? csv.substr(start)
+                  : csv.substr(start, comma - start);
+                size_t a = part.find_first_not_of(" \t\r\n");
+                size_t b = part.find_last_not_of(" \t\r\n");
+                if (a != std::string::npos && b != std::string::npos) {
+                  std::string trimmed = part.substr(a, b - a + 1);
+                  if (!trimmed.empty()) {
+                    id(notification_ids).push_back(trimmed);
+                  }
+                }
+                if (comma == std::string::npos) {
+                  break;
+                }
+                start = comma + 1;
+              }
+            }
+
+            char fresh_hhmm[8] = "----";
+            auto now_t = id(ha_time).now();
+            if (now_t.is_valid()) {
+              snprintf(
+                fresh_hhmm,
+                sizeof(fresh_hhmm),
+                "%02d%02d",
+                (int) now_t.hour,
+                (int) now_t.minute
+              );
+            }
+            for (const auto &nid : id(notification_ids)) {
+              std::string captured;
+              for (size_t j = 0; j < old_ids.size(); j++) {
+                if (old_ids[j] == nid) {
+                  if (j < old_times.size()) {
+                    captured = old_times[j];
+                  }
+                  break;
+                }
+              }
+              if (captured.empty()) {
+                captured = std::string(fresh_hhmm);
+              }
+              id(notification_times).push_back(captured);
+            }
+
+            int n = (int) id(notification_ids).size();
+            if (n <= 0) {
+              id(current_notification_index) = 0;
+            } else if (id(current_notification_index) < 0 ||
+                       id(current_notification_index) >= n) {
+              id(current_notification_index) = n - 1;
+            }
+            ESP_LOGI("notify", "IDs parsed: %d", n);
+
+  - platform: homeassistant
+    id: notification_titles_csv
+    entity_id: ${notification_titles_entity}
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            // Convert any UTF-8 input to an ASCII-only string that the
+            // HD44780 default character ROM (A00) can render. Swedish
+            // diacritics get transliterated rather than dropped so
+            // calendar / notification text stays readable.
+            auto sanitize_utf8 = [](const std::string &in) -> std::string {
+              std::string out;
+              out.reserve(in.size());
+              for (size_t i = 0; i < in.size(); ) {
+                unsigned char c = (unsigned char) in[i];
+                if (c < 0x80) {
+                  out.push_back((char) c);
+                  i++;
+                  continue;
+                }
+                if ((c & 0xE0) == 0xC0 && i + 1 < in.size()) {
+                  unsigned char c2 = (unsigned char) in[i + 1];
+                  uint32_t cp = ((c & 0x1F) << 6) | (c2 & 0x3F);
+                  i += 2;
+                  switch (cp) {
+                    case 0xC4: case 0xC5: out.push_back('A'); break;  // Ä Å
+                    case 0xD6: out.push_back('O'); break;             // Ö
+                    case 0xE4: case 0xE5: out.push_back('a'); break;  // ä å
+                    case 0xF6: out.push_back('o'); break;             // ö
+                    case 0xC9: case 0xC8: case 0xCA: out.push_back('E'); break;
+                    case 0xE9: case 0xE8: case 0xEA: out.push_back('e'); break;
+                    case 0xDC: out.push_back('U'); break;             // Ü
+                    case 0xFC: out.push_back('u'); break;             // ü
+                    case 0xD1: out.push_back('N'); break;             // Ñ
+                    case 0xF1: out.push_back('n'); break;             // ñ
+                    case 0xDF: out.push_back('s'); out.push_back('s'); break;  // ß
+                    default: out.push_back('?'); break;
+                  }
+                  continue;
+                }
+                if ((c & 0xF0) == 0xE0 && i + 2 < in.size()) {
+                  i += 3;
+                  out.push_back('?');
+                  continue;
+                }
+                if ((c & 0xF8) == 0xF0 && i + 3 < in.size()) {
+                  i += 4;
+                  out.push_back('?');
+                  continue;
+                }
+                out.push_back('?');
+                i++;
+              }
+              return out;
+            };
+
+            std::string raw = id(notification_titles_csv).state;
+            if (raw == "unknown" || raw == "unavailable" || raw == "none") {
+              raw.clear();
+            }
+            id(notification_titles).clear();
+            if (!raw.empty()) {
+              size_t start = 0;
+              while (start < raw.size()) {
+                size_t pipe = raw.find('|', start);
+                std::string part = (pipe == std::string::npos)
+                  ? raw.substr(start)
+                  : raw.substr(start, pipe - start);
+                id(notification_titles).push_back(sanitize_utf8(part));
+                if (pipe == std::string::npos) {
+                  break;
+                }
+                start = pipe + 1;
+              }
+            }
+            ESP_LOGI("notify", "Titles parsed: %d", (int) id(notification_titles).size());
+
+  - platform: homeassistant
+    id: notification_messages_csv
+    entity_id: ${notification_messages_entity}
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            // Identical UTF-8 -> ASCII transliterator as the titles
+            // handler above. Inlined rather than shared because each
+            // ESPHome lambda compiles to its own free function.
+            auto sanitize_utf8 = [](const std::string &in) -> std::string {
+              std::string out;
+              out.reserve(in.size());
+              for (size_t i = 0; i < in.size(); ) {
+                unsigned char c = (unsigned char) in[i];
+                if (c < 0x80) {
+                  out.push_back((char) c);
+                  i++;
+                  continue;
+                }
+                if ((c & 0xE0) == 0xC0 && i + 1 < in.size()) {
+                  unsigned char c2 = (unsigned char) in[i + 1];
+                  uint32_t cp = ((c & 0x1F) << 6) | (c2 & 0x3F);
+                  i += 2;
+                  switch (cp) {
+                    case 0xC4: case 0xC5: out.push_back('A'); break;
+                    case 0xD6: out.push_back('O'); break;
+                    case 0xE4: case 0xE5: out.push_back('a'); break;
+                    case 0xF6: out.push_back('o'); break;
+                    case 0xC9: case 0xC8: case 0xCA: out.push_back('E'); break;
+                    case 0xE9: case 0xE8: case 0xEA: out.push_back('e'); break;
+                    case 0xDC: out.push_back('U'); break;
+                    case 0xFC: out.push_back('u'); break;
+                    case 0xD1: out.push_back('N'); break;
+                    case 0xF1: out.push_back('n'); break;
+                    case 0xDF: out.push_back('s'); out.push_back('s'); break;
+                    default: out.push_back('?'); break;
+                  }
+                  continue;
+                }
+                if ((c & 0xF0) == 0xE0 && i + 2 < in.size()) {
+                  i += 3;
+                  out.push_back('?');
+                  continue;
+                }
+                if ((c & 0xF8) == 0xF0 && i + 3 < in.size()) {
+                  i += 4;
+                  out.push_back('?');
+                  continue;
+                }
+                out.push_back('?');
+                i++;
+              }
+              return out;
+            };
+
+            std::string raw = id(notification_messages_csv).state;
+            if (raw == "unknown" || raw == "unavailable" || raw == "none") {
+              raw.clear();
+            }
+            id(notification_messages).clear();
+            if (!raw.empty()) {
+              size_t start = 0;
+              while (start < raw.size()) {
+                size_t pipe = raw.find('|', start);
+                std::string part = (pipe == std::string::npos)
+                  ? raw.substr(start)
+                  : raw.substr(start, pipe - start);
+                id(notification_messages).push_back(sanitize_utf8(part));
+                if (pipe == std::string::npos) {
+                  break;
+                }
+                start = pipe + 1;
+              }
+            }
+            ESP_LOGI("notify", "Messages parsed: %d", (int) id(notification_messages).size());
+
+  # Calendar 1.
+  - platform: homeassistant
+    id: school_cal_1_message
+    entity_id: ${calendar_1_entity}
+    attribute: message
+    internal: true
+  - platform: homeassistant
+    id: school_cal_1_start
+    entity_id: ${calendar_1_entity}
+    attribute: start_time
+    internal: true
+  - platform: homeassistant
+    id: school_cal_1_end
+    entity_id: ${calendar_1_entity}
+    attribute: end_time
+    internal: true
+
+  # Calendar 2.
+  - platform: homeassistant
+    id: school_cal_2_message
+    entity_id: ${calendar_2_entity}
+    attribute: message
+    internal: true
+  - platform: homeassistant
+    id: school_cal_2_start
+    entity_id: ${calendar_2_entity}
+    attribute: start_time
+    internal: true
+  - platform: homeassistant
+    id: school_cal_2_end
+    entity_id: ${calendar_2_entity}
+    attribute: end_time
+    internal: true
+
+  # Calendar 3.
+  - platform: homeassistant
+    id: handl_f_message
+    entity_id: ${calendar_3_entity}
+    attribute: message
+    internal: true
+  - platform: homeassistant
+    id: handl_f_start
+    entity_id: ${calendar_3_entity}
+    attribute: start_time
+    internal: true
+  - platform: homeassistant
+    id: handl_f_end
+    entity_id: ${calendar_3_entity}
+    attribute: end_time
+    internal: true
+  - platform: homeassistant
+    id: handl_f_summary
+    entity_id: ${calendar_3_entity}
+    attribute: summary
+    internal: true
+  - platform: homeassistant
+    id: handl_f_slots
+    entity_id: ${handl_f_slots_entity}
+    attribute: slots
+    internal: true
+
 binary_sensor:
   - platform: template
     id: mq2_digital
-    name: "LoftC3 MQ2 Smoke Alarm"
+    name: "LoftC3 MQ2 Smoke/Gas Alarm"
     device_class: smoke
     lambda: |-
       static bool alarm_state = false;
-      if (id(mq2_analog).state != NAN) {
-        if (id(mq2_analog).state >= 30.0) {
-          alarm_state = true;   // Trigger at 15% above baseline
-        } else if (id(mq2_analog).state <= 15.0) {
-          alarm_state = false;  // Clear at 5% above baseline
-        }
-        // Between 5-15% it maintains previous state (hysteresis)
+      if (!id(mq2_analog).has_state()) {
+        return alarm_state;
+      }
+      float v = id(mq2_analog).state;
+      if (v != v) {
+        return alarm_state;
+      }
+      if (v >= 30.0f) {
+        alarm_state = true;
+      } else if (v <= 15.0f) {
+        alarm_state = false;
       }
       return alarm_state;
     filters:
-      - delayed_on: 2s  # Must be high for 2s to trigger (prevents spikes)
-      - delayed_off: 10s  # Stays on for 10s after clearing (latching)
+      - delayed_on: 2s
+      - delayed_off: 10s
+
+  # PIR for LCD backlight hold.
+  # Pin / pull / inversion are all substitutions at the top of the file
+  # so the wiring can be tweaked without editing the schema.
+  - platform: gpio
+    id: loft_pir_motion
+    name: "LoftC3 Motion"
+    device_class: motion
+    pin:
+      number: ${pir_pin}
+      inverted: ${pir_inverted}
+      mode:
+        input: true
+        pullup: ${pir_pullup}
+        pulldown: ${pir_pulldown}
+    filters:
+      - delayed_off: 2s
+    on_state:
+      then:
+        - lambda: |-
+            const bool is_on = id(loft_pir_motion).state;
+            ESP_LOGI("pir", "Motion sensor state changed -> %s",
+                     is_on ? "ON" : "OFF");
+            if (is_on) {
+              if (id(pir_motion_start_ms) == 0) {
+                id(pir_motion_start_ms) = millis();
+              }
+            } else {
+              id(pir_motion_start_ms) = 0;
+            }
+
+display:
+  - platform: lcd_pcf8574
+    id: loft_lcd_display
+    dimensions: 16x2
+    address: ${lcd_i2c_address}
+    update_interval: 500ms
+    lambda: |-
+      const uint32_t now_ms = millis();
+
+      // ---- Night-mode decision ----
+      // Day starts at 07:00; night starts at sunset OR 23:00, whichever
+      // comes first. Without a valid HA time we default to day so the
+      // boot-up display is visible.
+      auto is_night_mode = [&]() -> bool {
+        if (!id(ha_time).now().is_valid()) {
+          return false;
+        }
+        const int h = id(ha_time).now().hour;
+        if (h < 7 || h >= 23) {
+          return true;
+        }
+        if (id(sun_state).has_state() &&
+            id(sun_state).state == std::string("below_horizon")) {
+          return true;
+        }
+        return false;
+      };
+
+      // ---- Brightness ----
+      // PCF8574 backplane cannot dim by I2C, so > 0 means ON, 0 means OFF.
+      // Defaults are full-day / off-night when the HA helpers don't exist.
+      auto get_brightness = [&]() -> float {
+        const bool night = is_night_mode();
+        const float def = night ? 0.0f : 100.0f;
+        if (night) {
+          return id(lcd_brightness_night).has_state()
+            ? id(lcd_brightness_night).state : def;
+        }
+        return id(lcd_brightness_day).has_state()
+          ? id(lcd_brightness_day).state : def;
+      };
+
+      const bool motion_window_active =
+          (int32_t) (id(lcd_backlight_until_ms) - now_ms) > 0;
+      const float brightness = get_brightness();
+      const bool backlight_on = motion_window_active && (brightness > 0.0f);
+      if (backlight_on) {
+        it.backlight();
+      } else {
+        it.no_backlight();
+      }
+
+      auto fit16 = [](const std::string &raw) -> std::string {
+        if (raw.size() >= 16) {
+          return raw.substr(0, 16);
+        }
+        std::string out = raw;
+        out.append(16 - out.size(), ' ');
+        return out;
+      };
+      auto scroll16 = [now_ms](const std::string &raw) -> std::string {
+        std::string source = raw;
+        if (source.empty()) {
+          source = " ";
+        }
+        if (source.size() <= 16) {
+          source.append(16 - source.size(), ' ');
+          return source;
+        }
+        source += "   ";
+        size_t start = (size_t) ((now_ms / 350u) % source.size());
+        std::string out;
+        out.reserve(16);
+        for (size_t i = 0; i < 16; i++) {
+          out.push_back(source[(start + i) % source.size()]);
+        }
+        return out;
+      };
+      auto valid_float = [](float v, bool has_state) -> bool {
+        if (!has_state) {
+          return false;
+        }
+        if (v != v) {
+          return false;
+        }
+        if (v > 100000.0f || v < -100000.0f) {
+          return false;
+        }
+        return true;
+      };
+      auto clean_text = [](const std::string &raw) -> std::string {
+        if (raw.empty()) {
+          return "";
+        }
+        if (raw == "unknown" || raw == "unavailable" || raw == "none") {
+          return "";
+        }
+        return raw;
+      };
+      auto weather_abbrev = [](const std::string &raw) -> std::string {
+        if (raw == "clear-night") return "clear";
+        if (raw == "cloudy") return "cloudy";
+        if (raw == "fog") return "fog";
+        if (raw == "hail") return "hail";
+        if (raw == "lightning") return "storm";
+        if (raw == "lightning-rainy") return "storm";
+        if (raw == "partlycloudy") return "pcloudy";
+        if (raw == "pouring") return "rain";
+        if (raw == "rainy") return "rain";
+        if (raw == "snowy") return "snow";
+        if (raw == "snowy-rainy") return "sleet";
+        if (raw == "sunny") return "sunny";
+        if (raw == "windy") return "windy";
+        if (raw == "windy-variant") return "windy";
+        if (raw == "exceptional") return "exc";
+        if (raw.size() <= 8) return raw;
+        return raw.substr(0, 8);
+      };
+
+      std::string top = "LoftC3 Display";
+      std::string bottom = "Initialising...";
+      const int page = id(display_page_index);
+
+      if (page == 0) {
+        if (id(ha_time).now().is_valid()) {
+          auto now = id(ha_time).now();
+          char top_buf[32];
+          char bottom_buf[32];
+          snprintf(top_buf, sizeof(top_buf), "Time %02d:%02d:%02d",
+                   (int) now.hour, (int) now.minute, (int) now.second);
+          snprintf(bottom_buf, sizeof(bottom_buf), "Date %04d-%02d-%02d",
+                   (int) now.year, (int) now.month, (int) now.day_of_month);
+          top = top_buf;
+          bottom = bottom_buf;
+        } else {
+          top = "Waiting for time";
+          bottom = "from HomeAssistant";
+        }
+      } else if (page == 1) {
+        // Page 1 - live temps on top; D/N forecast + condition on bottom.
+        //   15:00-03:00 -> N + tonight min, otherwise D + day max.
+        const bool out_ok = valid_float(id(outside_temperature).state,
+                                        id(outside_temperature).has_state());
+        const bool in_ok = valid_float(id(loft_aht10_temperature).state,
+                                       id(loft_aht10_temperature).has_state());
+        char top_buf[32];
+        if (out_ok && in_ok) {
+          snprintf(top_buf, sizeof(top_buf), "Out%5.1f In%5.1f",
+                   id(outside_temperature).state, id(loft_aht10_temperature).state);
+        } else if (out_ok) {
+          snprintf(top_buf, sizeof(top_buf), "Out%5.1f In ----",
+                   id(outside_temperature).state);
+        } else {
+          snprintf(top_buf, sizeof(top_buf), "Out ---- In ----");
+        }
+        top = top_buf;
+
+        bool show_night_min = false;
+        if (id(ha_time).now().is_valid()) {
+          const int h = id(ha_time).now().hour;
+          show_night_min = (h >= 15) || (h < 3);
+        }
+        const bool fc_ok = show_night_min
+          ? valid_float(id(forecast_tonight_min).state,
+                        id(forecast_tonight_min).has_state())
+          : valid_float(id(forecast_today_max).state,
+                        id(forecast_today_max).has_state());
+        const float fc_val = show_night_min
+          ? id(forecast_tonight_min).state
+          : id(forecast_today_max).state;
+        std::string cond;
+        if (id(openweathermap_condition).has_state()) {
+          cond = weather_abbrev(clean_text(id(openweathermap_condition).state));
+        }
+        char bottom_buf[32];
+        if (fc_ok) {
+          snprintf(bottom_buf, sizeof(bottom_buf), "%c %5.1fC ",
+                   show_night_min ? 'N' : 'D', fc_val);
+        } else {
+          snprintf(bottom_buf, sizeof(bottom_buf), "%c  ----C ",
+                   show_night_min ? 'N' : 'D');
+        }
+        std::string bottom_line = std::string(bottom_buf) + cond;
+        if (bottom_line.size() > 16) {
+          bottom = scroll16(bottom_line);
+        } else {
+          bottom = bottom_line;
+        }
+      } else if (page == 2) {
+        const bool t_ok = valid_float(id(loft_aht10_temperature).state,
+                                      id(loft_aht10_temperature).has_state());
+        const bool h_ok = valid_float(id(loft_aht10_humidity).state,
+                                      id(loft_aht10_humidity).has_state());
+        const bool g_ok = valid_float(id(mq2_analog).state, id(mq2_analog).has_state());
+        char top_buf[32];
+        char bottom_buf[32];
+        if (t_ok && h_ok) {
+          snprintf(top_buf, sizeof(top_buf), "T%5.1fC H%5.1f%%",
+                   id(loft_aht10_temperature).state, id(loft_aht10_humidity).state);
+        } else {
+          snprintf(top_buf, sizeof(top_buf), "T ----C H ----%%");
+        }
+        if (g_ok) {
+          snprintf(bottom_buf, sizeof(bottom_buf), "Gas%5.1f%% %-4s",
+                   id(mq2_analog).state, id(mq2_digital).state ? "ALRM" : "OK");
+        } else {
+          snprintf(bottom_buf, sizeof(bottom_buf), "Gas ----%% ----");
+        }
+        top = top_buf;
+        bottom = bottom_buf;
+      } else if (page == 3) {
+        const int total = (int) id(cal_event_titles).size();
+        if (total <= 0) {
+          top = "Calendar";
+          bottom = "No active events";
+        } else {
+          int idx = id(cal_event_index);
+          if (idx < 0 || idx >= total) {
+            idx = 0;
+          }
+          std::string when = (idx < (int) id(cal_event_times).size())
+            ? id(cal_event_times)[idx]
+            : std::string("----");
+          char top_buf[32];
+          snprintf(top_buf, sizeof(top_buf), "Cal %d/%d %s", idx + 1, total, when.c_str());
+          top = top_buf;
+          bottom = scroll16(id(cal_event_titles)[idx]);
+        }
+      } else {
+        const int total = (int) id(notification_ids).size();
+        if (total <= 0) {
+          top = "Notifications";
+          bottom = "No active notice";
+        } else {
+          int idx = id(current_notification_index);
+          if (idx < 0 || idx >= total) {
+            idx = 0;
+          }
+          std::string when = (idx < (int) id(notification_times).size())
+            ? id(notification_times)[idx]
+            : std::string("----");
+          char top_buf[32];
+          snprintf(top_buf, sizeof(top_buf), "Note %d/%d %s", idx + 1, total, when.c_str());
+          top = top_buf;
+          std::string body;
+          if (idx < (int) id(notification_messages).size()) {
+            body = clean_text(id(notification_messages)[idx]);
+          }
+          if (body.empty() && idx < (int) id(notification_titles).size()) {
+            body = clean_text(id(notification_titles)[idx]);
+          }
+          if (body.empty() && idx < (int) id(notification_ids).size()) {
+            body = id(notification_ids)[idx];
+          }
+          bottom = scroll16(body);
+        }
+      }
+
+      std::string top_line = fit16(top);
+      std::string bottom_line = fit16(bottom);
+      it.print(0, 0, top_line.c_str());
+      it.print(0, 1, bottom_line.c_str());
+
+interval:
+  # Poll AHT20 after WiFi/API are stable.
+  - interval: 2min
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - component.update: aht10_sensor
+
+  # PIR diagnostic heartbeat - prints the current motion sensor state
+  # every 60 s. Kept around to make wiring/regression debugging easy
+  # without needing to re-flash. Drop it later if the log noise gets
+  # tiresome.
+  - interval: 60s
+    then:
+      - lambda: |-
+          ESP_LOGI("pir", "PIR state heartbeat: %s",
+                   id(loft_pir_motion).state ? "ON" : "OFF");
+
+  # Refresh the backlight hold window once motion has been ON
+  # continuously for `pir_continuous_on_seconds`. The PIR's on_state
+  # handler sets pir_motion_start_ms to the millis() of the rising
+  # edge and clears it on the falling edge, so a brief blip at 3am
+  # never reaches the threshold and the LCD stays dark.
+  - interval: 1s
+    then:
+      - lambda: |-
+          static const uint32_t PIR_CONTINUOUS_ON_MS =
+              ${pir_continuous_on_seconds} * 1000UL;
+          static const uint32_t BACKLIGHT_HOLD_MS =
+              ${backlight_hold_seconds} * 1000UL;
+          if (id(pir_motion_start_ms) == 0) {
+            return;
+          }
+          const uint32_t held = millis() - id(pir_motion_start_ms);
+          if (held >= PIR_CONTINUOUS_ON_MS) {
+            id(lcd_backlight_until_ms) = millis() + BACKLIGHT_HOLD_MS;
+          }
+
+  # Rebuild active calendar events.
+  - interval: 30s
+    then:
+      - lambda: |-
+          id(cal_event_titles).clear();
+          id(cal_event_times).clear();
+
+          auto now_time = id(ha_time).now();
+          if (!now_time.is_valid()) {
+            return;
+          }
+          time_t now_ts = now_time.timestamp;
+
+          // Determine local UTC offset from HA time.
+          int local_utc_offset_sec = 0;
+          {
+            struct tm gmt_tm;
+            gmtime_r(&now_ts, &gmt_tm);
+            int local_min = (int) now_time.hour * 60 + (int) now_time.minute;
+            int gmt_min = gmt_tm.tm_hour * 60 + gmt_tm.tm_min;
+            int diff_min = local_min - gmt_min;
+            if (diff_min > 12 * 60) {
+              diff_min -= 24 * 60;
+            }
+            if (diff_min < -12 * 60) {
+              diff_min += 24 * 60;
+            }
+            local_utc_offset_sec = diff_min * 60;
+          }
+
+          auto parse_dt = [local_utc_offset_sec](const std::string &raw, time_t &out) -> bool {
+            if (raw.empty()) {
+              return false;
+            }
+            std::string s = raw;
+            for (auto &c : s) {
+              if (c == 'T') {
+                c = ' ';
+              }
+            }
+            int year = 0;
+            int month = 0;
+            int day = 0;
+            int hour = 0;
+            int minute = 0;
+            int second = 0;
+            int n = sscanf(s.c_str(), "%d-%d-%d %d:%d:%d",
+                           &year, &month, &day, &hour, &minute, &second);
+            if (n < 3) {
+              return false;
+            }
+
+            bool tz_known = false;
+            int tz_offset_sec = 0;
+            const size_t tz_search_from = 19;
+            if (s.find('Z', tz_search_from) != std::string::npos) {
+              tz_known = true;
+              tz_offset_sec = 0;
+            } else {
+              size_t tz_pos = std::string::npos;
+              for (size_t i = tz_search_from; i < s.size(); i++) {
+                if (s[i] == '+' || s[i] == '-') {
+                  tz_pos = i;
+                  break;
+                }
+              }
+              if (tz_pos != std::string::npos && tz_pos + 2 < s.size()) {
+                int sign = (s[tz_pos] == '+') ? 1 : -1;
+                int oh = 0;
+                int om = 0;
+                int matched = sscanf(s.c_str() + tz_pos + 1, "%2d:%2d", &oh, &om);
+                if (matched < 2) {
+                  matched = sscanf(s.c_str() + tz_pos + 1, "%2d%2d", &oh, &om);
+                  if (matched == 1) {
+                    om = 0;
+                  }
+                }
+                if (matched >= 1) {
+                  tz_offset_sec = sign * (oh * 3600 + om * 60);
+                  tz_known = true;
+                }
+              }
+            }
+
+            const int effective_offset_sec = tz_known ? tz_offset_sec : local_utc_offset_sec;
+            int y = year;
+            unsigned m = (unsigned) month;
+            unsigned d = (unsigned) day;
+            y -= (m <= 2);
+            const int era = (y >= 0 ? y : y - 399) / 400;
+            const unsigned yoe = (unsigned) (y - era * 400);
+            const unsigned doy = (153u * (m > 2 ? m - 3 : m + 9) + 2u) / 5u + d - 1u;
+            const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+            const long long days_since_epoch =
+                (long long) era * 146097LL + (long long) doe - 719468LL;
+            const long long utc_seconds =
+                days_since_epoch * 86400LL +
+                (long long) hour * 3600LL +
+                (long long) minute * 60LL +
+                (long long) second -
+                (long long) effective_offset_sec;
+            out = (time_t) utc_seconds;
+            return true;
+          };
+
+          auto clean_title = [](const std::string &raw) -> std::string {
+            if (raw.empty() || raw == "unknown" || raw == "unavailable" || raw == "none") {
+              return "";
+            }
+            std::string s = raw;
+            if (s.find("Felix ") == 0) {
+              s = s.substr(6);
+            } else if (s.find("Felix") == 0 && s.size() > 5) {
+              s = s.substr(5);
+            }
+            if (s.find("Isolde ") == 0) {
+              s = s.substr(7);
+            } else if (s.find("Isolde") == 0 && s.size() > 6) {
+              s = s.substr(6);
+            }
+            return s;
+          };
+
+          // Identical UTF-8 -> ASCII transliterator as the notification
+          // parsers above. Used here so calendar titles like
+          // "Förskolan stängd" become "Forskolan stangd" instead of
+          // rendering as garbled high-bit bytes on the HD44780.
+          auto sanitize_utf8 = [](const std::string &in) -> std::string {
+            std::string out;
+            out.reserve(in.size());
+            for (size_t i = 0; i < in.size(); ) {
+              unsigned char c = (unsigned char) in[i];
+              if (c < 0x80) {
+                out.push_back((char) c);
+                i++;
+                continue;
+              }
+              if ((c & 0xE0) == 0xC0 && i + 1 < in.size()) {
+                unsigned char c2 = (unsigned char) in[i + 1];
+                uint32_t cp = ((c & 0x1F) << 6) | (c2 & 0x3F);
+                i += 2;
+                switch (cp) {
+                  case 0xC4: case 0xC5: out.push_back('A'); break;
+                  case 0xD6: out.push_back('O'); break;
+                  case 0xE4: case 0xE5: out.push_back('a'); break;
+                  case 0xF6: out.push_back('o'); break;
+                  case 0xC9: case 0xC8: case 0xCA: out.push_back('E'); break;
+                  case 0xE9: case 0xE8: case 0xEA: out.push_back('e'); break;
+                  case 0xDC: out.push_back('U'); break;
+                  case 0xFC: out.push_back('u'); break;
+                  case 0xD1: out.push_back('N'); break;
+                  case 0xF1: out.push_back('n'); break;
+                  case 0xDF: out.push_back('s'); out.push_back('s'); break;
+                  default: out.push_back('?'); break;
+                }
+                continue;
+              }
+              if ((c & 0xF0) == 0xE0 && i + 2 < in.size()) {
+                i += 3;
+                out.push_back('?');
+                continue;
+              }
+              if ((c & 0xF8) == 0xF0 && i + 3 < in.size()) {
+                i += 4;
+                out.push_back('?');
+                continue;
+              }
+              out.push_back('?');
+              i++;
+            }
+            return out;
+          };
+
+          auto try_add_event = [&](const std::string &title_in,
+                                   const std::string &start_in,
+                                   const std::string &end_in,
+                                   const std::string &prefix) {
+            std::string title = clean_title(title_in);
+            if (title.empty() || start_in.empty()) {
+              return;
+            }
+            time_t start_ts = 0;
+            if (!parse_dt(start_in, start_ts)) {
+              return;
+            }
+
+            struct tm start_local;
+            localtime_r(&start_ts, &start_local);
+            const int secs_into_day =
+                start_local.tm_hour * 3600 + start_local.tm_min * 60 + start_local.tm_sec;
+            const time_t local_midnight = start_ts - secs_into_day;
+            const time_t show_from_ts = local_midnight - 6 * 3600;  // 18:00 day before
+
+            time_t end_ts = start_ts + 3600;
+            if (!end_in.empty()) {
+              time_t parsed_end = 0;
+              if (parse_dt(end_in, parsed_end) && parsed_end > start_ts) {
+                end_ts = parsed_end;
+              }
+            }
+            if (now_ts < show_from_ts || now_ts >= end_ts) {
+              return;
+            }
+
+            char time_buf[8];
+            if (start_local.tm_hour == 0 && start_local.tm_min == 0) {
+              snprintf(time_buf, sizeof(time_buf), "AllD");
+            } else {
+              snprintf(time_buf, sizeof(time_buf), "%02d:%02d",
+                       start_local.tm_hour, start_local.tm_min);
+            }
+            std::string display_title = prefix.empty() ? title : (prefix + " " + title);
+            id(cal_event_titles).push_back(sanitize_utf8(display_title));
+            id(cal_event_times).push_back(std::string(time_buf));
+          };
+
+          if (id(school_cal_1_message).has_state() && id(school_cal_1_start).has_state()) {
+            try_add_event(
+              id(school_cal_1_message).state,
+              id(school_cal_1_start).state,
+              id(school_cal_1_end).has_state() ? id(school_cal_1_end).state : std::string(""),
+              std::string("F.")
+            );
+          }
+          if (id(school_cal_2_message).has_state() && id(school_cal_2_start).has_state()) {
+            try_add_event(
+              id(school_cal_2_message).state,
+              id(school_cal_2_start).state,
+              id(school_cal_2_end).has_state() ? id(school_cal_2_end).state : std::string(""),
+              std::string("I.")
+            );
+          }
+          auto pick_handl_f_title = []() -> std::string {
+            if (id(handl_f_message).has_state()) {
+              const std::string m = id(handl_f_message).state;
+              if (!m.empty() && m != "unknown" && m != "unavailable" && m != "none") {
+                return m;
+              }
+            }
+            if (id(handl_f_summary).has_state()) {
+              const std::string s = id(handl_f_summary).state;
+              if (!s.empty() && s != "unknown" && s != "unavailable" && s != "none") {
+                return s;
+              }
+            }
+            return std::string("");
+          };
+
+          bool handl_f_from_slots = false;
+          if (id(handl_f_slots).has_state()) {
+            std::string slots = id(handl_f_slots).state;
+            if (!slots.empty() && slots != "unknown" && slots != "unavailable" && slots != "none") {
+              size_t pos = 0;
+              while (pos < slots.size()) {
+                size_t sep = slots.find("||", pos);
+                const size_t len = (sep == std::string::npos) ? slots.size() - pos : sep - pos;
+                std::string chunk = slots.substr(pos, len);
+                pos = (sep == std::string::npos) ? slots.size() : sep + 2;
+                const size_t t1 = chunk.find('\t');
+                if (t1 == std::string::npos) {
+                  continue;
+                }
+                const size_t t2 = chunk.find('\t', t1 + 1);
+                const std::string title = chunk.substr(0, t1);
+                const std::string start =
+                    chunk.substr(t1 + 1, (t2 == std::string::npos) ? std::string::npos : t2 - t1 - 1);
+                const std::string end =
+                    (t2 == std::string::npos) ? std::string("") : chunk.substr(t2 + 1);
+                if (!title.empty() && !start.empty()) {
+                  try_add_event(title, start, end, std::string(""));
+                  handl_f_from_slots = true;
+                }
+              }
+            }
+          }
+          if (!handl_f_from_slots && id(handl_f_start).has_state()) {
+            const std::string hf_title = pick_handl_f_title();
+            if (!hf_title.empty()) {
+              try_add_event(
+                hf_title,
+                id(handl_f_start).state,
+                id(handl_f_end).has_state() ? id(handl_f_end).state : std::string(""),
+                std::string("")
+              );
+            }
+          }
+
+          int total = (int) id(cal_event_titles).size();
+          if (total <= 0 || id(cal_event_index) < 0 || id(cal_event_index) >= total) {
+            id(cal_event_index) = 0;
+          }
+          ESP_LOGI("calendar", "Active events rebuilt: %d", total);
+
+  # Rotate LCD pages. Calendar page dwells on each active event for
+  # cal_event_dwell_seconds before advancing; other pages use
+  # page_dwell_seconds. When all calendar events have been shown the
+  # cycler moves on to notifications.
+  - interval: 1s
+    then:
+      - lambda: |-
+          static const int PAGE_COUNT = 5;
+          static const int PAGE_CALENDAR = 3;
+          static const int PAGE_NOTIFY = 4;
+          static const uint32_t PAGE_DWELL_MS =
+              ${page_dwell_seconds} * 1000UL;
+          static const uint32_t CAL_EVENT_DWELL_MS =
+              ${cal_event_dwell_seconds} * 1000UL;
+
+          const uint32_t now_ms = millis();
+          const int page = id(display_page_index);
+          if (id(lcd_last_advance_ms) == 0) {
+            id(lcd_last_advance_ms) = now_ms;
+          }
+          if (id(lcd_last_page_index) != page) {
+            id(lcd_last_page_index) = page;
+            id(lcd_last_advance_ms) = now_ms;
+            if (page == PAGE_CALENDAR) {
+              id(cal_event_index) = 0;
+            }
+            return;
+          }
+
+          const int cal_total = (int) id(cal_event_titles).size();
+          const uint32_t dwell_ms =
+              (page == PAGE_CALENDAR && cal_total > 0)
+                ? CAL_EVENT_DWELL_MS
+                : PAGE_DWELL_MS;
+          if ((now_ms - id(lcd_last_advance_ms)) < dwell_ms) {
+            return;
+          }
+          id(lcd_last_advance_ms) = now_ms;
+
+          if (page == PAGE_CALENDAR && cal_total > 0) {
+            const int next_idx = (id(cal_event_index) + 1) % cal_total;
+            if (next_idx == 0) {
+              id(display_page_index) = (PAGE_CALENDAR + 1) % PAGE_COUNT;
+              id(cal_event_index) = 0;
+            } else {
+              id(cal_event_index) = next_idx;
+            }
+            return;
+          }
+
+          id(display_page_index) = (page + 1) % PAGE_COUNT;
+          if (id(display_page_index) == PAGE_CALENDAR) {
+            id(cal_event_index) = 0;
+          }
+          if (id(display_page_index) == PAGE_NOTIFY) {
+            int total = (int) id(notification_ids).size();
+            if (total > 0) {
+              id(current_notification_index) =
+                (id(current_notification_index) + 1) % total;
+            } else {
+              id(current_notification_index) = 0;
+            }
+          }

@@ -1,9 +1,33 @@
 alias: Daytime Cheap Heat
 description: >-
-  Sets sam_desired_temperature based on occupancy, time of day, and holiday mode.
-  Computes sam_control_temperature by adjusting desired for electricity price:
-  overheat when cheap, pre-warm before evening, reduce to 16 when expensive.
-  Manual changes to sam_desired_temperature are preserved.
+  Sets sam_desired_temperature based on occupancy, time of day, and holiday
+  mode. Computes sam_control_temperature by adjusting desired for electricity
+  price: overheat when cheap, pre-warm before evening, reduce to 16 when
+  expensive.
+
+  Manual changes to sam_desired_temperature (from the HA UI, KitchenDetectorer
+  Button 6, the MiniDisplay, voice, automations, scripts, etc.) are now
+  STICKY for at least 90 minutes via input_datetime.sam_desired_lock_until.
+  While the lock is active the desired temperature is taken as-is and the
+  price logic is bypassed - the user's "I want 23 now, I don't care that
+  electricity is expensive" intent wins.
+
+  Detection of "manual change" works by comparing the current desired
+  against input_number.sam_automation_set_value, which this automation
+  writes every run with the value it just set. So:
+    - automation writes 16 -> auto_set = 16. No drift.
+    - user sets 23 -> current_desired (23) != auto_set (16) -> manual
+      override detected -> lock set to now+90min, desired preserved as 23,
+      then auto_set is updated to 23. The automation's OWN writes do not
+      retrigger an override because auto_set always matches what was
+      written.
+
+  Required helpers (see README_SamHVAC.md):
+    - input_number.sam_automation_set_value (min 10, max 30, step 0.1)
+    - input_datetime.sam_desired_lock_until (has_date: true, has_time: true)
+    - House thermal model: house_heat_loss_k, house_heat_rate, hours_to_evening_target,
+      forecast_outside_4h (see README_HouseThermalModel.md)
+    - Forecast sensors package: sensor.forecast_tonight_min, sensor.forecast_outside_at_23
 triggers:
   - trigger: state
     entity_id:
@@ -13,29 +37,110 @@ triggers:
       - input_boolean.daytime_cheap_7_21
       - input_number.sam_desired_temperature
       - input_boolean.holiday_mode
+      - input_number.hours_to_evening_target
+      - input_number.forecast_outside_4h
+      - input_number.house_heat_loss_k
+      - input_number.house_heat_rate
+      - sensor.forecast_tonight_min
+      - sensor.forecast_outside_at_23
+      - sensor.t_h_sensor_temperature
   - trigger: time_pattern
     minutes: "/15"
+  - trigger: time
+    at:
+      - "19:00:00"
+      - "19:05:00"
+      - "23:00:00"
 conditions: []
 actions:
   - variables:
       tv_on: >-
         {{ states('media_player.lgnano_55') in ['on', 'playing', 'idle', 'paused'] }}
       outside_temp: "{{ states('sensor.sam_outside_temperature') | float(10) }}"
+      living_temp_state: "{{ states('sensor.t_h_sensor_temperature') }}"
+      living_ok: "{{ living_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      living_temp: "{{ living_temp_state | float(999) }}"
       price_rank: "{{ states('input_number.electricity_price_rank') | int(12) }}"
       price_rank_4h: "{{ states('input_number.electricity_price_rank_4h') | int(12) }}"
       current_desired: >-
         {{ states('input_number.sam_desired_temperature') | float(16) }}
-      triggered_by_desired: >-
-        {{ trigger.entity_id == 'input_number.sam_desired_temperature' }}
+      auto_set: >-
+        {{ states('input_number.sam_automation_set_value') | float(16) }}
+      lock_until_ts: >-
+        {{ as_timestamp(states('input_datetime.sam_desired_lock_until'), 0) | float(0) }}
+      lock_active_now: "{{ lock_until_ts > now().timestamp() }}"
+      manual_override: >-
+        {{ (current_desired - auto_set) | abs > 0.05 }}
+      manual_lock_minutes: 90
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
       current_hour: "{{ now().hour }}"
       evening_hours: "{{ current_hour | int >= 19 and current_hour | int < 23 }}"
       approaching_evening: "{{ current_hour | int >= 15 and current_hour | int < 19 }}"
       electricity_cheap_now: "{{ price_rank < price_rank_4h }}"
+      # Relative "cheap" must not trigger afternoon-style boost during 19:00–23:00.
+      evening_hours_block_boost: "{{ evening_hours }}"
+      cheap_for_boost: "{{ electricity_cheap_now and not evening_hours_block_boost }}"
+      evening_comfort_target: 20
+      evening_hold_floor: 19
+      prewarm_max: 25
+      prewarm_control_target: >-
+        {# Only heat as much as needed to hold >=19°C through evening — not always 25. #}
+        {% if living_ok and living_temp >= evening_hold_floor %}
+          {{ evening_comfort_target }}
+        {% else %}
+          {% set deficit = evening_hold_floor - living_temp %}
+          {% set needed = evening_hold_floor + 2 + (deficit * 2) %}
+          {{ [evening_comfort_target, needed, prewarm_max] | min | max }}
+        {% endif %}
+      hours_until_19: >-
+        {% if current_hour | int < 19 %}
+          {{ (19 - current_hour | int) | max(0) }}
+        {% else %}
+          0
+        {% endif %}
+      thermal_k: "{{ states('input_number.house_heat_loss_k') | float(0.2) }}"
+      thermal_h: "{{ states('input_number.house_heat_rate') | float(2.0) }}"
+      thermal_tau: "{{ states('input_number.house_thermal_tau') | float(5.0) }}"
+      forecast_4h: >-
+        {% set v = states('input_number.forecast_outside_4h') %}
+        {{ v | float(outside_temp) if v not in ['unknown', 'unavailable', 'none', ''] else outside_temp }}
+      hours_to_20: >-
+        {% set v = states('input_number.hours_to_evening_target') %}
+        {{ v | float(99) if v not in ['unknown', 'unavailable', 'none', ''] else 99 }}
+      forecast_tonight_min: >-
+        {% set v = states('sensor.forecast_tonight_min') %}
+        {{ v | float(outside_temp) if v not in ['unknown', 'unavailable', 'none', ''] else outside_temp }}
+      forecast_at_23: >-
+        {% set v = states('sensor.forecast_outside_at_23') %}
+        {{ v | float(forecast_tonight_min) if v not in ['unknown', 'unavailable', 'none', ''] else forecast_tonight_min }}
+      t_eq_heat: >-
+        {% if thermal_k | float > 0 %}
+          {{ (forecast_4h | float + (thermal_h | float / thermal_k | float)) | round(1) }}
+        {% else %}
+          99
+        {% endif %}
+      prewarm_skip_comfortable: "{{ living_ok and living_temp >= 19 }}"
+      prewarm_skip_mild_night: >-
+        {# Mild forecast (e.g. ~17°C at 23:00) — skip 25°C only if already warm
+           enough or the thermal model says we reach 20°C before 19:00 anyway. #}
+        {% set fc_low = [forecast_tonight_min | float, forecast_at_23 | float] | min %}
+        {{ fc_low >= 14 and living_ok and living_temp >= 18
+           and (living_temp >= 19.5 or (hours_to_20 < 99 and hours_to_20 <= (hours_until_19 | float) + 1.0)) }}
+      prewarm_skip_on_track: >-
+        {{ hours_to_20 < 99 and living_ok and living_temp >= 17.5
+           and hours_to_20 <= (hours_until_19 | float) + 1.0 }}
+      use_prewarm_25_evening: >-
+        {{ electricity_cheap_now and approaching_evening
+           and not prewarm_skip_comfortable
+           and not prewarm_skip_mild_night
+           and not prewarm_skip_on_track
+           and (not living_ok or living_temp < 19) }}
+      # Manual lock is honoured EVERYWHERE except holiday mode. Holiday
+      # mode is a safety/frost-protection override that always wins.
       desired: >-
         {% if holiday_mode %}
           10
-        {% elif triggered_by_desired %}
+        {% elif manual_override or lock_active_now %}
           {{ current_desired }}
         {% elif evening_hours or tv_on %}
           20
@@ -43,20 +148,117 @@ actions:
           16
         {% endif %}
       control: >-
-        {% set d = desired | int %}
+        {% set d = desired | float %}
         {% if holiday_mode %}
           10
-        {% elif electricity_cheap_now and outside_temp < 10 %}
-          25
-        {% elif electricity_cheap_now and approaching_evening %}
-          25
-        {% elif electricity_cheap_now %}
-          {{ [d + 3, 25] | min }}
-        {% elif price_rank > price_rank_4h and not tv_on and not evening_hours %}
+        {% elif manual_override or lock_active_now %}
+          {{ d }}
+        {% elif evening_hours %}
+          {# 19:00–23:00: never afternoon pre-warm; coast if already warm. #}
+          {% if living_ok and living_temp >= evening_hold_floor %}
+            {{ d }}
+          {% else %}
+            {{ [d, evening_hold_floor + 1] | max }}
+          {% endif %}
+        {% elif cheap_for_boost and outside_temp < 10 %}
+          {{ prewarm_max }}
+        {% elif use_prewarm_evening %}
+          {{ prewarm_control_target }}
+        {% elif cheap_for_boost %}
+          {% set boosted = [d + 3, prewarm_max] | min %}
+          {% if living_ok and living_temp >= boosted - 0.5 %}
+            {{ d }}
+          {% else %}
+            {{ boosted }}
+          {% endif %}
+        {% elif price_rank > price_rank_4h and not tv_on %}
           16
         {% else %}
           {{ d }}
         {% endif %}
+      lock_minutes_remaining: >-
+        {% if lock_active_now %}
+          {{ ((lock_until_ts - now().timestamp()) / 60) | round(0) }}
+        {% else %}
+          0
+        {% endif %}
+      reason: >-
+        {% set d = desired | float %}
+        {% set c = control | float %}
+        {% if holiday_mode %}
+          Holiday frost 10°C
+        {% elif manual_override or lock_active_now %}
+          {% if lock_active_now and lock_minutes_remaining | int > 0 %}
+            You set {{ d | round(0) }}°C ({{ lock_minutes_remaining | int }}m)
+          {% else %}
+            You set {{ d | round(0) }}°C
+          {% endif %}
+        {% elif evening_hours %}
+          {% if living_ok and living_temp >= evening_hold_floor + 1 %}
+            Evening warm {{ living_temp | round(0) }}°C hold
+          {% else %}
+            Evening comfort {{ d | round(0) }}°C
+          {% endif %}
+        {% elif c > d + 0.5 %}
+          {% if cheap_for_boost and outside_temp < 10 %}
+            Pre-warm (cold + cheap)
+          {% elif cheap_for_boost and approaching_evening and use_prewarm_evening %}
+            Pre-warm to {{ c | round(0) }}°C (hold 19)
+          {% elif cheap_for_boost and approaching_evening %}
+            No pre-warm (forecast/model)
+          {% elif cheap_for_boost %}
+            Cheap power boost
+          {% else %}
+            Control above comfort
+          {% endif %}
+        {% elif price_rank > price_rank_4h and not tv_on %}
+          Electricity expensive
+        {% elif tv_on %}
+          Evening comfort {{ d | round(0) }}°C
+        {% else %}
+          Daytime economy {{ d | round(0) }}°C
+        {% endif %}
+      preheat_calc: >-
+        desired={{ desired }}°C control={{ control }}°C |
+        in={{ living_temp | round(1) if living_ok else 'n/a' }}°C
+        out={{ outside_temp | round(1) }}°C fc4h={{ forecast_4h }}°C
+        fc23={{ forecast_at_23 | round(1) }}°C night={{ forecast_tonight_min | round(1) }}°C |
+        k={{ thermal_k }} h={{ thermal_h }} τ={{ thermal_tau }}h
+        Teq={{ t_eq_heat }}°C hrs→{{ evening_comfort_target }}={{ hours_to_20 }}h
+        until19={{ hours_until_19 }}h |
+        rank {{ price_rank }}/{{ price_rank_4h }} cheap={{ electricity_cheap_now }} |
+        skip: warm={{ prewarm_skip_comfortable }}
+        mild={{ prewarm_skip_mild_night }} track={{ prewarm_skip_on_track }}
+        pre25={{ use_prewarm_25_evening }}
+  # Detect a user-driven manual override (current_desired drifted away
+  # from what the automation last wrote) and extend the lock. This is
+  # also done when holiday mode is OFF only - while holiday mode is on
+  # the desired is forced to 10 and any "drift" would be the automation
+  # forcing 10 onto a user's earlier value.
+  - if:
+      - condition: template
+        value_template: "{{ manual_override and not holiday_mode }}"
+    then:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.sam_desired_lock_until
+        data:
+          timestamp: "{{ now().timestamp() + manual_lock_minutes * 60 }}"
+      - action: logbook.log
+        data:
+          name: Daytime Cheap Heat
+          message: >-
+            Manual desired change detected ({{ auto_set }}°C -> {{ current_desired }}°C).
+            Locked at {{ current_desired }}°C for {{ manual_lock_minutes }} min.
+  # IMPORTANT: write auto_set BEFORE writing desired so when the
+  # follow-on state-change trigger fires from input_number.set_value
+  # below, current_desired and auto_set already match and we don't
+  # spuriously re-detect a manual override.
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.sam_automation_set_value
+    data:
+      value: "{{ desired }}"
   - if:
       - condition: template
         value_template: "{{ (desired | float) != current_desired }}"
@@ -71,6 +273,21 @@ actions:
       entity_id: input_number.sam_control_temperature
     data:
       value: "{{ control }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.sam_hvac_reason
+    data:
+      value: "{{ reason }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.sam_hvac_headline
+    data:
+      value: "{{ reason }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.sam_preheat_calc
+    data:
+      value: "{{ preheat_calc }}"
   - action: logbook.log
     data:
       name: Daytime Cheap Heat
@@ -79,8 +296,12 @@ actions:
         tv={{ tv_on }}, evening={{ evening_hours }},
         pre_evening={{ approaching_evening }},
         outside={{ outside_temp | round(1) }}°C,
+        living={{ living_temp | round(1) if living_ok else 'n/a' }}°C,
         rank={{ price_rank }}, rank_4h={{ price_rank_4h }},
         cheap_now={{ electricity_cheap_now }},
         holiday={{ holiday_mode }},
-        triggered_by_desired={{ triggered_by_desired }}
+        manual_override={{ manual_override }},
+        lock_active={{ lock_active_now }},
+        lock_remaining_min={{ lock_minutes_remaining }},
+        preheat={{ preheat_calc }}
 mode: single

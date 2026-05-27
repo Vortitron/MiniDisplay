@@ -1,14 +1,19 @@
-Screen,Side,Sensor,title,unit,displayIf,note
-0,All,sensor.smart_plug_4_power,LED1,W,>0,Air Fryer
-1,Left,switch.bio_office_heaters_socket_1,LED2,On/Off,Bio Heaters
-1,Right,sensor.bioofficec3_room_temperature,LED2,C,Bio Temperature
-2,Right,switch.smart_plug_2_socket_1,"Hot",On/Off, Hot water 
-3,Right,sensor.sam_outside_temperature,"Out",C,Outside Temperature
-4,Right,sensor.t_h_sensor_temperature,"In",C,Inside Temperature
-5,Right,sensor.t_h_sensor_humidity,"In h",,Inside Humidity (it's a percentage but can't show % on 7 segs!)
-6,Left,sensor.nordpool_kwh_se4_sek_3_10_025,LED3,,Current power price (SEK/kWh)
-6,Left,sensor.nordpool_kwh_se4_sek_3_10_025(Low Price attribute boolean),LED3,Lo/Hi,Current power price is high or low
-7,Left,Coffee bean level
-8,Left,date,dd.mm
-8,Right,time,hh.mm (date and time, no LED or title)
-
+Screen,Side,Sensor,LeftLabel,RightFormat,LED,SkipIf,Note
+0,Left,climate.bio_office_heat (state)," on /off",,LED2,,Bio Office HVAC mode
+0,Right,climate.bio_office_heat (current_temperature),,%4.1fC,LED2,,Bio Office current temperature
+1,Left,switch.smart_plug_2_socket_1,hot,,,,Hot water relay
+1,Right,sensor.manifoldtemperature_hot_water_boiler_temp,, on /off (overridden by %4.1fC when present),,,Boiler temperature override
+2,Both,sensor.sam_outside_temperature,out,%4.1fC,,,Outside Temperature
+3,Both,sensor.t_h_sensor_temperature,in,%4.1fC,,,Inside Temperature
+4,Both,sensor.t_h_sensor_humidity,in h,%5.1f,,,Inside Humidity (no unit char on 7-seg)
+5,Left,sensor.nordpool_kwh_se4_sek_3_10_025,,%5.2f,LED3,,Power price (no unit; right-aligned)
+5,Right,sensor.nordpool_kwh_se4_sek_3_10_025 (low_price),,  Lo / High,LED3+LED7,,Power price band; LED7 lit when price band is Low
+6,Both,Coffee bean level state machine (cm internally),Bean Lo,(unused),LED8 when bean_warning_active,!bean_warning_active,"Display only shows ""Bean Lo "" while a low warning is active; auto-cycle skip-rule jumps to SCREEN_DATETIME otherwise so the user only sees the screen when there's something to act on. Cm value is still published to HA as sensor.kitchen_detectorer_espresso_bean_level for diagnostics. Warning trips when the reading stays in the 5..12 cm band continuously for BEAN_RELIABLE_MS (10 s) - one grind cycle - filtering out transient bean shifts during a refill."
+7,Left,homeassistant_time (date),,dd.mm,,,Date
+7,Right,homeassistant_time (time),,hh.mm,,,Time
+8,Both,3 calendars (Felix=school1 with prefix F. / Isolde=school2 with prefix I. / handl_f no prefix),"HHMM static for normal events; cal-prefix (e.g. ""F.  "") static for midnight all-day events; nothing for 8am-exact events",title scrolls leftward over the static slot via scroll_with_static_prefix; eventually obscures the static slot as the last 8 chars settle across the display. Title is body-only when the cal prefix is in the static slot; otherwise the cal prefix is inlined as ""F. <body>"" / ""I. <body>"" so the user always knows whose event it is.,,active in window 19:00 prev-day -> end_time and force_calendar_until expired,"Cycles through every active event one per 3.5s. Button 5 short press forces this screen visible for 5 s even when empty (shows noEvent). HA serialises all-day events as starts at 00:00 - we treat those specially by using the cal prefix as the static slot instead of '0000'. shorten_title strips leading 'Felix '/'Isolde ' and abbreviates Idrott->Gym, Simning/Swim->Swim, Ridlekis->Riding. Timestamps with Z/+HH:MM use the explicit offset; naive timestamps use the live local UTC offset derived from id(homeassistant_time).now() instead of mktime."
+9,Left,sensor.manifoldtemperature_lowest_loop_return_temp,,%4.1fC,LED1,both manifold sensors unavailable,Loop return temp with C unit
+9,Right,sensor.manifoldtemperature_air_temp,,%4.1fC,LED1,,Manifold air temp
+10,Both,input_number.forecast_today_max OR forecast_tonight_min + forecast_outside_4h + sensor.openweathermap_condition,"scrolling ""Day max XX.XC RAIN 4hr XX.XC"" / ""Ngt min XX.XC SUN 4hr XX.XC""",left-scrolls over 3 s across all 8 digits,,all three forecast helpers unavailable,"Day max before 14:00; tonight min from 14:00 onwards. Right number is forecast_outside_4h (next ~4 h). Each value passes through std::isfinite() so an unavailable / NaN input_number renders as ' --C' instead of leaking 'NaN' into the scroll. Condition word is mapped from openweathermap_condition (clear-night/cloudy/fog/hail/lightning(-rainy)/partlycloudy/pouring/rainy/snowy(-rainy)/sunny/windy(-variant)/exceptional) to a 5-6 char ALL-CAPS abbreviation and dropped entirely when the sensor has no state."
+11,Both,input_number.sam_desired_temperature,Set,%4.1fC,,unavailable,Sam desired temp (Button 6 sets 23/20/17)
+12,Both,input_text.minidisplay_notification_messages (preferred) + minidisplay_notification_titles (fallback) + per-notification HHMM,HHMM static (slots 0..3),"sanitised content scrolls leftward over the static HHMM via scroll_with_static_prefix at NOTIFY_SCROLL_MS_PER_CELL=200 ms/cell so longer notifications take longer; multi-notification cases prepend ""N of M "" before scrolling",LED4 + alarm flash,no notes and alarm OK,"Content is picked message-first then title-first then alarm-level fallback - most HA persistent_notification.create calls leave title empty and put the readable text in message. HHMM is captured by the notification_ids_csv on_value handler the first time each ID appears; previously seen IDs keep their original HHMM via the parallel notification_times vector. Content is sanitised to [0-9 A-Z a-z space . - _] before display. A B8 short press extends the auto-cycle hold to 'scroll cells * 200 ms + 3000 ms' via notify_hold_until_ms so the entire message gets seen, plus a tail dwell, before auto-rotation resumes."

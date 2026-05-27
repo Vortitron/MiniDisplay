@@ -1,8 +1,45 @@
 alias: Sync Sam HVAC with Desired Temperature and Energy Saving
 description: >-
-  Control Sam HVAC with remote sensor, price-adjusted control temp, and
-  dynamic fan-only. Uses sam_control_temperature (set by DaytimeCheapHeat)
-  as the base target.
+  Drives climate.sam (living-room heat pump) from remote room sensors.
+
+  ## Two numbers (set by DaytimeCheapHeat.yaml)
+
+  - sam_desired_temperature — comfort target the user cares about (often 16°C
+    daytime, 20°C evening). Shown on dashboards / MiniDisplay.
+  - sam_control_temperature — price-adjusted target Sam actually pursues. Can
+    be HIGHER than desired when electricity is cheap (pre-warm before evening)
+    or lower when expensive. sam.yaml always reads control, not desired.
+
+  If desired=16 but control=25, Sam is pre-warming on purpose — not a bug.
+  Check input_text.sam_hvac_headline (short), sam_hvac_status (detail), and
+  the DaytimeCheapHeat logbook entry.
+
+  effective_target = max(control, bedroom_thermostat_target)
+
+  ## Remote temperatures
+
+  - Cooling: living-room sensor only (sensor.t_h_sensor_temperature).
+  - Heating, fan OFF: living-room sensor.
+  - Heating, circulation fan ON: min(living, bedroom) so Sam keeps working
+    until the bedroom catches up.
+
+  ## Heating behaviour (when not in cooling mode)
+
+  1. Living room already above effective_target → fan_only (overheat guard).
+  2. Remote well below target → heat with dynamic boost (internal + need).
+  3. Remote at/above target → nudge setpoint down to stop heating.
+  4. Remote cold but outdoor warm → fan_only (free cooling opportunity).
+
+  ## Cooling behaviour
+
+  Triggered when living > 26°C OR (outdoor ≥ 25°C AND living > 20°C).
+  Uses Sam internal sensor + offsets; may switch to fan_only when outdoor
+  air is cooler than the effective target.
+
+  ## Holiday mode
+
+  Forces preset heat_8_15, heat mode, 10°C setpoint (frost protection).
+  Clears preset when holiday mode turns off.
 variables:
   cool_indoor_threshold: 26
   cool_outdoor_threshold: 25
@@ -13,6 +50,8 @@ variables:
   max_stop_heat_offset: -5
   temp_tolerance: 0.5
   fan_only_diff: 3
+  # Cap Sam setpoint so internal+boost cannot drive a "sauna" under the unit.
+  sam_setpoint_cap: 27
   # Fallbacks if the climate entity does not expose min/max temp attributes
   sam_min_temp_fallback: 10
   sam_max_temp_fallback: 30
@@ -33,6 +72,12 @@ triggers:
   - trigger: state
     entity_id: climate.mama_bedroom_thermostat
     attribute: temperature
+  - trigger: state
+    entity_id:
+      - input_text.sam_hvac_reason
+      - input_number.sam_control_temperature
+  - trigger: time_pattern
+    minutes: "/15"
 actions:
   - variables:
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
@@ -61,6 +106,37 @@ actions:
       bedroom_target: "{{ bedroom_target_raw | float(0) }}"
       sam_min_temp: "{{ state_attr('climate.sam', 'min_temp') | float(sam_min_temp_fallback) }}"
       sam_max_temp: "{{ state_attr('climate.sam', 'max_temp') | float(sam_max_temp_fallback) }}"
+      reason_state: "{{ states('input_text.sam_hvac_reason') }}"
+      current_hour: "{{ now().hour }}"
+      evening_now: "{{ current_hour | int >= 19 and current_hour | int < 23 }}"
+      evening_hold_floor: 19
+      plan_reason: >-
+        {% set rs = reason_state | string | trim %}
+        {% set ui_desired = sam_desired_state | float(16) %}
+        {% set rs_ok = rs not in ['unknown', 'unavailable', 'none', ''] %}
+        {% if evening_now and living_room_temp_ok and living_room_temp >= evening_hold_floor + 1 %}
+          Evening warm {{ living_room_temp | round(0) }}°C hold
+        {% elif holiday_mode %}
+          Holiday frost 10°C
+        {% elif evening_now %}
+          {% if rs_ok and 'Pre-warm' not in rs %}
+            {{ rs }}
+          {% else %}
+            Evening comfort {{ ui_desired | round(0) }}°C
+          {% endif %}
+        {% elif rs_ok and 'Pre-warm' not in rs %}
+          {{ rs }}
+        {% elif desired_base > ui_desired + 0.5
+               and not (living_room_temp_ok and living_room_temp >= evening_hold_floor) %}
+          Pre-warm to {{ desired_base | round(0) }}°C
+        {% elif desired_base < ui_desired - 0.3 %}
+          Electricity expensive
+        {% elif desired_base >= 19.5 %}
+          Evening comfort {{ desired_base | round(0) }}°C
+        {% else %}
+          Daytime economy {{ desired_base | round(0) }}°C
+        {% endif %}
+      internal_at_unit_hot: "{{ internal_ok and internal >= sam_setpoint_cap }}"
 
       # Sam should heat for whichever needs more:
       # - the price-adjusted control temperature (input_number.sam_control_temperature), or
@@ -135,8 +211,18 @@ actions:
         data:
           name: Sam HVAC
           message: >-
-            Skipping update (missing data). fan={{ fan_state }}, living={{ living_room_temp_state }}, bedroom={{ bedroom_temp_state }}, outdoor={{ sam_outdoor_state }}, internal={{ sam_internal_state }}, desired={{ sam_desired_state }}, control={{ sam_control_state }}, bedroom_target={{ bedroom_target_raw }}
+            Skipping update (missing data). fan={{ fan_state }}, living={{ living_room_temp_state }}, bedroom={{ bedroom_temp_state }}, outdoor={{ sam_outdoor_state }}, internal={{ sam_internal_state }}, desired_ui={{ sam_desired_state }}, control={{ sam_control_state }}, bedroom_target={{ bedroom_target_raw }}
       - stop: "Missing sensor data"
+  - if:
+      - condition: template
+        value_template: >-
+          {{ reason_state in ['unknown', 'unavailable', 'none', ''] }}
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.sam_hvac_reason
+        data:
+          value: "{{ plan_reason }}"
   - if:
       - condition: template
         value_template: "{{ holiday_mode }}"
@@ -167,6 +253,16 @@ actions:
           message: >-
             Holiday mode: preset=heat_8_15, mode=heat, setpoint=10°C,
             living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.sam_hvac_reason
+        data:
+          value: Holiday frost 10°C
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.sam_hvac_headline
+        data:
+          value: Holiday frost · Heating
       - action: input_text.set_value
         target:
           entity_id: input_text.sam_hvac_status
@@ -202,7 +298,7 @@ actions:
             data:
               temperature: >-
                 {% set unclamped = internal + (cool_offset if remote_cool > desired_effective + temp_tolerance else 0) %}
-                {{ [sam_min_temp, [sam_max_temp, unclamped] | min] | max }}
+                {{ [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max }}
               hvac_mode: >-
                 {{ 'fan_only' if remote_cool > desired_effective + temp_tolerance and outdoor < desired_effective else 'cool' }}
           - action: logbook.log
@@ -212,6 +308,12 @@ actions:
                 Cooling: mode={{ 'fan_only' if remote_cool > desired_effective + temp_tolerance and outdoor < desired_effective else 'cool' }},
                 desired_effective={{ desired_effective | round(1) }}°C (base={{ desired_base | round(1) }}, bedroom_target={{ bedroom_target_raw }}),
                 living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.sam_hvac_headline
+            data:
+              value: >-
+                Too warm inside · {{ 'Fan cool' if remote_cool > desired_effective + temp_tolerance and outdoor < desired_effective else 'Cooling' }}
           - action: input_text.set_value
             target:
               entity_id: input_text.sam_hvac_status
@@ -231,7 +333,7 @@ actions:
             data:
               hvac_mode: >-
                 {% set diff = remote_heat - desired_effective %}
-                {{ 'fan_only' if living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or diff > fan_only_diff else 'heat' }}
+                {{ 'fan_only' if internal_at_unit_hot or living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or diff > fan_only_diff else 'heat' }}
           - action: climate.set_temperature
             target:
               entity_id: climate.sam
@@ -242,6 +344,8 @@ actions:
                 {% set boost = [heat_offset, need] | max %}
                 {% if living_above_all_targets %}
                   {% set unclamped = internal + [base_stop_heat_offset - (living_overheat_diff | float(0)), max_stop_heat_offset] | max %}
+                {% elif internal_at_unit_hot %}
+                  {% set unclamped = internal + max_stop_heat_offset %}
                 {% elif remote_heat < desired_effective - temp_tolerance %}
                   {% set unclamped = internal + boost %}
                 {% elif remote_heat >= desired_effective %}
@@ -249,10 +353,10 @@ actions:
                 {% else %}
                   {% set unclamped = internal %}
                 {% endif %}
-                {{ [sam_min_temp, [sam_max_temp, unclamped] | min] | max }}
+                {{ [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max }}
               hvac_mode: >-
                 {% set diff = remote_heat - desired_effective %}
-                {{ 'fan_only' if living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or diff > fan_only_diff else 'heat' }}
+                {{ 'fan_only' if internal_at_unit_hot or living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or diff > fan_only_diff else 'heat' }}
           - action: logbook.log
             data:
               name: Sam HVAC
@@ -262,6 +366,8 @@ actions:
                 {% set boost = [heat_offset, need] | max %}
                 {% if living_above_all_targets %}
                   {% set unclamped = internal + [base_stop_heat_offset - (living_overheat_diff | float(0)), max_stop_heat_offset] | max %}
+                {% elif internal_at_unit_hot %}
+                  {% set unclamped = internal + max_stop_heat_offset %}
                 {% elif remote_heat < desired_effective - temp_tolerance %}
                   {% set unclamped = internal + boost %}
                 {% elif remote_heat >= desired_effective %}
@@ -269,13 +375,32 @@ actions:
                 {% else %}
                   {% set unclamped = internal %}
                 {% endif %}
-                {% set setpoint = [sam_min_temp, [sam_max_temp, unclamped] | min] | max %}
-                Heating: mode={{ 'fan_only' if living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or (remote_heat - desired_effective) > fan_only_diff else 'heat' }},
-                desired_effective={{ desired_effective | round(1) }}°C (base={{ desired_base | round(1) }}, bedroom_target={{ bedroom_target_raw }}),
+                {% set setpoint = [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max %}
+                Heating: mode={{ 'fan_only' if internal_at_unit_hot or living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or (remote_heat - desired_effective) > fan_only_diff else 'heat' }},
+                control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C (bedroom_target={{ bedroom_target_raw }}),
                 need={{ need | round(1) }}°C, boost={{ boost | round(1) }}°C, setpoint={{ setpoint | round(1) }}°C,
                 remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source }},
-                living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, living_overheat_guard={{ living_above_all_targets }},
+                living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, overheat_guard={{ living_above_all_targets }},
                 fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
+                {% if desired_base > (sam_desired_state | float(0)) + 0.5 %} [pre-warm: control>{{ sam_desired_state }} desired]{% endif %}
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.sam_hvac_headline
+            data:
+              value: >-
+                {% set diff = remote_heat - desired_effective %}
+                {% set heat_mode = 'fan_only' if internal_at_unit_hot or living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or diff > fan_only_diff else 'heat' %}
+                {% if internal_at_unit_hot %}
+                  {{ plan_reason }} · Unit hot, fan only
+                {% elif heat_mode == 'heat' %}
+                  {{ plan_reason }} · Heating
+                {% elif living_above_all_targets %}
+                  {{ plan_reason }} · Warm enough
+                {% elif remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective %}
+                  {{ plan_reason }} · Coasting (mild)
+                {% else %}
+                  {{ plan_reason }} · Fan only
+                {% endif %}
           - action: input_text.set_value
             target:
               entity_id: input_text.sam_hvac_status
@@ -286,6 +411,8 @@ actions:
                 {% set boost = [heat_offset, need] | max %}
                 {% if living_above_all_targets %}
                   {% set unclamped = internal + [base_stop_heat_offset - (living_overheat_diff | float(0)), max_stop_heat_offset] | max %}
+                {% elif internal_at_unit_hot %}
+                  {% set unclamped = internal + max_stop_heat_offset %}
                 {% elif remote_heat < desired_effective - temp_tolerance %}
                   {% set unclamped = internal + boost %}
                 {% elif remote_heat >= desired_effective %}
@@ -293,11 +420,23 @@ actions:
                 {% else %}
                   {% set unclamped = internal %}
                 {% endif %}
-                {% set setpoint = [sam_min_temp, [sam_max_temp, unclamped] | min] | max %}
-                Heating: mode={{ 'fan_only' if living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or (remote_heat - desired_effective) > fan_only_diff else 'heat' }},
-                desired_effective={{ desired_effective | round(1) }}°C (base={{ desired_base | round(1) }}, bedroom_target={{ bedroom_target_raw }}),
+                {% set setpoint = [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max %}
+                {% set heat_mode = 'fan_only' if internal_at_unit_hot or living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or diff > fan_only_diff else 'heat' %}
+                {% if internal_at_unit_hot %}
+                  {% set headline = plan_reason ~ ' · Unit hot, fan only' %}
+                {% elif heat_mode == 'heat' %}
+                  {% set headline = plan_reason ~ ' · Heating' %}
+                {% elif living_above_all_targets %}
+                  {% set headline = plan_reason ~ ' · Warm enough' %}
+                {% elif remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective %}
+                  {% set headline = plan_reason ~ ' · Coasting (mild)' %}
+                {% else %}
+                  {% set headline = plan_reason ~ ' · Fan only' %}
+                {% endif %}
+                {{ headline }} | Heating: mode={{ heat_mode }},
+                control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C (bedroom_target={{ bedroom_target_raw }}),
                 need={{ need | round(1) }}°C, boost={{ boost | round(1) }}°C, setpoint={{ setpoint | round(1) }}°C,
                 remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source }},
-                living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, living_overheat_guard={{ living_above_all_targets }},
+                living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, overheat_guard={{ living_above_all_targets }},
                 fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
     default: []

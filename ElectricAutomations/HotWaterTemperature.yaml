@@ -1,54 +1,64 @@
 alias: Hot water temperature
-description: ""
+description: >-
+  Pipe-mounted temperature sensor monitoring. Sets
+  input_boolean.hot_water_notified when the pipe has been warm for at least 60
+  seconds (sustained hot draw = shower, not a brief rinse). Sends a separate
+  "Hot water, isn't" alarm if the pipe runs cold during use. The flag is cleared
+  by HotWaterReheatTracker after 2 cumulative hours of boiler heating, NOT by
+  the pipe cooling down.
 triggers:
   - trigger: numeric_state
     entity_id:
       - sensor.manifoldtemperature_hot_water_boiler_temp
+    above: 40
     for:
       hours: 0
-      minutes: 0
-      seconds: 10
+      minutes: 3
+      seconds: 0
+    id: sustained_warm
+  - trigger: numeric_state
+    entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
     below: 20
     above: 5
-  - trigger: numeric_state
-    entity_id:
-      - sensor.manifoldtemperature_hot_water_boiler_temp
     for:
       hours: 0
       minutes: 0
       seconds: 10
-    above: 32
+    id: cold_alarm
+    enabled: false
 conditions: []
 actions:
-  - if:
-      - condition: numeric_state
-        entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
-        above: 30
-    then:
-      - action: input_boolean.turn_off
-        metadata: {}
-        target:
-          entity_id: input_boolean.hot_water_notified
-        data: {}
-    else:
-      - if:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: sustained_warm
           - condition: state
             entity_id: input_boolean.hot_water_notified
-            state:
-              - "off"
-        then:
+            state: "off"
+        sequence:
           - action: input_boolean.turn_on
-            metadata: {}
             target:
               entity_id: input_boolean.hot_water_notified
-            data: {}
-          - action: notify.persistent_notification
-            metadata: {}
+          - action: logbook.log
             data:
-              message: "Hot water, isn't. Alarm: 1"
+              name: Hot Water
+              message: >-
+                Sustained warm pipe (>32°C for 60s) detected — tank likely
+                depleted. Reheat timer started (2h cumulative).
+          - action: notify.persistent_notification
+            data:
+              message: "Hot water used. Alarm: 1"
               data:
                 tag: hot_water
                 uri: /dashboard-dash/boiler
+      - conditions:
+          - condition: trigger
+            id: cold_alarm
+          - condition: switch.is_on
+            target:
+              entity_id: input_boolean.hot_water_notified
+            options: {}
+        sequence:
           - device_id: 911ce9be1f83a09b179821cb2c9c0de6
             domain: mobile_app
             type: notify

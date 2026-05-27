@@ -1,20 +1,32 @@
 alias: Hot Water on Cheap Electricity
 description: >-
   Price-optimised hot water boiler control (1500W, 100L).
-  Deterministic daily schedule computed from today's Nordpool prices:
-    - Heats during the 2 cheapest hours within 00:00-05:59 (guaranteed
-      morning reheat — this is the fix for the rank-rollover bug at midnight)
-    - Heats during the 4 cheapest hours within 06:00-23:59
-    - = 6 hours total heating per day, always at the cheapest prices,
-      always with at least 2 overnight hours.
-  Pre-evening reheat: if hot_water_notified is on and it's before 18:00,
-    additionally heats during the 2 cheapest hours in [now, 18:00) so the
-    tank is hot in time for an evening shower. Auto-disengages when the
-    pipe sensor sees warm water again (flag cleared by HotWaterTemperature).
+
+  Weekday (Mon-Fri):
+    - 2 cheapest hours within 00:00-05:59 (guaranteed overnight reheat —
+      fixes the rank-rollover bug at midnight)
+    - 4 cheapest hours within 06:00-23:59 (daytime top-up)
+    - Pre-evening reheat: if hot_water_notified is on and it's before
+      18:00, additionally heats during the 2 cheapest hours in
+      [now, 18:00) so the tank is hot in time for an evening shower.
+
+  Saturday:
+    - ON 00:00-19:00 EXCEPT the 4 most expensive hours within that window
+      (~15h heating, weekend usage tends to be heavier and less predictable
+      so we err on the side of always-hot)
+    - 19:00 onward: off (no scheduled evening heat — Sunday's all-day rule
+      kicks in at midnight anyway)
+
   Sunday: ON all day unless holiday mode.
   Holiday mode: no scheduled heating (manual override still works).
-  Manual override: 3 hours when someone toggles the switch in the UI.
-  Fallback (if Nordpool data unavailable): heats 01:00-04:00.
+  Manual override (2h): triggered either by pressing
+    input_button.hot_water_boost_2h (handled by HotWaterBoost.yaml) or
+    by physically toggling switch.smart_plug_2_socket_1 ON during a
+    scheduled-OFF hour. The override path here covers the latter case;
+    the boost button path is owned by HotWaterBoost.yaml. Detection is
+    schedule-based (not user_id based) for reliability across all
+    sources of switch toggles (UI, physical button, voice, etc.).
+  Fallback (Nordpool data unavailable): heats 01:00-04:00.
 triggers:
   - trigger: time_pattern
     minutes: "/15"
@@ -31,25 +43,12 @@ triggers:
     attribute: raw_today
 conditions: []
 actions:
-  - if:
-      - condition: trigger
-        id: manual_on
-      - condition: template
-        value_template: "{{ trigger.from_state.state == 'off' }}"
-      - condition: template
-        value_template: "{{ trigger.to_state.context.user_id is not none }}"
-    then:
-      - action: input_datetime.set_datetime
-        target:
-          entity_id: input_datetime.hot_water_manual_override_until
-        data:
-          datetime: "{{ (now() + timedelta(hours=3)).isoformat() }}"
-      - stop: "Hot water manually turned on — override active for 3 hours"
   - variables:
-      current_hour: "{{ now().hour | int }}"
+      is_saturday: "{{ now().weekday() == 5 }}"
       is_sunday: "{{ now().weekday() == 6 }}"
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
       shower_detected: "{{ is_state('input_boolean.hot_water_notified', 'on') }}"
+      reheat_minutes_remaining: "{{ states('input_number.hot_water_reheat_minutes_remaining') | int(0) }}"
       manual_override_active: >-
         {% set override_time = states('input_datetime.hot_water_manual_override_until') %}
         {% if override_time in ['unknown', 'unavailable', 'none', ''] %}
@@ -58,22 +57,43 @@ actions:
           {{ now().timestamp() < (override_time | as_datetime | as_local).timestamp() }}
         {% endif %}
       today_raw: "{{ state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] }}"
+      price_slot_count: "{{ today_raw | length }}"
       hourly_prices: >-
-        {% set ns = namespace(hours=[], accum=0.0, count=0, idx=0) %}
+        {% set sums = namespace(values=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) %}
+        {% set counts = namespace(values=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) %}
+        {% set ns = namespace(valid_idx=0, slots_per_hour=1) %}
+        {% if (today_raw | length) >= 72 %}
+          {% set ns.slots_per_hour = 4 %}
+        {% elif (today_raw | length) >= 36 %}
+          {% set ns.slots_per_hour = 2 %}
+        {% endif %}
         {% for slot in today_raw %}
           {% if slot is mapping and 'value' in slot %}
-            {% set ns.accum = ns.accum + (slot['value'] | float(0)) %}
-            {% set ns.count = ns.count + 1 %}
-            {% if ns.count == 4 %}
-              {% set ns.hours = ns.hours + [{'hour': ns.idx, 'avg': ns.accum / ns.count}] %}
-              {% set ns.accum = 0 %}
-              {% set ns.count = 0 %}
-              {% set ns.idx = ns.idx + 1 %}
+            {% set start = slot.get('start') %}
+            {% if start is not none %}
+              {% set hour = (start | as_datetime | as_local).hour | int(0) %}
+            {% else %}
+              {% set hour = (ns.valid_idx // ns.slots_per_hour) | int(0) %}
+              {% if hour > 23 %}
+                {% set hour = 23 %}
+              {% endif %}
             {% endif %}
+            {% set val = slot['value'] | float(0) %}
+            {% set old_sum = sums.values[hour] %}
+            {% set old_count = counts.values[hour] %}
+            {% set sums.values = sums.values[:hour] + [old_sum + val] + sums.values[hour + 1:] %}
+            {% set counts.values = counts.values[:hour] + [old_count + 1] + counts.values[hour + 1:] %}
+            {% set ns.valid_idx = ns.valid_idx + 1 %}
           {% endif %}
         {% endfor %}
-        {{ ns.hours }}
-      has_today_data: "{{ hourly_prices | length >= 20 }}"
+        {% set out = namespace(hours=[]) %}
+        {% for hour in range(0, 24) %}
+          {% if counts.values[hour] > 0 %}
+            {% set out.hours = out.hours + [{'hour': hour, 'avg': sums.values[hour] / counts.values[hour]}] %}
+          {% endif %}
+        {% endfor %}
+        {{ out.hours }}
+      has_today_data: "{{ 1 if (hourly_prices | length) >= 20 else 0 }}"
       cheapest_2_overnight: >-
         {% set overnight = hourly_prices | selectattr('hour', 'lt', 6) | list %}
         {% set sorted_n = overnight | sort(attribute='avg') %}
@@ -83,23 +103,46 @@ actions:
         {% set sorted_d = daytime | sort(attribute='avg') %}
         {{ sorted_d[:4] | map(attribute='hour') | list }}
       cheapest_2_pre_evening: >-
-        {% if shower_detected and current_hour < 18 %}
+        {% set ch = now().hour %}
+        {% if shower_detected and ch < 18 %}
           {% set window = hourly_prices
-              | selectattr('hour', 'ge', current_hour)
+              | selectattr('hour', 'ge', ch)
               | selectattr('hour', 'lt', 18) | list %}
           {% set sorted_w = window | sort(attribute='avg') %}
           {{ sorted_w[:2] | map(attribute='hour') | list }}
         {% else %}
           []
         {% endif %}
-      in_cheap_overnight: "{{ current_hour in cheapest_2_overnight }}"
-      in_cheap_daytime: "{{ current_hour in cheapest_4_daytime }}"
-      in_cheap_pre_evening: "{{ current_hour in cheapest_2_pre_evening }}"
-      scheduled_heat: >-
-        {% if has_today_data %}
-          {{ in_cheap_overnight or in_cheap_daytime or in_cheap_pre_evening }}
+      expensive_4_saturday: >-
+        {% set saturday_window = hourly_prices | selectattr('hour', 'lt', 19) | list %}
+        {% set sorted_h = saturday_window | sort(attribute='avg', reverse=true) %}
+        {{ sorted_h[:4] | map(attribute='hour') | list }}
+      in_cheap_overnight: "{{ now().hour in cheapest_2_overnight }}"
+      in_cheap_daytime: "{{ now().hour in cheapest_4_daytime }}"
+      in_cheap_pre_evening: "{{ now().hour in cheapest_2_pre_evening }}"
+      minutes_until_18: >-
+        {% if now().hour >= 18 %}
+          0
         {% else %}
-          {{ current_hour >= 1 and current_hour < 4 }}
+          {{ (((18 - now().hour) * 60) - now().minute) | int(0) }}
+        {% endif %}
+      must_heat_now_for_deadline: >-
+        {% set mins_left = 0 if now().hour >= 18 else (((18 - now().hour) * 60) - now().minute) %}
+        {{ shower_detected and now().hour < 18
+           and reheat_minutes_remaining > 0
+           and mins_left <= reheat_minutes_remaining }}
+      saturday_heating_hour: >-
+        {{ is_saturday and now().hour < 19
+           and now().hour not in expensive_4_saturday }}
+      weekday_scheduled_heat: >-
+        {% if has_today_data | int(0) == 1 %}
+          {{ in_cheap_overnight or in_cheap_daytime or in_cheap_pre_evening or must_heat_now_for_deadline }}
+        {% else %}
+          {% if shower_detected and now().hour < 18 and reheat_minutes_remaining > 0 %}
+            true
+          {% else %}
+            {{ now().hour >= 1 and now().hour < 4 }}
+          {% endif %}
         {% endif %}
       should_heat: >-
         {% if manual_override_active %}
@@ -108,9 +151,37 @@ actions:
           false
         {% elif is_sunday %}
           true
+        {% elif is_saturday %}
+          {% if has_today_data | int(0) == 1 %}
+            {{ saturday_heating_hour }}
+          {% else %}
+            {{ now().hour < 19 }}
+          {% endif %}
         {% else %}
-          {{ scheduled_heat }}
+          {{ weekday_scheduled_heat }}
         {% endif %}
+  - if:
+      - condition: trigger
+        id: manual_on
+      - condition: template
+        value_template: "{{ trigger.from_state is not none and trigger.from_state.state == 'off' }}"
+      - condition: template
+        value_template: "{{ (manual_override_active | string | lower) not in ['true', 'on', '1'] }}"
+      - condition: template
+        value_template: "{{ (should_heat | string | lower) not in ['true', 'on', '1'] }}"
+    then:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.hot_water_manual_override_until
+        data:
+          datetime: "{{ (now() + timedelta(hours=2)).isoformat() }}"
+      - action: logbook.log
+        data:
+          name: Hot Water
+          message: >-
+            Switch turned on externally during off-schedule hour
+            ({{ now().hour }}:00) — 2h override applied.
+      - stop: "Manual switch-on detected — override active for 2 hours"
   - if:
       - condition: template
         value_template: "{{ should_heat }}"
@@ -138,13 +209,19 @@ actions:
     data:
       name: Hot Water
       message: >-
-        should_heat={{ should_heat }}, hour={{ current_hour }},
+        should_heat={{ should_heat }}, hour={{ now().hour }},
+        slots={{ price_slot_count }},
         cheap_overnight={{ cheapest_2_overnight }},
         cheap_daytime={{ cheapest_4_daytime }},
         cheap_pre_evening={{ cheapest_2_pre_evening }},
+        expensive_sat={{ expensive_4_saturday }},
         in_overnight={{ in_cheap_overnight }}, in_daytime={{ in_cheap_daytime }},
         in_pre_evening={{ in_cheap_pre_evening }},
-        sunday={{ is_sunday }}, holiday={{ holiday_mode }},
-        shower={{ shower_detected }}, override={{ manual_override_active }},
-        has_data={{ has_today_data }}
+        mins_to_18={{ minutes_until_18 }},
+        reheat_remaining={{ reheat_minutes_remaining }},
+        force_deadline={{ must_heat_now_for_deadline }},
+        sat_heating={{ saturday_heating_hour }},
+        saturday={{ is_saturday }}, sunday={{ is_sunday }},
+        holiday={{ holiday_mode }}, shower={{ shower_detected }},
+        override={{ manual_override_active }}, has_data={{ has_today_data }}
 mode: single

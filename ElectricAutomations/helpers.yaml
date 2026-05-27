@@ -88,6 +88,15 @@ input_number:
     unit_of_measurement: "°C"
     icon: mdi:weather-partly-cloudy
 
+  # ---- Hot water reheat tracking -----------------------------------------
+  hot_water_reheat_minutes_remaining:
+    name: Hot Water Reheat Minutes Remaining
+    min: 0
+    max: 240
+    step: 1
+    unit_of_measurement: "min"
+    icon: mdi:timer-sand
+
 input_datetime:
   # ---- Hot water ----------------------------------------------------------
   hot_water_manual_override_until:
@@ -106,6 +115,22 @@ input_text:
     name: Sam HVAC Status
     max: 255
 
+  # Short plan reason (DaytimeCheapHeat) — why desired/control are set.
+  sam_hvac_reason:
+    name: Sam HVAC Reason
+    max: 48
+    initial: Daytime economy 16°C
+
+  # Headline for dashboards / MiniDisplay screensaver (reason · action).
+  sam_hvac_headline:
+    name: Sam HVAC Headline
+    max: 64
+
+  # Pre-warm decision maths (DaytimeCheapHeat) — k, h, forecast, skip/boost why.
+  sam_preheat_calc:
+    name: Sam Preheat Calculation
+    max: 255
+
   house_thermal_status:
     name: House Thermal Model Status
     max: 255
@@ -122,3 +147,43 @@ input_boolean:
   daytime_cheap_7_21:
     name: Daytime Cheap 7-21
     icon: mdi:cash-clock
+
+  # ---- Lily cat feed counter (KitchenDetectorer Button 7) ---------------
+  lily_pouch_count:
+    name: Lily Pouch Count
+    min: 0
+    max: 20
+    step: 0.5
+    icon: mdi:cat
+    initial: 0
+
+input_datetime:
+  lily_last_feed:
+    name: Lily Last Feed
+    has_date: true
+    has_time: true
+    icon: mdi:cat
+
+input_button:
+  # ---- Hot water ----------------------------------------------------------
+  hot_water_boost_2h:
+    name: Hot Water Boost (2h)
+    icon: mdi:water-boiler-auto
+
+template:
+  - sensor:
+      - name: Lily Time Since Feed
+        unique_id: lily_time_since_feed
+        icon: mdi:cat
+        state: >-
+          {% set dt = states('input_datetime.lily_last_feed') %}
+          {% if dt in ['unknown', 'unavailable', ''] or dt.startswith('1970') %}
+            --
+          {% else %}
+            {% set delta = (now() - as_datetime(dt)).total_seconds() | int(0) %}
+            {% if delta < 0 %}
+              --
+            {% else %}
+              {{ (delta // 3600) | int }}:{{ '%02d' | format((delta % 3600) // 60) }}
+            {% endif %}
+          {% endif %}

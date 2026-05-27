@@ -1,0 +1,64 @@
+alias: Hot Water Reheat Tracker
+description: >-
+  Tracks cumulative boiler heating time after a hot water draw is
+  detected. When input_boolean.hot_water_notified turns on, sets the
+  countdown to 120 minutes. Each minute the boiler switch is on, the
+  counter is decremented by 1. When it reaches 0, clears the flag
+  (= "tank has had 2h of reheat, considered full again").
+  This decouples the flag from the pipe sensor, so a brief warm
+  draw mid-reheat (e.g. someone washing hands) no longer cancels
+  the reheat schedule prematurely.
+triggers:
+  - trigger: state
+    entity_id: input_boolean.hot_water_notified
+    to: "on"
+    id: flag_set
+  - trigger: time_pattern
+    minutes: "*"
+    id: tick
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: flag_set
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.hot_water_reheat_minutes_remaining
+            data:
+              value: 120
+      - conditions:
+          - condition: trigger
+            id: tick
+          - condition: state
+            entity_id: input_boolean.hot_water_notified
+            state: "on"
+          - condition: state
+            entity_id: switch.smart_plug_2_socket_1
+            state: "on"
+        sequence:
+          - variables:
+              remaining: >-
+                {{ states('input_number.hot_water_reheat_minutes_remaining')
+                   | float(0) }}
+              new_value: "{{ [remaining - 1, 0] | max }}"
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.hot_water_reheat_minutes_remaining
+            data:
+              value: "{{ new_value }}"
+          - if:
+              - condition: template
+                value_template: "{{ new_value | float(0) <= 0 }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.hot_water_notified
+              - action: logbook.log
+                data:
+                  name: Hot Water
+                  message: >-
+                    2h cumulative reheat completed — tank considered full,
+                    flag cleared.
+mode: single

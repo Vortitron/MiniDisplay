@@ -1,4 +1,18 @@
-1,All lights in "Bio"
-2,All lights in "Living Room"
-3,All lights in "Bedroom"
-4,switch.smart_plug_2_socket_1 (hot water)
+Button,Label,Key,Function,Target / Entity,Notes
+
+1,Living,0,"Normal: lights state/toggle (short) / 100% white (long).  Snake-select mode: 1-minute timer.",light.toggle/turn_on living_room OR arm_snake_timer mins=1,"on_press first checks millis() < snake_select_until_ms. If yes, snake-arm script runs; otherwise records press_start_b1 + arms long_press_b1. Short (<0.8s normal): 1st press shows state ""Liv  on/off"" via binary_sensor.living_room_any_light_on, repeat within 8s toggles. The togL feedback gets auto-replaced with the new state once HA reports back via the sensor's on_state callback. Long (>=0.8s normal): brightness 100% color_temp 4000K."
+
+2,Bio,1,"Normal: lights state/toggle (short) / 100% white (long).  Snake-select mode: 2-minute timer.",light.toggle/turn_on bio OR arm_snake_timer mins=2,"Same wrapper pattern as Button 1, including the on_state-driven togL->new-state refresh."
+
+3,Bedroom,2,"Normal: lights state/toggle (short) / 100% white (long).  Snake-select mode: 3-minute timer.",light.toggle/turn_on bedroom OR arm_snake_timer mins=3,Same wrapper pattern as Buttons 1-2.
+
+4,Parents,3,"Normal: lights state/toggle (short) / 100% white (long).  Snake-select mode: 4-minute timer.",light.toggle/turn_on parent_s_bedroom OR arm_snake_timer mins=4,"Now matches the B1-B3 lights pattern (was previously a single-press 'turn off' that didn't show state). Uses press_start_b4 + long_press_b4 + binary_sensor.parents_bedroom_any_light_on, with the same on_state togL->state refresh."
+
+5,Cal,4,"Normal: calendar cycle (short) / open snake select-window (long).  Snake-select mode: 5-minute timer.",calendar OR open snake select OR arm_snake_timer mins=5,"on_press wrapper: in select mode acts as ""5 minutes""; otherwise on_release runs the normal short path. Long-press B5 sets snake_select_until_ms = millis() + 5000 (and shows the ""btn 1-8N"" prompt on the display) or cancels a running snake. While in select mode the calendar jump is skipped."
+
+6,Set Tmp,5,"Normal: inside-temp / 23 / 20 / 17 cycle (short).  Hot water boost 2h (long).  Snake-select: 6-minute timer.",input_number.sam_desired_temperature OR input_button.hot_water_boost_2h OR arm_snake_timer mins=6,"Short press on_release runs temp cycle. Long press (>=800ms via long_press_b6) fires hot_water_boost_2h and shows ""hot ON "" for 3s."
+
+7,Lily,6,"Normal: +0.5 pouch (short) / -1 pouch long (floor 0).  Snake-select: 7-minute timer.",input_number.lily_pouch_count OR arm_snake_timer mins=7,"Short press adds 0.5 to lily_pouch_count; display shows time-since on left and count on right for 4s. Long press subtracts 1. Count resets at local midnight."
+
+8,Notify,7,"Normal: notification cycle (short) / dismiss (long).  Snake-select: 8-minute timer.",persistent_notification.dismiss OR arm_snake_timer mins=8,"on_press wrapper: in select mode acts as ""8 minutes""; otherwise records press_start_b8 + arms long_press_b8. Short press extends notify_hold_until_ms for full scroll."
+

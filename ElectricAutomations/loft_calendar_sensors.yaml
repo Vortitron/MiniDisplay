@@ -1,0 +1,48 @@
+# Multi-event feed for calendar.handl_f on the Loft LCD.
+# The calendar entity only exposes one "next" event via attributes; this
+# sensor uses calendar.get_events so tomorrow's family events appear from
+# 18:00 (filtered on-device in NewLoftWayC3.yaml, same window as Kitchen).
+#
+# Include from configuration.yaml, e.g.:
+#   homeassistant:
+#     packages:
+#       loft_calendar: !include MiniDisplay/ElectricAutomations/loft_calendar_sensors.yaml
+
+template:
+  - trigger:
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: homeassistant
+        event: start
+      - platform: state
+        entity_id: calendar.handl_f
+    action:
+      - action: calendar.get_events
+        target:
+          entity_id: calendar.handl_f
+        data:
+          start_date_time: "{{ (now() - timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S') }}"
+          end_date_time: "{{ (now() + timedelta(days=4)).strftime('%Y-%m-%d %H:%M:%S') }}"
+        response_variable: handl_ev
+    sensor:
+      - name: "Handl F Loft Calendar Slots"
+        unique_id: handl_f_loft_calendar_slots
+        icon: mdi:calendar-account
+        state: >-
+          {% set events = handl_ev.get('calendar.handl_f', {}).get('events', []) %}
+          {{ events | length }}
+        attributes:
+          slots: >-
+            {% set events = handl_ev.get('calendar.handl_f', {}).get('events', []) %}
+            {% set ns = namespace(parts=[]) %}
+            {% for e in events %}
+              {% set title = e.summary | default('', true) | string
+                 | replace('\t', ' ') | replace('|', '/')
+                 | replace('||', '/') %}
+              {% set start = e.start | default('', true) | string %}
+              {% set end = e.end | default('', true) | string %}
+              {% if title and start %}
+                {% set ns.parts = ns.parts + [title ~ '\t' ~ start ~ '\t' ~ end] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.parts | join('||') }}

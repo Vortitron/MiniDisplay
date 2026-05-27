@@ -190,9 +190,16 @@ display:
         it.print(0 + offset_x, y_offset + offset_y, id(default_font), line_buf);
         y_offset += 12;
 
-        // Line 4: Night or Day info (only show day rank if < 12)
+        // Line 4: Sam HVAC headline (why heating/coasting), else Night/Day info
         int hour = time.hour;
-        if (hour < 6 || hour >= 22) {
+        if (id(sam_hvac_headline).has_state() && id(sam_hvac_headline).state.length() > 0) {
+          std::string sam_line = id(sam_hvac_headline).state;
+          if (sam_line.length() > 21) {
+            it.print(0 + offset_x, y_offset + offset_y, id(default_font), (sam_line.substr(0, 18) + "...").c_str());
+          } else {
+            it.print(0 + offset_x, y_offset + offset_y, id(default_font), sam_line.c_str());
+          }
+        } else if (hour < 6 || hour >= 22) {
           // Night time - show "Night" with optional "School"
           bool is_school_day = id(school_day).state;
           if (is_school_day) {
@@ -496,27 +503,39 @@ display:
           it.print(0, 26, id(default_font), buf);
         }
       } else if (id(current_entity_index) == 5) {
-        // Climate entity - show target temperature with pending support
+        // Climate entity - headline (why) then target temperature
+        if (id(sam_hvac_headline).has_state() && id(sam_hvac_headline).state.length() > 0) {
+          std::string headline = id(sam_hvac_headline).state;
+          if (headline.length() > 21) {
+            it.print(0, 26, id(default_font), (headline.substr(0, 18) + "...").c_str());
+          } else {
+            it.print(0, 26, id(default_font), headline.c_str());
+          }
+        }
+        bool sam_has_headline = id(sam_hvac_headline).has_state() && id(sam_hvac_headline).state.length() > 0;
+        int sam_y_target = sam_has_headline ? 38 : 26;
+        int sam_y_env = sam_has_headline ? 50 : 38;
+        int sam_y_in = sam_has_headline ? 50 : 50;
         if (id(pending_temperature) >= 0) {
-          // Show pending temperature in brackets
           snprintf(buf, sizeof(buf), "Target: [%.1fC]", id(pending_temperature));
-          it.print(0, 26, id(default_font), buf);
+          it.print(0, sam_y_target, id(default_font), buf);
         } else if (id(sam_hvac_target_temp).has_state()) {
-          // Show real temperature from HA
           float target_temp = id(sam_hvac_target_temp).state;
           snprintf(buf, sizeof(buf), "Target: %.1fC", target_temp);
-          it.print(0, 26, id(default_font), buf);
+          it.print(0, sam_y_target, id(default_font), buf);
         }
-        if (id(sam_outside_temperature).has_state()) {
-          float outside_temp = id(sam_outside_temperature).state;
-          snprintf(buf, sizeof(buf), "Outside: %.1fC", outside_temp);
-          it.print(0, 38, id(default_font), buf);  // Moved up 4 pixels
-        }
-        if (id(th_sensor_temperature).has_state() && id(th_sensor_humidity).has_state()) {
-          float indoor_temp = id(th_sensor_temperature).state;
-          float humidity = id(th_sensor_humidity).state;
-          snprintf(buf, sizeof(buf), "In: %.1fC %.0f%%", indoor_temp, humidity);
-          it.print(0, 50, id(default_font), buf);  // Moved up 4 pixels
+        if (sam_has_headline && id(sam_outside_temperature).has_state() && id(th_sensor_temperature).has_state() && id(th_sensor_humidity).has_state()) {
+          snprintf(buf, sizeof(buf), "Out:%.0f In:%.0f %.0f%%", id(sam_outside_temperature).state, id(th_sensor_temperature).state, id(th_sensor_humidity).state);
+          it.print(0, sam_y_env, id(default_font), buf);
+        } else {
+          if (id(sam_outside_temperature).has_state()) {
+            snprintf(buf, sizeof(buf), "Outside: %.1fC", id(sam_outside_temperature).state);
+            it.print(0, sam_y_env, id(default_font), buf);
+          }
+          if (id(th_sensor_temperature).has_state() && id(th_sensor_humidity).has_state()) {
+            snprintf(buf, sizeof(buf), "In: %.1fC %.0f%%", id(th_sensor_temperature).state, id(th_sensor_humidity).state);
+            it.print(0, sam_y_in, id(default_font), buf);
+          }
         }
       } else if (id(current_entity_index) == 6) {
         // Hot Water - show boiler temperature and energy price
@@ -876,6 +895,16 @@ binary_sensor:
       - delayed_off: 10s
 
 text_sensor:
+  - platform: homeassistant
+    id: sam_hvac_headline
+    entity_id: input_text.sam_hvac_headline
+    on_value:
+      then:
+        - lambda: |-
+            if (id(screensaver_active) || id(current_entity_index) == 5) {
+              id(update_display).execute();
+            }
+
   # Home Assistant notification registry (includes alarm level and ordering)
   - platform: homeassistant
     id: minidisplay_notification_registry

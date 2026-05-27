@@ -1,6 +1,125 @@
 esphome:
   name: kitchen-detectorer
   friendly_name: Kitchen Detectorer
+  # Install a microphone data-callback at boot that streams samples into
+  # globals so the rest of the config (sensors, beep detection, on-screen
+  # level meter) has a single source of truth without an external .h file.
+  on_boot:
+    - priority: 100
+      then:
+        - lambda: |-
+            if (id(mic_callback_installed)) return;
+            id(mic_callback_installed) = true;
+            // INMP441 -> 32-bit MSB-aligned slots. Each sample is 4 bytes
+            // little-endian; the upper 24 bits are the audio data and the
+            // lower 8 bits are zero. Shifting right 16 gives an int16_t
+            // equivalent so the existing threshold (~5000) still applies.
+            //
+            // For diagnosing dead-mic / wrong-channel issues, the first 5
+            // chunks log a hex dump of the first 16 bytes. If they're all
+            // 00 -> wiring or wrong channel; if there's structure but
+            // values are tiny -> bits_per_sample mismatch; if values move
+            // with sound -> mic is alive.
+            id(mic).add_data_callback([](const std::vector<uint8_t> &data) {
+              static int debug_chunks_remaining = 5;
+              if (debug_chunks_remaining > 0 && data.size() >= 16) {
+                debug_chunks_remaining--;
+                ESP_LOGI("mic_raw",
+                         "chunk size=%u  bytes[0..15]=%02X %02X %02X %02X "
+                         "%02X %02X %02X %02X %02X %02X %02X %02X "
+                         "%02X %02X %02X %02X",
+                         (unsigned) data.size(),
+                         data[0], data[1], data[2], data[3],
+                         data[4], data[5], data[6], data[7],
+                         data[8], data[9], data[10], data[11],
+                         data[12], data[13], data[14], data[15]);
+              }
+              const size_t num_samples = data.size() / sizeof(int32_t);
+              if (num_samples == 0) return;
+              const int32_t *samples32 =
+                  reinterpret_cast<const int32_t *>(data.data());
+              int32_t peak = 0;
+              double sum_sq = 0.0;
+              // Zero-crossing counting gives us a cheap frequency proxy.
+              // The user's airfryer beep is ~3-4 kHz (high-pitched chirp),
+              // which at our 16 kHz sample rate produces ~0.4..0.5 sign
+              // changes per sample. Voice (~150-300 Hz), thuds, drawer
+              // slams, and fridge compressor hum all sit below 0.1.
+              // We track the prev_sample sign across chunks via the
+              // local last_sign static so a chunk boundary doesn't lose
+              // a zero-crossing.
+              static int last_sign = 0;
+              size_t zero_crossings = 0;
+              for (size_t i = 0; i < num_samples; i++) {
+                const int32_t s = samples32[i] >> 16;
+                const int32_t a = s >= 0 ? s : -s;
+                if (a > peak) peak = a;
+                sum_sq += (double) s * (double) s;
+                const int sign = (s > 0) ? 1 : (s < 0 ? -1 : 0);
+                if (sign != 0 && last_sign != 0 && sign != last_sign) {
+                  zero_crossings++;
+                }
+                if (sign != 0) last_sign = sign;
+              }
+              const float rms =
+                  (float) std::sqrt(sum_sq / (double) num_samples);
+              const float zc_ratio = (float) zero_crossings
+                                   / (float) num_samples;
+              id(mic_peak_value) = (float) peak;
+              id(mic_rms_value) = rms;
+              id(mic_zc_value) = zc_ratio;
+              if ((float) peak > id(mic_peak_window)) {
+                id(mic_peak_window) = (float) peak;
+              }
+              if ((float) peak > id(mic_peak_session)) {
+                id(mic_peak_session) = (float) peak;
+              }
+              if (zc_ratio > id(mic_zc_window_max)) {
+                id(mic_zc_window_max) = zc_ratio;
+              }
+              // Lag-4 correlation: at 16 kHz sample rate a ~4 kHz tone
+              // repeats every 4 samples, so in-phase samples four apart
+              // correlate strongly. Normalise by peak^2 so quiet chunks
+              // don't false-trigger. The user measured the airfryer beep
+              // at 4000 Hz - this is more reliable than ZC alone when the
+              // mic is distant or reflections dull the pitch.
+              float tone4k = 0.0f;
+              if (num_samples > 4 && peak > 0) {
+                for (size_t i = 4; i < num_samples; i++) {
+                  const float a = (float) (samples32[i] >> 16);
+                  const float b = (float) (samples32[i - 4] >> 16);
+                  tone4k += a * b;
+                }
+                tone4k /= ((float) peak * (float) peak * (float) num_samples);
+              }
+              id(mic_tone_4k_value) = tone4k;
+              if (tone4k > id(mic_tone_4k_window_max)) {
+                id(mic_tone_4k_window_max) = tone4k;
+              }
+              id(mic_samples_total) += num_samples;
+            });
+            ESP_LOGI("mic", "Microphone data callback installed (32-bit slot, channel=left)");
+    - priority: -100
+      then:
+        # 2 s lets the i2s_audio task fully come up. Calling
+        # id(mic).start() any earlier crashes with a null-semaphore assert
+        # in xQueueSemaphoreTake (the I2S read task isn't built yet).
+        - delay: 2s
+        - if:
+            condition:
+              lambda: 'return id(mic_capture_enabled);'
+            then:
+              - lambda: |-
+                  if (!id(mic).is_running()) id(mic).start();
+              - switch.template.publish:
+                  id: mic_capture_switch
+                  state: ON
+              - logger.log: "Microphone capture started (continuous)"
+            else:
+              - switch.template.publish:
+                  id: mic_capture_switch
+                  state: OFF
+              - logger.log: "Microphone capture left stopped (user preference)"
 
 esp32:
   board: esp32dev
@@ -15,7 +134,9 @@ wifi:
   password: !secret wifi_password
   power_save_mode: NONE
   fast_connect: false
-  reboot_timeout: 0s
+  # Self-recover from prolonged WiFi/AP outages. Without this the device can
+  # appear "stuck" on whatever screen was last drawn until manually rebooted.
+  reboot_timeout: 10min
   manual_ip:
     static_ip: 192.168.1.34
     gateway: 192.168.1.1
@@ -24,6 +145,9 @@ wifi:
 api:
   encryption:
     key: !secret kitchendetectorer_encryption_key
+  # Reboot if Home Assistant API is unreachable for 15min - prevents the
+  # display from staying frozen on stale data after long disconnects.
+  reboot_timeout: 15min
 
 ota:
   platform: esphome
@@ -44,6 +168,52 @@ switch:
     restore_mode: ALWAYS_ON
     internal: true
 
+  # HA-controllable mic capture switch. The actual start happens in
+  # on_boot priority -100 (after the i2s_audio task is built); this switch
+  # only updates the persisted preference and starts/stops the mic when
+  # toggled at runtime. restore_mode: DISABLED is essential - the previous
+  # RESTORE_DEFAULT_ON fired turn_on_action during the switch's own setup,
+  # which crashed because the mic component wasn't ready yet.
+  - platform: template
+    name: "Microphone Capture"
+    id: mic_capture_switch
+    optimistic: true
+    restore_mode: DISABLED
+    turn_on_action:
+      - lambda: |-
+          id(mic_capture_enabled) = true;
+          if (!id(mic).is_running()) id(mic).start();
+      - logger.log: "Microphone capture started"
+    turn_off_action:
+      - lambda: |-
+          id(mic_capture_enabled) = false;
+          if (id(mic).is_running()) id(mic).stop();
+      - logger.log: "Microphone capture stopped"
+
+  # Airfryer auto-detection master switch. Defaults ON after the 4 kHz
+  # tone-metric rework; turn OFF in HA if you get false positives. With
+  # this switch OFF, binary_sensor.airfryer_beep ALWAYS reads false. The "Test
+  # Airfryer Beep" HA button bypasses the binary sensor entirely
+  # (calls trigger_airfryer_beep_action directly), so the test workflow
+  # still works regardless of switch state.
+  - platform: template
+    name: "Airfryer Detection"
+    id: airfryer_detect_switch
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    icon: "mdi:radar"
+    turn_on_action:
+      - lambda: |-
+          id(airfryer_detect_enabled) = true;
+          id(beep_pattern_count) = 0;
+          id(last_valid_beep_ms) = 0;
+      - logger.log: "Airfryer detection ENABLED"
+    turn_off_action:
+      - lambda: |-
+          id(airfryer_detect_enabled) = false;
+          id(beep_pattern_count) = 0;
+      - logger.log: "Airfryer detection DISABLED"
+
 i2s_audio:
   i2s_lrclk_pin: GPIO15
   i2s_bclk_pin: GPIO14
@@ -54,6 +224,46 @@ microphone:
   i2s_din_pin: GPIO32
   adc_type: external
   sample_rate: 16000
+  # INMP441-specific:
+  #  * The chip outputs 24-bit signed PCM MSB-aligned in a 32-bit slot.
+  #    Reading 16-bit slots returns zeros because the chip drives the
+  #    upper portion of a wider slot we weren't sampling.
+  #  * The L/R pin selects which I2S slot the chip drives. Wired to GND
+  #    -> "left"; wired to 3V3 -> "right". We default to left here; if
+  #    you've wired L/R to 3V3, change this to "right" and the data will
+  #    appear (this is the most common cause of "mic gives 0").
+  bits_per_sample: 32bit
+  channel: left
+  use_apll: true
+
+# Time component for date/time display.
+# Stockholm timezone is required so localtime/mktime in the lambdas below
+# correctly translate calendar event ISO timestamps to/from local time.
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    timezone: Europe/Stockholm
+    on_time:
+      # Lily pouch counter resets at local midnight (feeding log for
+      # "little and often" pouches starts fresh each day).
+      - seconds: 0
+        minutes: 0
+        hours: 0
+        then:
+          - lambda: |-
+              id(lily_pouch_count) = 0.0f;
+              id(lily_last_feed_ms) = 0;
+              ESP_LOGI("lily", "Midnight reset - pouch count cleared");
+          - homeassistant.service:
+              service: input_number.set_value
+              data:
+                entity_id: input_number.lily_pouch_count
+                value: "0"
+          - homeassistant.service:
+              service: input_datetime.set_datetime
+              data:
+                entity_id: input_datetime.lily_last_feed
+                datetime: "1970-01-01 00:00:00"
 
 sensor:
   - platform: ultrasonic
@@ -62,18 +272,90 @@ sensor:
     name: "Espresso Bean Level"
     unit_of_measurement: "cm"
     update_interval: 1s
+    accuracy_decimals: 1
     filters:
+      # The ultrasonic platform returns distance in metres but the rest of
+      # the firmware (and the unit_of_measurement above) treats it as cm,
+      # so convert here once. Single source of truth - everywhere else can
+      # just read id(espresso_bean_level).state and assume centimetres.
+      - lambda: 'return x * 100.0f;'
       - median:
           window_size: 5
           send_every: 1
           send_first_at: 1
     id: espresso_bean_level
+    on_value:
+      then:
+        - lambda: |-
+            // Bean-warning detection. The sensor sits directly above the
+            // hopper, so when the beans are full (or just refilled) they
+            // can touch it - those readings are unreliable. Likewise a
+            // very large distance means the IR cone is missing the bean
+            // pile entirely. The reliable "low/empty" band is 5..12 cm:
+            //   * < 8 cm  : likely full / sensor touched -> ignore.
+            //   * 8..12 cm : low.
+            //   * 12..18 cm: nearly / fully empty.
+            //   * > 18 cm : unreliable (treat as full).
+            // We only flag a warning when the reading stays inside the
+            // 8..18 cm band continuously for BEAN_RELIABLE_MS (~10 s),
+            // which is the duration of one grind cycle. That filters
+            // out transient bean shifts while still raising LED8 when
+            // the hopper is genuinely getting empty.
+            static const float BEAN_LOW_CM            =  8.0f;
+            static const float BEAN_MAX_RELIABLE_CM   = 18.0f;
+            static const uint32_t BEAN_RELIABLE_MS    = 10000u;
+            const float v = id(espresso_bean_level).state;
+            const uint32_t now_ms = millis();
+            const bool in_range = (v >= BEAN_LOW_CM && v <= BEAN_MAX_RELIABLE_CM);
+            if (in_range) {
+              if (id(bean_in_range_since_ms) == 0) {
+                id(bean_in_range_since_ms) = now_ms;
+                ESP_LOGD("beans", "Reading entered low band (%.1f cm) - timer started", v);
+              }
+              if (!id(bean_warning_active) &&
+                  now_ms - id(bean_in_range_since_ms) >= BEAN_RELIABLE_MS) {
+                id(bean_warning_active) = true;
+                ESP_LOGI("beans", "Low-bean warning: %.1f cm sustained for %ums",
+                         v, (unsigned) (now_ms - id(bean_in_range_since_ms)));
+              }
+            } else {
+              if (id(bean_in_range_since_ms) != 0 || id(bean_warning_active)) {
+                ESP_LOGD("beans", "Reading left low band (%.1f cm) - clearing warning", v);
+              }
+              id(bean_in_range_since_ms) = 0;
+              id(bean_warning_active) = false;
+            }
 
-  # Home Assistant sensors
-  - platform: homeassistant
-    id: airfryer_power
-    entity_id: sensor.energy_monitoring_smartplug_power
+  # ----- Microphone level meters -----
+  # Both are kept as template sensors so the airfryer / self-test scripts
+  # have a single place to log mic activity, but they're `internal: true`
+  # because exposing 1 Hz "Changed to <random number>" updates to Home
+  # Assistant fills up the activity / history log and isn't useful now
+  # that the mic is confirmed working. The driving globals (mic_peak_value
+  # / mic_peak_window / mic_rms_value) are still updated by the on_boot
+  # data callback and used directly by the airfryer binary_sensor and the
+  # mic_sample_action script.
+  - platform: template
+    name: "Microphone Peak (window)"
+    id: mic_peak_sensor
+    unit_of_measurement: ""
+    accuracy_decimals: 0
+    update_interval: 1s
     internal: true
+    lambda: |-
+      float v = id(mic_peak_window);
+      id(mic_peak_window) = 0.0f;
+      return v;
+  - platform: template
+    name: "Microphone RMS"
+    id: mic_rms_sensor
+    unit_of_measurement: ""
+    accuracy_decimals: 1
+    update_interval: 1s
+    internal: true
+    lambda: 'return id(mic_rms_value);'
+
+  # ----- Home Assistant sensors -----
   - platform: homeassistant
     id: bio_temp
     entity_id: sensor.bioofficec3_room_temperature
@@ -111,12 +393,127 @@ sensor:
     entity_id: climate.bio_office_heat
     attribute: current_temperature
     internal: true
+  # House thermal model + weather (openweathermap-driven) outputs.
+  # Daily max/min come from HA template sensors (see
+  # ElectricAutomations/forecast_sensors.yaml). The 4-hour average is
+  # written by HouseThermalModel to input_number.forecast_outside_4h.
+  - platform: homeassistant
+    id: forecast_outside_4h
+    entity_id: input_number.forecast_outside_4h
+    internal: true
+  - platform: homeassistant
+    id: forecast_today_max
+    entity_id: sensor.forecast_today_max
+    internal: true
+  - platform: homeassistant
+    id: forecast_tonight_min
+    entity_id: sensor.forecast_tonight_min
+    internal: true
+  - platform: homeassistant
+    id: sam_target_temp
+    entity_id: input_number.sam_desired_temperature
+    internal: true
+  - platform: homeassistant
+    id: lily_pouch_count_ha
+    entity_id: input_number.lily_pouch_count
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(lily_pouch_count_ha).has_state()) {
+              float v = id(lily_pouch_count_ha).state;
+              if (v < 0.0f) v = 0.0f;
+              id(lily_pouch_count) = v;
+            }
+  - platform: homeassistant
+    id: lily_last_feed_ha
+    entity_id: input_datetime.lily_last_feed
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            if (!id(lily_last_feed_ha).has_state()) {
+              return;
+            }
+            const std::string raw = id(lily_last_feed_ha).state;
+            if (raw.empty() || raw == "unknown" || raw == "unavailable" ||
+                raw.find("1970") == 0) {
+              id(lily_last_feed_ms) = 0;
+              return;
+            }
+            std::string s = raw;
+            for (auto &c : s) {
+              if (c == 'T') {
+                c = ' ';
+              }
+            }
+            int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+            if (sscanf(s.c_str(), "%d-%d-%d %d:%d:%d",
+                       &year, &month, &day, &hour, &minute, &second) < 3) {
+              return;
+            }
+            auto now_time = id(homeassistant_time).now();
+            if (!now_time.is_valid()) {
+              return;
+            }
+            ESPTime feed_time = now_time;
+            feed_time.year = year;
+            feed_time.month = month;
+            feed_time.day_of_month = day;
+            feed_time.hour = hour;
+            feed_time.minute = minute;
+            feed_time.second = second;
+            if (!feed_time.is_valid()) {
+              return;
+            }
+            const time_t feed_ts = feed_time.timestamp;
+            const time_t now_ts = now_time.timestamp;
+            if (feed_ts > now_ts) {
+              return;
+            }
+            const uint32_t ago_ms = (uint32_t) ((now_ts - feed_ts) * 1000LL);
+            if (ago_ms <= millis()) {
+              id(lily_last_feed_ms) = millis() - ago_ms;
+            } else {
+              id(lily_last_feed_ms) = millis();
+            }
+  # Optional HA helper to live-tune the airfryer beep peak threshold without
+  # reflashing. Recommended HA config (Configuration > Helpers > Number):
+  #   input_number.airfryer_beep_threshold  min 100, max 32000, step 100
+  # If the helper isn't present, airfryer_beep_threshold keeps its default
+  # initial_value of 5000.
+  - platform: homeassistant
+    id: airfryer_beep_threshold_ha
+    entity_id: input_number.airfryer_beep_threshold
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            float v = id(airfryer_beep_threshold_ha).state;
+            if (v > 0.0f) {
+              id(airfryer_beep_threshold) = v;
+              ESP_LOGI("airfryer", "Beep peak threshold set to %.0f", v);
+            }
+  # Live-tunable zero-crossing (frequency proxy) threshold. Recommended
+  # HA helper:
+  #   input_number.airfryer_zc_threshold  min 0.05, max 0.50, step 0.01
+  # Higher value = "must be more high-pitched to count". 0.20 is the
+  # default (roughly "above ~1.6 kHz tonal"); raise to 0.30 if voice or
+  # plate clinks are still slipping through.
+  - platform: homeassistant
+    id: airfryer_zc_threshold_ha
+    entity_id: input_number.airfryer_zc_threshold
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            float v = id(airfryer_zc_threshold_ha).state;
+            if (v > 0.0f && v < 1.0f) {
+              id(airfryer_zc_threshold) = v;
+              ESP_LOGI("airfryer", "Beep ZC threshold set to %.2f", v);
+            }
 
 text_sensor:
-  - platform: homeassistant
-    id: felix_calendar_event
-    entity_id: calendar.handl_f
-    internal: true
   - platform: homeassistant
     id: alarm_level_state
     entity_id: input_select.alarm_level
@@ -125,25 +522,203 @@ text_sensor:
     id: bio_office_hvac_state
     entity_id: climate.bio_office_heat
     internal: true
+  # Outside-weather text from openweathermap (one of "clear-night",
+  # "cloudy", "fog", "lightning", "lightning-rainy", "partlycloudy",
+  # "pouring", "rainy", "snowy", "snowy-rainy", "sunny", "windy",
+  # "windy-variant", "exceptional"). The forecast screen sanitises and
+  # uppercases this into a 6-char abbreviation that scrolls along with
+  # the temperatures.
+  - platform: homeassistant
+    id: openweathermap_condition
+    entity_id: sensor.openweathermap_condition
+    internal: true
+  # Notifications: comma-separated IDs maintained by the MiniDisplay alarm
+  # system. The on_value handler parses the CSV into the `notification_ids`
+  # vector so Button 8 can dismiss the currently-shown one by ID.
+  - platform: homeassistant
+    id: notification_ids_csv
+    entity_id: input_text.minidisplay_notification_ids
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            // Snapshot the previous IDs+times so we can preserve the HHMM
+            // for notifications that are still present, and only stamp
+            // brand-new IDs with the current local time.
+            std::vector<std::string> old_ids = id(notification_ids);
+            std::vector<std::string> old_times = id(notification_times);
+            std::string csv = id(notification_ids_csv).state;
+            id(notification_ids).clear();
+            id(notification_times).clear();
+            if (!csv.empty()) {
+              size_t start = 0;
+              while (start < csv.size()) {
+                size_t comma = csv.find(',', start);
+                std::string part = (comma == std::string::npos)
+                  ? csv.substr(start)
+                  : csv.substr(start, comma - start);
+                size_t a = part.find_first_not_of(" \t\r\n");
+                size_t b = part.find_last_not_of(" \t\r\n");
+                if (a != std::string::npos && b != std::string::npos) {
+                  std::string trimmed = part.substr(a, b - a + 1);
+                  if (!trimmed.empty()) id(notification_ids).push_back(trimmed);
+                }
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+              }
+            }
+            // Build the parallel times vector. Each ID either inherits its
+            // previous HHMM (still active) or is freshly stamped (new).
+            char fresh_hhmm[8] = "----";
+            auto now_t = id(homeassistant_time).now();
+            if (now_t.is_valid()) {
+              snprintf(fresh_hhmm, sizeof(fresh_hhmm), "%02d%02d",
+                       (int) now_t.hour, (int) now_t.minute);
+            }
+            for (const auto &nid : id(notification_ids)) {
+              std::string captured;
+              for (size_t j = 0; j < old_ids.size(); j++) {
+                if (old_ids[j] == nid) {
+                  if (j < old_times.size()) captured = old_times[j];
+                  break;
+                }
+              }
+              if (captured.empty()) captured = std::string(fresh_hhmm);
+              id(notification_times).push_back(captured);
+            }
+            // Keep the displayed index inside bounds whenever the list shrinks.
+            int n = (int) id(notification_ids).size();
+            if (n <= 0) {
+              id(current_notification_index) = 0;
+            } else if (id(current_notification_index) >= n) {
+              id(current_notification_index) = n - 1;
+            }
+            ESP_LOGI("notify", "IDs parsed: %d", n);
+  # Notifications: pipe-separated titles, maintained by the MiniDisplay alarm
+  # system in lock-step with `minidisplay_notification_ids`.
+  - platform: homeassistant
+    id: notification_titles_csv
+    entity_id: input_text.minidisplay_notification_titles
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            std::string s = id(notification_titles_csv).state;
+            id(notification_titles).clear();
+            if (!s.empty()) {
+              size_t start = 0;
+              while (start < s.size()) {
+                size_t pipe = s.find('|', start);
+                std::string part = (pipe == std::string::npos)
+                  ? s.substr(start)
+                  : s.substr(start, pipe - start);
+                id(notification_titles).push_back(part);
+                if (pipe == std::string::npos) break;
+                start = pipe + 1;
+              }
+            }
+            ESP_LOGI("notify", "Titles parsed: %d", (int) id(notification_titles).size());
+  # Notifications: pipe-separated message bodies (lock-step with IDs and
+  # titles). Most Home Assistant `persistent_notification.create` calls
+  # leave `title` empty and put the actual readable content in `message`,
+  # so this is what we usually want to show on the display. SCREEN_NOTIFY
+  # prefers `message` over `title` when both are set; falling back to
+  # `title` (or an alarm-level label) when `message` is empty.
+  - platform: homeassistant
+    id: notification_messages_csv
+    entity_id: input_text.minidisplay_notification_messages
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            std::string s = id(notification_messages_csv).state;
+            id(notification_messages).clear();
+            if (!s.empty()) {
+              size_t start = 0;
+              while (start < s.size()) {
+                size_t pipe = s.find('|', start);
+                std::string part = (pipe == std::string::npos)
+                  ? s.substr(start)
+                  : s.substr(start, pipe - start);
+                id(notification_messages).push_back(part);
+                if (pipe == std::string::npos) break;
+                start = pipe + 1;
+              }
+            }
+            ESP_LOGI("notify", "Messages parsed: %d", (int) id(notification_messages).size());
+  # Live floodlight state. Used by trigger_airfryer_beep_action to know
+  # whether the light was already off before the green flash so it can
+  # be put back to off afterwards (HA's scene.create + scene.turn_on
+  # alone is unreliable about restoring an off state for some lights).
+  - platform: homeassistant
+    id: led_flood_light_state
+    entity_id: light.led_flood_light
+    internal: true
+  # Calendar 1 - kids' school (subscription f0d28bc2)
+  - platform: homeassistant
+    id: school_cal_1_message
+    entity_id: calendar.webcal_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_f0d28bc2_1243_4b0e_962c_02243eeea583
+    attribute: message
+    internal: true
+  - platform: homeassistant
+    id: school_cal_1_start
+    entity_id: calendar.webcal_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_f0d28bc2_1243_4b0e_962c_02243eeea583
+    attribute: start_time
+    internal: true
+  - platform: homeassistant
+    id: school_cal_1_end
+    entity_id: calendar.webcal_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_f0d28bc2_1243_4b0e_962c_02243eeea583
+    attribute: end_time
+    internal: true
+  # Calendar 2 - kids' school (subscription 8cd9caaa)
+  - platform: homeassistant
+    id: school_cal_2_message
+    entity_id: calendar.http_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_8cd9caaa_3f4e_4ee4_b8e8_662e4aa39f09
+    attribute: message
+    internal: true
+  - platform: homeassistant
+    id: school_cal_2_start
+    entity_id: calendar.http_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_8cd9caaa_3f4e_4ee4_b8e8_662e4aa39f09
+    attribute: start_time
+    internal: true
+  - platform: homeassistant
+    id: school_cal_2_end
+    entity_id: calendar.http_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_8cd9caaa_3f4e_4ee4_b8e8_662e4aa39f09
+    attribute: end_time
+    internal: true
+  # Calendar 3 - family handl_f
+  - platform: homeassistant
+    id: handl_f_message
+    entity_id: calendar.handl_f
+    attribute: message
+    internal: true
+  - platform: homeassistant
+    id: handl_f_start
+    entity_id: calendar.handl_f
+    attribute: start_time
+    internal: true
+  - platform: homeassistant
+    id: handl_f_end
+    entity_id: calendar.handl_f
+    attribute: end_time
+    internal: true
 
-# Globals for calibration, display, and button states
+# Globals for display, button state, calendar cycling, bean detection and alarms.
+# Bean thresholds are now fixed in cm (see SCREEN_BEANS / sensor `on_value`).
 globals:
-  - id: cal_mode
-    type: int
+  # Bean-warning state machine. The sensor reports distance in cm (filter
+  # converts metres -> cm). When the reading is in the "reliable low" band
+  # for at least BEAN_RELIABLE_MS, bean_warning_active goes true and LED8
+  # starts flashing. Out-of-range readings (very close = sensor touching
+  # the beans, very far = nothing in front of it) reset the timer.
+  - id: bean_in_range_since_ms
+    type: unsigned long
     restore_value: no
     initial_value: "0"
-  - id: full_dist
-    type: float
+  - id: bean_warning_active
+    type: bool
     restore_value: no
-    initial_value: "0.0"
-  - id: fifty_dist
-    type: float
-    restore_value: no
-    initial_value: "0.0"
-  - id: empty_dist
-    type: float
-    restore_value: no
-    initial_value: "0.0"
+    initial_value: "false"
   - id: current_screen
     type: int
     restore_value: no
@@ -168,37 +743,1035 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
+  # Calendar cycling state, kept in sync by the 30s rebuild interval below
+  - id: cal_event_titles
+    type: std::vector<std::string>
+    restore_value: no
+  - id: cal_event_times
+    type: std::vector<std::string>
+    restore_value: no
+  - id: cal_event_show_time
+    type: std::vector<bool>
+    restore_value: no
+  - id: cal_event_index
+    type: int
+    restore_value: no
+    initial_value: "0"
+  # Temperature button cycling state (Button 6)
+  - id: temp_button_step
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: last_temp_button_press
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: temp_button_display_until
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Lily feed counter (Button 7). Count is in
+  # half-pouches (0.5 per short press). Resets at local midnight.
+  - id: lily_pouch_count
+    type: float
+    restore_value: yes
+    initial_value: "0"
+  - id: lily_last_feed_ms
+    type: unsigned long
+    restore_value: yes
+    initial_value: "0"
+  - id: lily_display_until
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Second short press within this window adds 0.5 pouch; first press is view-only.
+  - id: lily_pending_add_until
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # (Hot water is now Button 6 long-press -> input_button.hot_water_boost_2h.
+  # LED5 still mirrors switch.smart_plug_2_socket_1 on every screen.)
+  # Lights buttons (Buttons 1-3) state machine. Each short press shows an
+  # overlay with the area's current state; a second press of the *same*
+  # button within LIGHTS_BUTTON_TIMEOUT_MS toggles its lights. last_lights_button
+  # is 1/2/3 for Living/Bio/Bedroom and 0 for "no recent press".
+  - id: last_lights_button
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: last_lights_button_press
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: should_toggle_lights
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # Per-button press-start timestamps for the long-press scripts. Set in
+  # `on_press` and reset to 0 by the matching long_press_bX script when it
+  # fires (the "long-press handled" sentinel). `on_release` reads it to
+  # decide whether to run the short-press path. The previous on_multi_click
+  # / measure-on-release approach was unreliable at the TM1638 poll rate.
+  - id: press_start_b1
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: press_start_b2
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: press_start_b3
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: press_start_b4
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: press_start_b6
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: press_start_b7
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: press_start_b8
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: press_start_b5
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Snake-egg cooking timer (long-press of Button 5). The snake itself is
+  # always one display-segment long and walks the 18-cell perimeter of the
+  # 8 digits (top a-segments x 8, right b+c, bottom d-segments x 8, left
+  # e+f). Each minute an egg in the top LED row gets eaten. The duration
+  # is selected by short-pressing buttons 1..8 during the 5 s "select"
+  # window opened by the long press of Button 5.
+  - id: snake_timer_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: snake_timer_start_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: snake_timer_minutes
+    type: int
+    restore_value: no
+    initial_value: "8"
+  # Snake-body history. Each entry packs (digit << 8) | segment-byte
+  # for one cell the head has occupied; entry [0] is the current head
+  # and entry [N-1] is the tail. The vector is grown each frame the
+  # head moves and trimmed back to snake_length whenever the snake
+  # length cap drops. Reset to empty by arm_snake_timer.
+  #
+  # Why uint16_t and not std::pair<int,char>: we want a trivially
+  # copyable type that ESPHome's global YAML serialiser is happy with
+  # without an extra include, and packing the two small fields into a
+  # single 16-bit word also keeps the per-frame work cheap on the
+  # ESP32. We never store cells outside [0..7] so 8-bit digit + 8-bit
+  # segment-byte is plenty.
+  - id: snake_history
+    type: std::vector<uint16_t>
+    restore_value: no
+  # Last pushed head value (packed as above) so we only push to
+  # snake_history when the head actually MOVES into a new cell instead
+  # of every render frame (the render lambda runs at ~10 Hz, but the
+  # snake's slowest cell is 800 ms - we'd otherwise push 8 duplicate
+  # entries per cell). 0xFFFF is an impossible packed value so the
+  # very first frame after arming always pushes.
+  - id: snake_last_head_packed
+    type: uint16_t
+    restore_value: no
+    initial_value: '0xFFFF'
+  # ----- snake state machine -----
+  # The snake animation is driven by a small explicit state machine
+  # rather than a time-based formula. There are two states - LOOP and
+  # GRAB - and they advance their respective cell index on a fixed
+  # cadence (LOOP one cell per SNAKE_LOOP_STEP_MS, GRAB one cell per
+  # SNAKE_GRAB_STEP_MS). This is what gives the user "natural travel"
+  # between minutes: the head walks the loop continuously at one
+  # speed and the GRAB only kicks in when the head naturally arrives
+  # at the egg's column - no per-minute teleport, no time-based reset
+  # at the minute boundary.
+  - id: snake_loop_idx
+    type: int
+    restore_value: no
+    initial_value: '-1'   # -1 so the very first advance lands on cell 0
+  - id: snake_loop_last_step_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+  - id: snake_in_grab
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # snake_grab_idx is 0..4 inclusive while in_grab; values:
+  #   0 - just entered (head still at digit_N '-' from the loop)
+  #   1 - upper-right ('`'); 2 - top ('~') = LED extinguishes here;
+  #   3 - upper-right again; 4 - back at middle (loop resumes after).
+  - id: snake_grab_idx
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: snake_grab_last_step_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+  # Number of eggs already grabbed (and therefore the current snake
+  # length minus the +2 visibility offset). 0 at start, climbs to
+  # snake_timer_minutes once all eggs are eaten.
+  - id: snake_next_egg
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Latched millis() at the moment the last egg was eaten - used as
+  # the start time of the SNAKE_END_MS ending animation. 0 means
+  # "snake still cooking".
+  - id: snake_done_at_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+  # Window during which any of buttons 1..8 acts as a duration selector
+  # for the snake timer instead of running its normal action. Set by
+  # long_press_b5; cleared either by a duration-selection press or by
+  # the 5 s timeout.
+  - id: snake_select_until_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Notification cycling (Button 8). Vectors are populated from the CSV
+  # text_sensors above so dismiss / cycle don't have to re-parse every press.
+  - id: notification_ids
+    type: std::vector<std::string>
+    restore_value: no
+  - id: notification_titles
+    type: std::vector<std::string>
+    restore_value: no
+  # Parallel vector with one entry per active notification ID, populated
+  # from input_text.minidisplay_notification_messages (pipe-separated).
+  # HA persistent_notifications often have an empty `title` and put the
+  # actual content in `message`, so SCREEN_NOTIFY prefers the message
+  # over the title when both are available (and falls back to title or
+  # the alarm-level label when message is empty).
+  - id: notification_messages
+    type: std::vector<std::string>
+    restore_value: no
+  # Floodlight pre-flash state. Set to true if light.led_flood_light
+  # was reporting "on" right before the airfryer flash, false if it
+  # was off (or unavailable). Used by trigger_airfryer_beep_action to
+  # decide whether to scene.turn_on (restore on-state colour and
+  # brightness) or light.turn_off (it was off, must go back off).
+  - id: floodlight_was_on
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Captures the local "HHMM" (4-char string) at which each notification ID
+  # first showed up in notification_ids_csv. Index-aligned with
+  # notification_ids - the on_value handler preserves HHMM for IDs that are
+  # still present and assigns the current local time for any new ID.
+  - id: notification_times
+    type: std::vector<std::string>
+    restore_value: no
+  - id: current_notification_index
+    type: int
+    restore_value: no
+    initial_value: "0"
+  # When Button 8 is short-pressed we want SCREEN_NOTIFY to stay on screen
+  # until the title has had time to fully scroll past, plus a few seconds
+  # of dwell at the end. Auto-cycle suspends advancing while now < this.
+  # Set in B8 on_release based on the current notification's title length.
+  - id: notify_hold_until_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Generic short-lived overlay (8 chars, expires at `feedback_until` ms).
+  # Used by the HA bean-cal buttons AND by the lights / notification buttons
+  # to show transient on-device feedback without occupying a permanent screen.
+  - id: feedback_text
+    type: std::string
+    restore_value: no
+  - id: feedback_until
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Microphone monitoring. The data callback fills mic_peak_value and
+  # mic_rms_value on every audio chunk; mic_samples_total ticks up so the
+  # log heartbeat can show "yes, we're getting samples".
+  - id: mic_peak_value
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  - id: mic_rms_value
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  - id: mic_peak_window
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  - id: mic_peak_session
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  - id: mic_samples_total
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: mic_callback_installed
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: airfryer_beep_threshold
+    type: float
+    restore_value: yes
+    # The kitchen mic is fairly far from the air fryer; observed peak
+    # for one beep was ~77, and ambient kitchen noise sits around ~5..15
+    # peak. 50 is well above ambient but well below a real beep. False
+    # positives are now rejected primarily by the **length-filtering**
+    # pattern matcher (each candidate beep must be on for 50..450 ms
+    # AND beeps must be 2..4 s apart, 3 in a row) - see the
+    # binary_sensor.airfryer_beep on_release handler for details.
+    initial_value: "35.0"
+  # Master enable for airfryer detection. Defaults ON; turn OFF in HA if
+  # device sitting idle in the kitchen never fires false positives - the
+  # user flips the switch ON in HA when they actually start cooking, and
+  # we go back to OFF after the alert (or manually). When this is false
+  # the airfryer_beep binary sensor refuses to go true even if the
+  # acoustic conditions match, so the entire pipeline stays dormant.
+  - id: airfryer_detect_enabled
+    type: bool
+    restore_value: yes
+    initial_value: "true"
+  # Frequency-proxy threshold (zero-crossings per sample). The user
+  # measured the airfryer beep at ~4000 Hz with a sound-frequency app
+  # (Aug 2026), which at 16 kHz sample rate is ~0.50 ZC/sample. Voice,
+  # drawer slams, footsteps, fridge hum all sit well under 0.10. The
+  # default 0.22 - use together with airfryer_tone_4k_threshold (either
+  # can pass). Tunable via input_number.airfryer_zc_threshold from HA.
+  - id: airfryer_zc_threshold
+    type: float
+    restore_value: yes
+    initial_value: "0.22"
+  - id: airfryer_tone_4k_threshold
+    type: float
+    restore_value: yes
+    initial_value: "0.06"
+  # Live zero-crossing ratio (per-chunk). Updated every audio chunk by
+  # the on_boot mic data callback alongside mic_peak_value, and read by
+  # binary_sensor.airfryer_beep so a candidate beep has to be both LOUD
+  # *and* HIGH-PITCHED to qualify.
+  - id: mic_zc_value
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  # Peak ZC ratio observed since last reset - lets the mic-sample script
+  # report the loudest *and* highest-frequency moment of the listening
+  # window. Reset by mic_sample_action at start.
+  - id: mic_zc_window_max
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  # Lag-4 / 4 kHz tone metric (see mic callback). Peak during current
+  # beep window; reset on airfryer_beep on_press.
+  - id: mic_tone_4k_value
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  - id: mic_tone_4k_window_max
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  # Peak ZC during the current binary_sensor.airfryer_beep on/off cycle.
+  # Captured by on_press, updated by the data callback (via
+  # mic_zc_window_max) and snapshotted in on_release for the length
+  # check. We want the peak across the whole beep, not just whatever
+  # value happened to be live when the falling edge fired.
+  - id: airfryer_beep_zc_peak
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  # Rising-edge timestamp captured by binary_sensor.airfryer_beep
+  # on_press. Compared against the current time on on_release to
+  # measure how long the binary stayed on - the user's airfryer beeps
+  # for ~0.25 s, so anything outside the 50..450 ms band on the binary
+  # is rejected as "not airfryer-shaped".
+  - id: beep_rise_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Last *valid* (length-passed, gap-passed) beep timestamp - used by
+  # the gap validator to decide whether a new beep extends the running
+  # pattern or starts a fresh count.
+  - id: last_valid_beep_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Low-threshold edge counter. The data path is:
+  #   binary_sensor.mic_low_beep flips on whenever mic_peak_value >
+  #   MIC_LOW_BEEP_THRESH (small fixed value just above ambient). Its
+  #   on_press handler bumps mic_low_thresh_edges by 1 - so each rising
+  #   edge of the low threshold counts as "one beep heard". The mic
+  #   sample script snapshots this counter at start and reports the diff
+  #   at the end, giving the user a beep-count for the listen window
+  #   independent of whatever airfryer_beep_threshold is currently set
+  #   to. This lets you see "AF3b 0077" = "3 beeps detected, peak 77",
+  #   so even when the air fryer is too quiet for the main detector you
+  #   can confirm the pattern is reaching the mic.
+  - id: mic_low_thresh_edges
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: mic_low_thresh_edges_at_start
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # User-controlled mic capture preference, persisted across reboots. The
+  # template switch reads/writes this; on_boot reads it to decide whether
+  # to start the mic. We can't auto-fire turn_on_action on the switch
+  # because that runs during the switch's own setup() - before the I2S
+  # task is built - and id(mic).start() asserts on a null semaphore.
+  - id: mic_capture_enabled
+    type: bool
+    restore_value: yes
+    initial_value: "true"
+  # Pattern detector for airfryer beeps. The fryer does ~3 short
+  # (~0.25 s) beeps spaced ~3 s apart, so a single loud spike is not
+  # enough - the action only fires after binary_sensor.airfryer_beep
+  # delivers REQUIRED_BEEPS rising edges that ALSO each pass a length
+  # filter (50..450 ms on-time, see binary_sensor.airfryer_beep
+  # on_release) and a gap filter (rising-edge gap 2..4 s). beep_rise_ms
+  # captures each rising edge for length measurement; last_valid_beep_ms
+  # tracks only edges that have already passed the length filter, so
+  # the gap matcher's count is based on real candidate beeps rather
+  # than every spike that broke the threshold.
+  - id: beep_pattern_count
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: should_fire_airfryer
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  # When the user presses Button 5 we want the calendar screen to actually
+  # appear (even with no events), instead of being immediately rewritten to
+  # the manifold by the auto-skip rule. force_calendar_until is the millis()
+  # deadline up to which the skip logic must respect SCREEN_CALENDAR.
+  - id: force_calendar_until
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
 
-binary_sensor:
-  
-  - platform: template
-    name: "Airfryer Beep"
-    id: airfryer_beep
-    lambda: |-
-      // Placeholder for beep detection (tune with your data)
-      if (id(mic).is_running()) {
-        // Example: Detect high amplitude in 1-3 kHz range
-        // Requires FFT or amplitude check
-        return false;  // Replace with tuned logic
-      }
-      return false;
-    on_press:
-      # Flash flood light green for 2 seconds
+# Shared script for the air-fryer beep action so both the (auto) binary_sensor
+# trigger and the HA "Test Airfryer Beep" button run identical logic.
+script:
+  - id: trigger_airfryer_beep_action
+    then:
+      # Show an on-device feedback overlay for the duration of the test
+      # so the "Test Airfryer Beep" HA button has visible confirmation -
+      # the display shows "AFry tSt" while the floodlight pulses green
+      # and then the overlay clears as the floodlight is restored.
+      #
+      # Snapshotting:
+      #  * scene.create captures the floodlight's CURRENT colour and
+      #    brightness so a follow-up scene.turn_on restores them after
+      #    the green flash. HA's scene snapshot is reliable for the
+      #    "on" case but unreliable about putting an OFF light back to
+      #    off (some lights latch on when re-targeted). To work around
+      #    that, we ALSO sample the live light.led_flood_light state
+      #    via the led_flood_light_state text_sensor and, if it was
+      #    "off" when the action fired, explicitly light.turn_off after
+      #    the flash instead of relying on scene.turn_on.
+      #
+      # Colour:
+      #  * `rgb_color: '[0,255,0]'` worked for some lights but the
+      #    user's floodlight was getting brightness-only, never going
+      #    green. Using `color_name: green` (which is what the existing
+      #    minidisplay button colour palette uses on the same hardware
+      #    family) is the format that's actually known to apply. We
+      #    also set `brightness_pct: '100'` so the green is unambiguous
+      #    and bright regardless of whatever level the light was at.
+      - lambda: |-
+          id(feedback_text) = std::string("AFry tSt");
+          id(feedback_until) = millis() + 2500;
+          id(floodlight_was_on) = (id(led_flood_light_state).has_state() &&
+                                   id(led_flood_light_state).state == "on");
+          ESP_LOGI("airfryer",
+                   "Beep action firing - flashing floodlight green for 5 s (was_on=%d, last_state=%s)",
+                   id(floodlight_was_on),
+                   id(led_flood_light_state).has_state() ? id(led_flood_light_state).state.c_str() : "<unknown>");
+      - homeassistant.service:
+          service: scene.create
+          data:
+            scene_id: airfryer_floodlight_snapshot
+            snapshot_entities: light.led_flood_light
       - homeassistant.service:
           service: light.turn_on
           data:
-            entity_id: "light.led_flood_light"
-            rgb_color: "[0, 255, 0]"
-            brightness: "255"
-      - delay: 2s
-      - homeassistant.service:
-          service: light.turn_off
-          data:
-            entity_id: "light.led_flood_light"
+            entity_id: light.led_flood_light
+            color_name: green
+            brightness_pct: "100"
+      # 5 s flash (was 2 s). Long enough to actually catch the user's
+      # eye whether they're in the kitchen, the lounge or upstairs and
+      # also long enough to overlap the snake-timer "fireworks" ending
+      # which fires this same action.
+      - delay: 5s
+      # Restore: only scene.turn_on if the light was actually on before -
+      # otherwise force it back off so we don't leave it lit when it
+      # had been off when the action started.
+      - if:
+          condition:
+            lambda: 'return id(floodlight_was_on);'
+          then:
+            - homeassistant.service:
+                service: scene.turn_on
+                data:
+                  entity_id: scene.airfryer_floodlight_snapshot
+            - lambda: |-
+                ESP_LOGI("airfryer", "Floodlight was on - restored via scene.turn_on");
+          else:
+            - homeassistant.service:
+                service: light.turn_off
+                data:
+                  entity_id: light.led_flood_light
+            - lambda: |-
+                ESP_LOGI("airfryer", "Floodlight was off - forced back off");
       - homeassistant.service:
           service: notify.mobile_app
           data:
             message: "Airfryer is beeping! Check for shaking reminder."
+
+  # Long-press detection scripts. These fire WHILE the button is still held,
+  # not on release - which means they don't depend on the TM1638's polling
+  # rate accurately measuring how long a key was down. mode: restart means
+  # a quick repeat press cancels any in-flight check so we never get a
+  # stale long-press triggering after a tap.
+  #
+  # Contract:
+  #  * on_press of buttonX sets press_start_bX = millis() and executes
+  #    long_press_bX.
+  #  * After 800 ms the script re-checks the binary sensor; if it's still
+  #    pressed the long-press action runs and press_start_bX is reset to 0
+  #    (the "long-press handled" sentinel).
+  #  * on_release inspects press_start_bX: if 0, the long press has already
+  #    been handled and the short-press path is skipped.
+  - id: long_press_b1
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: button_1
+          then:
+            - lambda: |-
+                ESP_LOGI("button", "B1 long-press fired (held >= 800 ms)");
+                id(press_start_b1) = 0;
+                id(feedback_text) = std::string("Liv FuLL");
+                id(feedback_until) = millis() + 3000;
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  area_id: living_room
+                  brightness_pct: "100"
+                  color_temp_kelvin: "4000"
+  - id: long_press_b2
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: button_2
+          then:
+            - lambda: |-
+                ESP_LOGI("button", "B2 long-press fired (held >= 800 ms)");
+                id(press_start_b2) = 0;
+                id(feedback_text) = std::string("Bio FuLL");
+                id(feedback_until) = millis() + 3000;
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  area_id: bio
+                  brightness_pct: "100"
+                  color_temp_kelvin: "4000"
+  - id: long_press_b3
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: button_3
+          then:
+            - lambda: |-
+                ESP_LOGI("button", "B3 long-press fired (held >= 800 ms)");
+                id(press_start_b3) = 0;
+                id(feedback_text) = std::string("BedrFuLL");
+                id(feedback_until) = millis() + 3000;
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  area_id: bedroom
+                  brightness_pct: "100"
+                  color_temp_kelvin: "4000"
+  - id: long_press_b4
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: button_4
+          then:
+            - lambda: |-
+                ESP_LOGI("button", "B4 long-press fired (held >= 800 ms)");
+                id(press_start_b4) = 0;
+                id(feedback_text) = std::string("Par FuLL");
+                id(feedback_until) = millis() + 3000;
+            - homeassistant.service:
+                service: light.turn_on
+                data:
+                  area_id: parent_s_bedroom
+                  brightness_pct: "100"
+                  color_temp_kelvin: "4000"
+  - id: long_press_b6
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: button_6
+          then:
+            - lambda: |-
+                ESP_LOGI("button", "B6 long-press fired - hot water boost ON");
+                id(press_start_b6) = 0;
+                id(current_screen) = 1;
+                id(last_screen_change) = millis();
+                id(feedback_text) = std::string("hot ON ");
+                id(feedback_until) = millis() + 3000;
+            - homeassistant.service:
+                service: input_button.press
+                data:
+                  entity_id: input_button.hot_water_boost_2h
+  - id: long_press_b7
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: button_7
+          then:
+            - lambda: |-
+                ESP_LOGI("button", "B7 long-press fired - Lily -1");
+                id(press_start_b7) = 0;
+                if (id(lily_pouch_count) >= 1.0f) {
+                  id(lily_pouch_count) -= 1.0f;
+                } else {
+                  id(lily_pouch_count) = 0.0f;
+                }
+                id(lily_display_until) = millis() + 4000;
+                ESP_LOGI("lily", "Count now %.1f pouches", id(lily_pouch_count));
+            - homeassistant.service:
+                service: input_number.set_value
+                data:
+                  entity_id: input_number.lily_pouch_count
+                  value: !lambda 'return id(lily_pouch_count);'
+  - id: long_press_b8
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: button_8
+          then:
+            - lambda: |-
+                ESP_LOGI("button", "B8 long-press fired (held >= 800 ms)");
+                id(press_start_b8) = 0;
+                int n = (int) id(notification_ids).size();
+                int idx = id(current_notification_index);
+                if (n <= 0 || idx < 0 || idx >= n) {
+                  id(feedback_text) = std::string("noteNONE");
+                  id(feedback_until) = millis() + 2000;
+                } else {
+                  id(feedback_text) = std::string("noteDIS ");
+                  id(feedback_until) = millis() + 2500;
+                }
+            - if:
+                condition:
+                  lambda: |-
+                    int n = (int) id(notification_ids).size();
+                    int idx = id(current_notification_index);
+                    return n > 0 && idx >= 0 && idx < n;
+                then:
+                  - homeassistant.service:
+                      service: persistent_notification.dismiss
+                      data:
+                        notification_id: !lambda |-
+                          int idx = id(current_notification_index);
+                          if (idx < 0 || idx >= (int) id(notification_ids).size()) {
+                            return std::string("");
+                          }
+                          return id(notification_ids)[idx];
+
+  # Long-press of Button 5: enter "duration select" mode for SNAKE_SELECT_MS.
+  # While in that window any short press on buttons 1..8 immediately starts
+  # an N-minute snake timer. If no button is pressed before the window
+  # closes the firmware silently exits select mode and nothing happens.
+  # Long-pressing while a timer is already running cancels it.
+  - id: long_press_b5
+    mode: restart
+    then:
+      - delay: 800ms
+      - if:
+          condition:
+            binary_sensor.is_on: button_5
+          then:
+            - lambda: |-
+                static const uint32_t SNAKE_SELECT_MS = 5000;
+                id(press_start_b5) = 0;
+                if (id(snake_timer_active)) {
+                  id(snake_timer_active) = false;
+                  id(snake_select_until_ms) = 0;
+                  ESP_LOGI("snake", "Snake timer cancelled by long-press");
+                  id(feedback_text) = std::string("snakeoff");
+                  id(feedback_until) = millis() + 2000;
+                } else {
+                  id(snake_select_until_ms) = millis() + SNAKE_SELECT_MS;
+                  ESP_LOGI("snake", "Select-mode armed for %lu ms - press 1-8 for N minutes",
+                           (unsigned long) SNAKE_SELECT_MS);
+                }
+
+  # Helper script: start an N-minute snake timer. Called from each of
+  # buttons 1..8 when they fire during the select window. The minute count
+  # is clamped to 1..8 so accidental races can't underflow / wrap.
+  - id: arm_snake_timer
+    mode: restart
+    parameters:
+      mins: int
+    then:
+      - lambda: |-
+          int m = mins;
+          if (m < 1) m = 1;
+          if (m > 8) m = 8;
+          const uint32_t now_ms = millis();
+          id(snake_timer_active) = true;
+          id(snake_timer_start_ms) = now_ms;
+          id(snake_timer_minutes) = m;
+          id(snake_select_until_ms) = 0;
+          // Wipe the previous timer's body trail so the new snake
+          // starts fresh with no leftover segments visible.
+          id(snake_history).clear();
+          id(snake_last_head_packed) = 0xFFFF;
+          // Reset state machine: the very first display lambda call
+          // after arming will see snake_loop_idx==-1 and step it to 0
+          // immediately (cell 0 = digit 0 '_'), which is what makes
+          // the snake APPEAR straight away rather than "after 150 ms".
+          id(snake_loop_idx) = -1;
+          id(snake_loop_last_step_ms) = now_ms;
+          id(snake_in_grab) = false;
+          id(snake_grab_idx) = 0;
+          id(snake_grab_last_step_ms) = 0;
+          id(snake_next_egg) = 0;
+          id(snake_done_at_ms) = 0;
+          char buf[12];
+          snprintf(buf, sizeof(buf), "snake %dM", m);
+          id(feedback_text) = std::string(buf);
+          id(feedback_until) = now_ms + 1500;
+          ESP_LOGI("snake", "Snake timer armed for %d minute(s)", m);
+
+  # 10-second microphone "listen" session used by the HA "Sample Airfryer
+  # Beep" and "Microphone Self-Test" buttons. The display shows a live
+  # countdown overlay so the user knows when to make noise; once finished
+  # the maximum peak is shown for ~6 s and logged so a sensible
+  # airfryer_beep_threshold can be picked. `mode: restart` cancels any
+  # previous run so the user can chain presses without overlap.
+  - id: mic_sample_action
+    mode: restart
+    then:
+      - lambda: |-
+          id(mic_samples_total) = 0;
+          id(mic_peak_session) = 0.0f;
+          id(mic_zc_window_max) = 0.0f;
+          id(mic_tone_4k_window_max) = 0.0f;
+          // Snapshot the running low-thresh edge counter so we can report
+          // "edges during this session" without owning the counter itself.
+          // mic_low_beep keeps incrementing it whenever the mic crosses
+          // MIC_LOW_BEEP_THRESH; we just compute the diff at the end.
+          id(mic_low_thresh_edges_at_start) = id(mic_low_thresh_edges);
+          if (!id(mic).is_running()) {
+            id(mic).start();
+          }
+          ESP_LOGI("mic", "--- Mic sample session START (10 s) ---");
+          ESP_LOGI("mic", "  thresholds: peak=%.0f zc=%.2f tone4k=%.3f",
+                   id(airfryer_beep_threshold), id(airfryer_zc_threshold),
+                   id(airfryer_tone_4k_threshold));
+          ESP_LOGI("mic", "  airfryer_detect_enabled = %s",
+                   id(airfryer_detect_enabled) ? "YES" : "NO (binary_sensor blocked)");
+      - repeat:
+          count: 10
+          then:
+            - lambda: |-
+                int s_left = 10 - (int) iteration;
+                int beeps = (int) (id(mic_low_thresh_edges) -
+                                   id(mic_low_thresh_edges_at_start));
+                if (beeps < 0) beeps = 0;
+                char buf[16];
+                // Live-feedback shows "LISt N b" so the user can see the
+                // count climb in real time as each beep is heard.
+                snprintf(buf, sizeof(buf), "LISt%d %d",
+                         s_left, beeps > 9 ? 9 : beeps);
+                id(feedback_text) = std::string(buf);
+                id(feedback_until) = millis() + 1500;
+                ESP_LOGI("mic",
+                         "  t-%2ds  peak=%.0f  zc=%.2f  zc_max=%.2f  tone=%.3f  tone_max=%.3f  edges=%d",
+                         s_left,
+                         id(mic_peak_value),
+                         id(mic_zc_value),
+                         id(mic_zc_window_max),
+                         id(mic_tone_4k_value),
+                         id(mic_tone_4k_window_max),
+                         beeps);
+            - delay: 1s
+      - lambda: |-
+          float peak = id(mic_peak_session);
+          unsigned long total = (unsigned long) id(mic_samples_total);
+          int beeps = (int) (id(mic_low_thresh_edges) -
+                             id(mic_low_thresh_edges_at_start));
+          if (beeps < 0) beeps = 0;
+          int beeps_disp = beeps > 9 ? 9 : beeps;
+          int peak_disp = (int) peak;
+          if (peak_disp > 9999) peak_disp = 9999;
+          char buf[16];
+          if (total == 0) {
+            // No samples = wiring/power problem.
+            snprintf(buf, sizeof(buf), "AF NONE ");
+            ESP_LOGW("mic", "Sample finished: NO samples received - check wiring/power!");
+          } else {
+            // Always pack both numbers into the result so the user can
+            // tell at a glance "did the mic hear the rhythm? how loud?".
+            // Format is "AFNb PPPP" (8 chars) - N=beep count (low-thresh),
+            // PPPP=peak amplitude (right-aligned, clamped to 9999).
+            //
+            // Reading the result:
+            //   AF0b 0012  - heard nothing distinct (just ambient).
+            //                Peak 12 = silent room. Mic is alive but no
+            //                sound made it through. Move closer or louder.
+            //   AF3b 0077  - heard 3 beeps in 10 s, but each peaked at
+            //                only 77. Lower input_number.airfryer_beep_threshold
+            //                below 77 (suggested ~peak * 0.7) and detection
+            //                will catch this rhythm.
+            //   AF3b 0500  - heard 3 beeps, peak 500. Already above the
+            //                100 default threshold, so detection should fire
+            //                for this airfryer pattern.
+            snprintf(buf, sizeof(buf), "AF%db%4d", beeps_disp, peak_disp);
+            const float zc_max = id(mic_zc_window_max);
+            ESP_LOGI("mic",
+                     "Sample finished: peak=%.0f  edges=%d  zc_max=%.2f  peak_thresh=%.0f  zc_thresh=%.2f",
+                     peak, beeps, zc_max,
+                     id(airfryer_beep_threshold),
+                     id(airfryer_zc_threshold));
+            const bool peak_ok = peak >= id(airfryer_beep_threshold);
+            const bool zc_ok   = zc_max >= id(airfryer_zc_threshold);
+            const bool detect_on = id(airfryer_detect_enabled);
+            if (!detect_on) {
+              ESP_LOGI("mic", "  -> NOTE: airfryer detection switch is OFF, so live detection is dormant.");
+              ESP_LOGI("mic", "     Turn on switch.airfryer_detection in HA when actually frying.");
+            }
+            if (peak_ok && zc_ok && beeps >= 3) {
+              ESP_LOGI("mic", "  -> peak/zc both pass AND >=3 edges - detector would fire (assuming switch on)");
+            } else if (!peak_ok && beeps >= 3) {
+              ESP_LOGI("mic", "  -> mic heard the rhythm but peak below threshold (%.0f < %.0f).",
+                       peak, id(airfryer_beep_threshold));
+              ESP_LOGI("mic", "     Lower input_number.airfryer_beep_threshold to ~%.0f", peak * 0.7f);
+            } else if (!zc_ok && beeps >= 3) {
+              ESP_LOGI("mic", "  -> mic heard the rhythm but zc_max below threshold (%.2f < %.2f).",
+                       zc_max, id(airfryer_zc_threshold));
+              ESP_LOGI("mic", "     This sound is too low-pitched to be the airfryer beep.");
+            } else if (beeps == 0) {
+              ESP_LOGI("mic", "  -> no beeps registered above MIC_LOW_BEEP_THRESH (50).");
+              ESP_LOGI("mic", "     The air fryer is too quiet for the mic at this distance.");
+            } else {
+              ESP_LOGI("mic", "  -> only %d beep edge(s) inside 10 s. Need 3 for the pattern to match.", beeps);
+            }
+          }
+          id(feedback_text) = std::string(buf);
+          id(feedback_until) = millis() + 10000;
+
+binary_sensor:
+
+  # Low-threshold beep edge counter. Used by mic_sample_action to count
+  # how many beeps were heard during the listen window even when they
+  # are too quiet to trip the main airfryer_beep_threshold. The fixed
+  # MIC_LOW_BEEP_THRESH (50) is comfortably above ambient kitchen
+  # noise (~5..15 RMS / ~20..40 peak) but well below most beeps, so
+  # rising-edge counts here approximate "real beeps the mic heard"
+  # without needing a calibration pass. delayed_on/off mirror the main
+  # sensor so the same short transient doesn't double-count.
+  - platform: template
+    name: "Mic Low Beep"
+    id: mic_low_beep
+    internal: true
+    lambda: |-
+      static const float MIC_LOW_BEEP_THRESH = 50.0f;
+      if (!id(mic).is_running()) return false;
+      return id(mic_peak_value) > MIC_LOW_BEEP_THRESH;
+    filters:
+      - delayed_on: 100ms
+      - delayed_off: 800ms
+    on_press:
+      - lambda: |-
+          id(mic_low_thresh_edges) += 1;
+          ESP_LOGD("mic", "Low-thresh beep edge #%lu (peak=%.0f)",
+                   (unsigned long) id(mic_low_thresh_edges),
+                   id(mic_peak_value));
+
+  - platform: template
+    name: "Airfryer Beep"
+    id: airfryer_beep
+    # The airfryer detector is gated on FOUR independent conditions:
+    #
+    #   1. Master switch (airfryer_detect_enabled). Defaults OFF, user
+    #      flips ON in HA when actually using the air fryer. With this
+    #      OFF the binary stays false no matter what.
+    #   2. Mic running. Belt-and-braces - we shouldn't be polling the
+    #      switch with the mic stopped, but ESPHome polls this lambda
+    #      regardless.
+    #   3. Peak amplitude > airfryer_beep_threshold (loud enough).
+    #   4. Zero-crossing ratio > airfryer_zc_threshold (high-pitched
+    #      enough). This rejects voice, footsteps, drawer slams, and
+    #      fridge hum which all sit at 0..0.1 ZC/sample - the airfryer
+    #      beep sits at 0.4..0.5.
+    #
+    # All four MUST be simultaneously true for the binary to go on.
+    # Length and cadence filtering live in on_release as before.
+    lambda: |-
+      if (!id(mic).is_running()) return false;
+      if (!id(airfryer_detect_enabled)) return false;
+      if (id(mic_peak_value) <= id(airfryer_beep_threshold)) return false;
+      // Pass if EITHER high zero-crossing rate OR strong 4 kHz lag-4
+      // correlation - real fryer beeps usually satisfy both, but a
+      // distant mic may only show one strongly.
+      const bool zc_ok = id(mic_zc_value) >= id(airfryer_zc_threshold);
+      const bool tone_ok = id(mic_tone_4k_value) >= id(airfryer_tone_4k_threshold);
+      if (!zc_ok && !tone_ok) return false;
+      return true;
+    filters:
+      # Tight debouncing so we can MEASURE the beep's actual length on
+      # the falling edge:
+      #
+      # * delayed_on  100 ms - the user's airfryer beep is ~250 ms, so
+      #   100 ms of sustained-loud-and-high-pitched is plenty to qualify
+      #   as a candidate while still ignoring the very shortest impulse
+      #   spikes (sub 100 ms cupboard slam, plate clink ring-down).
+      # * delayed_off  50 ms - just enough to debounce the trailing edge
+      #   without padding the binary's on-time. With this short tail we
+      #   can actually distinguish a 250 ms beep (binary on for ~200 ms)
+      #   from a sustained 1 s noise (binary on for ~950 ms) on the
+      #   falling-edge handler.
+      - delayed_on: 100ms
+      - delayed_off: 50ms
+    # Three-stage matcher (length / frequency / cadence):
+    #
+    # 1. on_press records the rising-edge timestamp and resets the
+    #    per-beep ZC peak tracker.
+    # 2. on_release measures HOW LONG the binary stayed on. If
+    #    duration is OUTSIDE the airfryer-beep length band (50..450 ms)
+    #    we silently reject the beep - it was either too short (impulse)
+    #    or too long (sustained voice / hum).
+    # 3. on_release ALSO checks the peak ZC seen during the beep.
+    #    Even if the rising-edge passed the live ZC gate, we re-check
+    #    the WHOLE beep's peak to catch transient false starts.
+    # 4. Cadence filter: rising-edge gap from previous *valid* beep
+    #    must fall in 2..4 s (the airfryer's ~3 s cadence) and we need
+    #    AIRFRYER_REQUIRED_BEEPS beeps inside AIRFRYER_PATTERN_WINDOW_MS.
+    on_press:
+      - lambda: |-
+          id(beep_rise_ms) = millis();
+          id(airfryer_beep_zc_peak) = id(mic_zc_value);
+          id(mic_zc_window_max) = id(mic_zc_value);
+          id(mic_tone_4k_window_max) = id(mic_tone_4k_value);
+          ESP_LOGD("airfryer",
+                   "Beep rose at t=%lu (peak=%.0f, zc=%.2f)",
+                   (unsigned long) id(beep_rise_ms),
+                   id(mic_peak_value),
+                   id(mic_zc_value));
+    on_release:
+      - lambda: |-
+          static const uint32_t AIRFRYER_MIN_BEEP_MS         =     40;
+          static const uint32_t AIRFRYER_MAX_BEEP_MS         =    600;
+          static const uint32_t AIRFRYER_PATTERN_WINDOW_MS   =  16000;
+          static const uint32_t AIRFRYER_MIN_GAP_MS          =   1500;
+          static const uint32_t AIRFRYER_MAX_GAP_MS          =   5500;
+          static const int      AIRFRYER_REQUIRED_BEEPS      =      2;
+          const uint32_t now_ms = millis();
+          const uint32_t duration_ms = now_ms - id(beep_rise_ms);
+          // mic_zc_window_max has been tracking the MAX ZC ratio across
+          // every chunk since on_press reset it - that's the value we
+          // care about ("did this beep ever sound high-pitched?")
+          const float zc_peak = id(mic_zc_window_max);
+          const float tone_peak = id(mic_tone_4k_window_max);
+          id(airfryer_beep_zc_peak) = zc_peak;
+          // ---- Stage 1: length filter --------------------------------
+          if (duration_ms < AIRFRYER_MIN_BEEP_MS ||
+              duration_ms > AIRFRYER_MAX_BEEP_MS) {
+            ESP_LOGI("airfryer",
+                     "Beep rejected: length %lu ms outside [%lu..%lu] band (zc_peak=%.2f) - not airfryer-shaped",
+                     (unsigned long) duration_ms,
+                     (unsigned long) AIRFRYER_MIN_BEEP_MS,
+                     (unsigned long) AIRFRYER_MAX_BEEP_MS,
+                     zc_peak);
+            id(should_fire_airfryer) = false;
+            return;
+          }
+          // ---- Stage 2: pitch filter (ZC OR 4 kHz tone metric) -------
+          const bool zc_ok = zc_peak >= id(airfryer_zc_threshold);
+          const bool tone_ok = tone_peak >= id(airfryer_tone_4k_threshold);
+          if (!zc_ok && !tone_ok) {
+            ESP_LOGI("airfryer",
+                     "Beep rejected: zc_peak=%.2f tone4k=%.3f (need zc>=%.2f or tone>=%.3f) len=%lu ms",
+                     zc_peak, tone_peak,
+                     id(airfryer_zc_threshold), id(airfryer_tone_4k_threshold),
+                     (unsigned long) duration_ms);
+            id(should_fire_airfryer) = false;
+            return;
+          }
+          // ---- Stage 3: cadence (gap) validation ---------------------
+          const uint32_t gap_ms = id(beep_rise_ms) - id(last_valid_beep_ms);
+          const char *reason;
+          if (id(beep_pattern_count) == 0 || gap_ms > AIRFRYER_PATTERN_WINDOW_MS) {
+            id(beep_pattern_count) = 1;
+            reason = "first/window-expired";
+          } else if (gap_ms < AIRFRYER_MIN_GAP_MS) {
+            id(beep_pattern_count) = 1;
+            reason = "gap too short - probably echo or rapid noise";
+          } else if (gap_ms > AIRFRYER_MAX_GAP_MS) {
+            id(beep_pattern_count) = 1;
+            reason = "gap too long - cadence broken";
+          } else {
+            id(beep_pattern_count) += 1;
+            reason = "valid airfryer cadence";
+          }
+          id(last_valid_beep_ms) = id(beep_rise_ms);
+          ESP_LOGI("airfryer",
+                   "Beep candidate: len=%lu ms, zc=%.2f tone4k=%.3f count=%d/%d (gap=%lu ms, %s)",
+                   (unsigned long) duration_ms,
+                   zc_peak, tone_peak,
+                   id(beep_pattern_count),
+                   AIRFRYER_REQUIRED_BEEPS,
+                   (unsigned long) gap_ms,
+                   reason);
+          if (id(beep_pattern_count) >= AIRFRYER_REQUIRED_BEEPS) {
+            id(beep_pattern_count) = 0;
+            id(should_fire_airfryer) = true;
+            ESP_LOGI("airfryer", "Pattern matched - firing trigger");
+          } else {
+            id(should_fire_airfryer) = false;
+          }
+      - if:
+          condition:
+            lambda: 'return id(should_fire_airfryer);'
+          then:
+            - script.execute: trigger_airfryer_beep_action
 
   # Home Assistant binary sensors/switches
   - platform: homeassistant
@@ -211,14 +1784,6 @@ binary_sensor:
     attribute: low_price
     internal: true
   - platform: homeassistant
-    id: felix_morning_alert
-    entity_id: binary_sensor.felix_morning_alert
-    internal: true
-  - platform: homeassistant
-    id: isolde_morning_alert
-    entity_id: binary_sensor.isolde_morning_alert
-    internal: true
-  - platform: homeassistant
     id: boiler_relay_1
     entity_id: switch.boilercontrol_boiler_relay_1
     internal: true
@@ -226,118 +1791,884 @@ binary_sensor:
     id: boiler_relay_2
     entity_id: switch.boilercontrol_boiler_relay_2
     internal: true
-  
-  # TM1638 Buttons (Button 1-4 for toggles, 5-8 available for future use)
+
+  # ----- "Any light on in this area" indicators for Buttons 1-3 -----
+  # These drive the on-press state overlay ("LivR on " / "LivR off") and
+  # therefore the user's "first press shows state, next press toggles"
+  # decision. The expected entity is a `binary_sensor` template helper in
+  # Home Assistant that returns "on" if **any** light in the area is on,
+  # for example:
+  #
+  #   template:
+  #     - binary_sensor:
+  #         - name: "Living Room Any Light On"
+  #           unique_id: living_room_any_light_on
+  #           state: >
+  #             {{ expand(area_entities('living_room')) | selectattr('domain','eq','light')
+  #                | selectattr('state','eq','on') | list | count > 0 }}
+  #
+  # If the entity is missing the overlay falls back to "LivR -- ", and the
+  # toggle still works because the toggle uses area_id targeting.
+  # `on_state` here is the "show new state once HA confirms" half of the
+  # toggle UX. The button's on_release shows "Liv togL" immediately to
+  # acknowledge the press; a moment later HA pushes a new state and we
+  # replace that overlay with the actual "Liv  on " / "Liv  off". The
+  # last_lights_button + millis() guard makes sure we only react when the
+  # state change is plausibly the result of *our* recent toggle - random
+  # background updates (motion sensor, automation, etc.) leave the screen
+  # alone.
+  - platform: homeassistant
+    id: living_lights_any_on
+    entity_id: binary_sensor.living_room_any_light_on
+    internal: true
+    on_state:
+      then:
+        - lambda: |-
+            if (id(last_lights_button) == 1 &&
+                millis() - id(last_lights_button_press) < 6000) {
+              char buf[16];
+              snprintf(buf, sizeof(buf), "Liv  %s",
+                       id(living_lights_any_on).state ? "on " : "off");
+              id(feedback_text) = std::string(buf);
+              id(feedback_until) = millis() + 4000;
+            }
+  - platform: homeassistant
+    id: bio_lights_any_on
+    entity_id: binary_sensor.bio_any_light_on
+    internal: true
+    on_state:
+      then:
+        - lambda: |-
+            if (id(last_lights_button) == 2 &&
+                millis() - id(last_lights_button_press) < 6000) {
+              char buf[16];
+              snprintf(buf, sizeof(buf), "Bio  %s",
+                       id(bio_lights_any_on).state ? "on " : "off");
+              id(feedback_text) = std::string(buf);
+              id(feedback_until) = millis() + 4000;
+            }
+  - platform: homeassistant
+    id: bedroom_lights_any_on
+    entity_id: binary_sensor.bedroom_any_light_on
+    internal: true
+    on_state:
+      then:
+        - lambda: |-
+            if (id(last_lights_button) == 3 &&
+                millis() - id(last_lights_button_press) < 6000) {
+              char buf[16];
+              snprintf(buf, sizeof(buf), "Bedr %s",
+                       id(bedroom_lights_any_on).state ? "on " : "off");
+              id(feedback_text) = std::string(buf);
+              id(feedback_until) = millis() + 4000;
+            }
+  - platform: homeassistant
+    id: parents_lights_any_on
+    entity_id: binary_sensor.parents_bedroom_any_light_on
+    internal: true
+    on_state:
+      then:
+        - lambda: |-
+            if (id(last_lights_button) == 4 &&
+                millis() - id(last_lights_button_press) < 6000) {
+              char buf[16];
+              snprintf(buf, sizeof(buf), "Par  %s",
+                       id(parents_lights_any_on).state ? "on " : "off");
+              id(feedback_text) = std::string(buf);
+              id(feedback_until) = millis() + 4000;
+            }
+
+  # ===== TM1638 Buttons =====
+  # Buttons 1-3 share the "lights" pattern (modelled on MiniDisplay's
+  # back-button behaviour for light entities):
+  #  - Short press (held < 800 ms):
+  #      * First press OR > LIGHTS_BUTTON_TIMEOUT_MS since last press of
+  #        *this same button*: just show the area's current on/off state
+  #        on the display overlay. No HA call.
+  #      * Press again within the timeout window while still on the same
+  #        button: toggle that area's lights via `light.toggle` + area_id.
+  #  - Long press (held >= 800 ms): set the whole area to 100% brightness
+  #    and 4000 K white via `light.turn_on` + area_id.
+  # The "current state" lookup uses the corresponding `*_lights_any_on`
+  # binary_sensor; if HA hasn't published that helper yet the overlay
+  # shows "Liv  -- " / "Bio  -- " / "Bedr -- " and toggle still works.
+  #
+  # Implementation note: we intentionally use on_press + on_release with
+  # manual timing instead of on_multi_click. The TM1638 component polls
+  # its keys at the display update_interval, so a short tap can land
+  # entirely between two polls and never register the ON-OFF transition
+  # pair that on_multi_click needs - the press appeared "dead" to the
+  # user. on_press/on_release fires reliably on each detected transition.
   - platform: tm1638
     name: "Button 1 - Living Room"
     id: button_1
     key: 0
     on_press:
-      - homeassistant.service:
-          service: light.turn_off
-          data:
-            area_id: living_room
+      - if:
+          condition:
+            lambda: 'return millis() < id(snake_select_until_ms);'
+          then:
+            - script.execute:
+                id: arm_snake_timer
+                mins: 1
+          else:
+            - lambda: |-
+                id(press_start_b1) = millis();
+                ESP_LOGD("button", "B1 pressed (start=%lu)", (unsigned long) id(press_start_b1));
+            - script.execute: long_press_b1
+    on_release:
       - lambda: |-
-          id(button_pressed) = true;
-          id(button_press_time) = millis();
-  
+          static const uint32_t LIGHTS_BUTTON_TIMEOUT_MS = 8000;
+          static const int BTN_ID = 1;
+          const uint32_t now_ms = millis();
+          if (id(press_start_b1) == 0) {
+            ESP_LOGD("button", "B1 released after long-press already handled");
+            id(should_toggle_lights) = false;
+            return;
+          }
+          const uint32_t held = now_ms - id(press_start_b1);
+          ESP_LOGD("button", "B1 released after %ums (short-press path)", (unsigned) held);
+          const bool was_recent =
+              (id(last_lights_button) == BTN_ID) &&
+              (now_ms - id(last_lights_button_press) <= LIGHTS_BUTTON_TIMEOUT_MS);
+          id(last_lights_button) = BTN_ID;
+          id(last_lights_button_press) = now_ms;
+          id(should_toggle_lights) = was_recent;
+          char buf[16];
+          if (was_recent) {
+            snprintf(buf, sizeof(buf), "Liv togL");
+          } else if (!id(living_lights_any_on).has_state()) {
+            snprintf(buf, sizeof(buf), "Liv  -- ");
+          } else if (id(living_lights_any_on).state) {
+            snprintf(buf, sizeof(buf), "Liv  on ");
+          } else {
+            snprintf(buf, sizeof(buf), "Liv  off");
+          }
+          id(feedback_text) = std::string(buf);
+          id(feedback_until) = now_ms + 8000;
+      - if:
+          condition:
+            lambda: 'return id(should_toggle_lights);'
+          then:
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  area_id: living_room
+
   - platform: tm1638
-    name: "Button 2 - Bio/Bio Office"
+    name: "Button 2 - Bio"
     id: button_2
     key: 1
     on_press:
-      # Turn off all lights in bio area (separate from bio_office)
-      - homeassistant.service:
-          service: light.turn_off
-          data:
-            area_id: bio
-      # Toggle bio_office climate heat mode
       - if:
           condition:
-            lambda: |-
-              return id(bio_office_hvac_state).has_state() && 
-                     (id(bio_office_hvac_state).state == "heat" || id(bio_office_hvac_state).state == "auto");
+            lambda: 'return millis() < id(snake_select_until_ms);'
           then:
-            # Climate is heating, turn OFF
-            - homeassistant.service:
-                service: climate.set_hvac_mode
-                data:
-                  entity_id: "climate.bio_office_heat"
-                  hvac_mode: "off"
+            - script.execute:
+                id: arm_snake_timer
+                mins: 2
           else:
-            # Climate is OFF, turn to heat mode
-            - homeassistant.service:
-                service: climate.set_hvac_mode
-                data:
-                  entity_id: "climate.bio_office_heat"
-                  hvac_mode: "heat"
+            - lambda: |-
+                id(press_start_b2) = millis();
+                ESP_LOGD("button", "B2 pressed (start=%lu)", (unsigned long) id(press_start_b2));
+            - script.execute: long_press_b2
+    on_release:
       - lambda: |-
-          id(button_pressed) = true;
-          id(button_press_time) = millis();
-  
+          static const uint32_t LIGHTS_BUTTON_TIMEOUT_MS = 8000;
+          static const int BTN_ID = 2;
+          const uint32_t now_ms = millis();
+          if (id(press_start_b2) == 0) {
+            ESP_LOGD("button", "B2 released after long-press already handled");
+            id(should_toggle_lights) = false;
+            return;
+          }
+          const uint32_t held = now_ms - id(press_start_b2);
+          ESP_LOGD("button", "B2 released after %ums (short-press path)", (unsigned) held);
+          const bool was_recent =
+              (id(last_lights_button) == BTN_ID) &&
+              (now_ms - id(last_lights_button_press) <= LIGHTS_BUTTON_TIMEOUT_MS);
+          id(last_lights_button) = BTN_ID;
+          id(last_lights_button_press) = now_ms;
+          id(should_toggle_lights) = was_recent;
+          char buf[16];
+          if (was_recent) {
+            snprintf(buf, sizeof(buf), "Bio togL");
+          } else if (!id(bio_lights_any_on).has_state()) {
+            snprintf(buf, sizeof(buf), "Bio  -- ");
+          } else if (id(bio_lights_any_on).state) {
+            snprintf(buf, sizeof(buf), "Bio  on ");
+          } else {
+            snprintf(buf, sizeof(buf), "Bio  off");
+          }
+          id(feedback_text) = std::string(buf);
+          id(feedback_until) = now_ms + 8000;
+      - if:
+          condition:
+            lambda: 'return id(should_toggle_lights);'
+          then:
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  area_id: bio
+
   - platform: tm1638
     name: "Button 3 - Bedroom"
     id: button_3
     key: 2
     on_press:
-      - homeassistant.service:
-          service: light.turn_off
-          data:
-            area_id: bedroom
+      - if:
+          condition:
+            lambda: 'return millis() < id(snake_select_until_ms);'
+          then:
+            - script.execute:
+                id: arm_snake_timer
+                mins: 3
+          else:
+            - lambda: |-
+                id(press_start_b3) = millis();
+                ESP_LOGD("button", "B3 pressed (start=%lu)", (unsigned long) id(press_start_b3));
+            - script.execute: long_press_b3
+    on_release:
       - lambda: |-
-          id(button_pressed) = true;
-          id(button_press_time) = millis();
-  
+          static const uint32_t LIGHTS_BUTTON_TIMEOUT_MS = 8000;
+          static const int BTN_ID = 3;
+          const uint32_t now_ms = millis();
+          if (id(press_start_b3) == 0) {
+            ESP_LOGD("button", "B3 released after long-press already handled");
+            id(should_toggle_lights) = false;
+            return;
+          }
+          const uint32_t held = now_ms - id(press_start_b3);
+          ESP_LOGD("button", "B3 released after %ums (short-press path)", (unsigned) held);
+          const bool was_recent =
+              (id(last_lights_button) == BTN_ID) &&
+              (now_ms - id(last_lights_button_press) <= LIGHTS_BUTTON_TIMEOUT_MS);
+          id(last_lights_button) = BTN_ID;
+          id(last_lights_button_press) = now_ms;
+          id(should_toggle_lights) = was_recent;
+          char buf[16];
+          if (was_recent) {
+            snprintf(buf, sizeof(buf), "BedrtogL");
+          } else if (!id(bedroom_lights_any_on).has_state()) {
+            snprintf(buf, sizeof(buf), "Bedr -- ");
+          } else if (id(bedroom_lights_any_on).state) {
+            snprintf(buf, sizeof(buf), "Bedr on ");
+          } else {
+            snprintf(buf, sizeof(buf), "Bedr off");
+          }
+          id(feedback_text) = std::string(buf);
+          id(feedback_until) = now_ms + 8000;
+      - if:
+          condition:
+            lambda: 'return id(should_toggle_lights);'
+          then:
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  area_id: bedroom
+
   - platform: tm1638
-    name: "Button 4 - Parent's Bedroom"
+    name: "Button 4 - Parents Bedroom"
     id: button_4
     key: 3
     on_press:
-      - homeassistant.service:
-          service: light.turn_off
-          data:
-            area_id: parent_s_bedroom
+      - if:
+          condition:
+            lambda: 'return millis() < id(snake_select_until_ms);'
+          then:
+            - script.execute:
+                id: arm_snake_timer
+                mins: 4
+          else:
+            - lambda: |-
+                id(press_start_b4) = millis();
+                ESP_LOGD("button", "B4 pressed (start=%lu)", (unsigned long) id(press_start_b4));
+            - script.execute: long_press_b4
+    on_release:
       - lambda: |-
-          id(button_pressed) = true;
-          id(button_press_time) = millis();
-  
-  # Buttons 5-7 available for future expansion
+          static const uint32_t LIGHTS_BUTTON_TIMEOUT_MS = 8000;
+          static const int BTN_ID = 4;
+          const uint32_t now_ms = millis();
+          if (id(press_start_b4) == 0) {
+            ESP_LOGD("button", "B4 released after long-press already handled");
+            id(should_toggle_lights) = false;
+            return;
+          }
+          const uint32_t held = now_ms - id(press_start_b4);
+          ESP_LOGD("button", "B4 released after %ums (short-press path)", (unsigned) held);
+          const bool was_recent =
+              (id(last_lights_button) == BTN_ID) &&
+              (now_ms - id(last_lights_button_press) <= LIGHTS_BUTTON_TIMEOUT_MS);
+          id(last_lights_button) = BTN_ID;
+          id(last_lights_button_press) = now_ms;
+          id(should_toggle_lights) = was_recent;
+          char buf[16];
+          if (was_recent) {
+            snprintf(buf, sizeof(buf), "Par togL");
+          } else if (!id(parents_lights_any_on).has_state()) {
+            snprintf(buf, sizeof(buf), "Par  -- ");
+          } else if (id(parents_lights_any_on).state) {
+            snprintf(buf, sizeof(buf), "Par  on ");
+          } else {
+            snprintf(buf, sizeof(buf), "Par  off");
+          }
+          id(feedback_text) = std::string(buf);
+          id(feedback_until) = now_ms + 8000;
+      - if:
+          condition:
+            lambda: 'return id(should_toggle_lights);'
+          then:
+            - homeassistant.service:
+                service: light.toggle
+                data:
+                  area_id: parent_s_bedroom
+
+  # Button 5: short press jumps to the calendar screen and advances to the
+  # next event; long press (>= 800 ms) opens a 5 s "select duration" window
+  # for the snake-egg cooking timer. Pressing any of buttons 1..8 inside
+  # that window arms an N-minute snake. A second long-press of B5 cancels
+  # an already-running snake. While inside the select window, B5 short
+  # presses count as "5 minutes" instead of jumping to the calendar.
   - platform: tm1638
-    name: "Button 5"
+    name: "Button 5 - Calendar Cycle"
     id: button_5
     key: 4
+    on_press:
+      - if:
+          condition:
+            lambda: 'return millis() < id(snake_select_until_ms);'
+          then:
+            - script.execute:
+                id: arm_snake_timer
+                mins: 5
+            - lambda: |-
+                id(press_start_b5) = 0;
+          else:
+            - lambda: |-
+                id(press_start_b5) = millis();
+                ESP_LOGD("button", "B5 pressed (start=%lu)", (unsigned long) id(press_start_b5));
+            - script.execute: long_press_b5
+    on_release:
+      - lambda: |-
+          static const int SCREEN_CALENDAR_IDX = 8;
+          const uint32_t now_ms = millis();
+          if (id(press_start_b5) == 0) {
+            ESP_LOGD("button", "B5 released after long-press already handled");
+            return;
+          }
+          const uint32_t held = now_ms - id(press_start_b5);
+          ESP_LOGD("button", "B5 released after %ums (short-press path)", (unsigned) held);
+          // Short press while the snake timer is running just exits it
+          // without changing the screen - long-press still cancels too,
+          // but a tap is enough for "I'm done with this".
+          if (id(snake_timer_active)) {
+            id(snake_timer_active) = false;
+            ESP_LOGI("snake", "Snake timer dismissed by short-press");
+            return;
+          }
+          int total = (int) id(cal_event_titles).size();
+          id(current_screen) = SCREEN_CALENDAR_IDX;
+          id(last_screen_change) = now_ms;
+          // Hold the calendar screen visible for ~5s even when empty.
+          // Without this the screen-skip rule immediately rewrites
+          // current_screen to SCREEN_MANIFOLD and the press feels dead.
+          id(force_calendar_until) = now_ms + 5000;
+          if (total > 0) {
+            id(cal_event_index) = (id(cal_event_index) + 1) % total;
+            ESP_LOGD("button", "B5 short: cal idx=%d/%d", id(cal_event_index), total);
+          } else {
+            ESP_LOGD("button", "B5 short: no events, showing noEvent for 5s");
+          }
+
+  # Button 6: short press = inside-temp / 23 / 20 / 17 cycle.
+  # Long press (>= 800 ms) = start hot-water boost (2 h).
   - platform: tm1638
-    name: "Button 6"
+    name: "Button 6 - Temp Cycle"
     id: button_6
     key: 5
+    on_press:
+      - if:
+          condition:
+            lambda: 'return millis() < id(snake_select_until_ms);'
+          then:
+            - script.execute:
+                id: arm_snake_timer
+                mins: 6
+          else:
+            - lambda: |-
+                id(press_start_b6) = millis();
+                ESP_LOGD("button", "B6 pressed (start=%lu)", (unsigned long) id(press_start_b6));
+            - script.execute: long_press_b6
+    on_release:
+      - if:
+          condition:
+            lambda: 'return id(press_start_b6) != 0;'
+          then:
+            - lambda: |-
+                static const uint32_t TEMP_BUTTON_TIMEOUT_MS = 8000;
+                static const uint32_t TEMP_BUTTON_DISPLAY_MS = 3000;
+                uint32_t now_ms = millis();
+                if (now_ms - id(last_temp_button_press) > TEMP_BUTTON_TIMEOUT_MS) {
+                  id(temp_button_step) = 0;
+                } else {
+                  id(temp_button_step) = (id(temp_button_step) + 1) % 4;
+                }
+                id(last_temp_button_press) = now_ms;
+                id(temp_button_display_until) = now_ms + TEMP_BUTTON_DISPLAY_MS;
+            - if:
+                condition:
+                  lambda: 'return id(temp_button_step) == 1;'
+                then:
+                  - homeassistant.service:
+                      service: input_number.set_value
+                      data:
+                        entity_id: input_number.sam_desired_temperature
+                        value: "23"
+            - if:
+                condition:
+                  lambda: 'return id(temp_button_step) == 2;'
+                then:
+                  - homeassistant.service:
+                      service: input_number.set_value
+                      data:
+                        entity_id: input_number.sam_desired_temperature
+                        value: "20"
+            - if:
+                condition:
+                  lambda: 'return id(temp_button_step) == 3;'
+                then:
+                  - homeassistant.service:
+                      service: input_number.set_value
+                      data:
+                        entity_id: input_number.sam_desired_temperature
+                        value: "17"
+          else:
+            - lambda: |-
+                ESP_LOGD("button", "B6 released after long-press (hot water)");
+
+  # Button 7: Lily feed counter. First short = view; second within 5s = +0.5; long = -1.
   - platform: tm1638
-    name: "Button 7"
+    name: "Button 7 - Lily Feed"
     id: button_7
     key: 6
-  
-  # Button 8 for calibration
+    on_press:
+      - if:
+          condition:
+            lambda: 'return millis() < id(snake_select_until_ms);'
+          then:
+            - script.execute:
+                id: arm_snake_timer
+                mins: 7
+          else:
+            - lambda: |-
+                id(press_start_b7) = millis();
+                ESP_LOGD("button", "B7 Lily pressed (start=%lu)", (unsigned long) id(press_start_b7));
+            - script.execute: long_press_b7
+    on_release:
+      - if:
+          condition:
+            lambda: 'return id(press_start_b7) != 0;'
+          then:
+            - lambda: |-
+                const uint32_t now_ms = millis();
+                id(lily_display_until) = now_ms + 4000;
+                if (id(lily_pending_add_until) > now_ms) {
+                  id(lily_pouch_count) += 0.5f;
+                  id(lily_last_feed_ms) = now_ms;
+                  id(lily_pending_add_until) = 0;
+                  ESP_LOGI("lily", "+0.5 pouch -> %.1f total", id(lily_pouch_count));
+                } else {
+                  id(lily_pending_add_until) = now_ms + 5000;
+                  ESP_LOGI("lily", "View only (press again within 5s to add 0.5)");
+                }
+            - if:
+                condition:
+                  lambda: 'return id(lily_pending_add_until) == 0;'
+                then:
+                  - homeassistant.service:
+                      service: input_number.set_value
+                      data:
+                        entity_id: input_number.lily_pouch_count
+                        value: !lambda 'return id(lily_pouch_count);'
+                  - homeassistant.service:
+                      service: input_datetime.set_datetime
+                      data:
+                        entity_id: input_datetime.lily_last_feed
+                        datetime: !lambda |-
+                          auto t = id(homeassistant_time).now();
+                          char buf[32];
+                          snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+                                   (int) t.year, (int) t.month, (int) t.day,
+                                   (int) t.hour, (int) t.minute, (int) t.second);
+                          return std::string(buf);
+          else:
+            - lambda: |-
+                ESP_LOGD("button", "B7 released after long-press (-1 pouch)");
+
+  # Button 8: Notifications. Short press cycles; long press dismisses.
   - platform: tm1638
-    name: "Button 8 - Calibration"
+    name: "Button 8 - Notifications"
     id: button_8
     key: 7
     on_press:
+      - if:
+          condition:
+            lambda: 'return millis() < id(snake_select_until_ms);'
+          then:
+            - script.execute:
+                id: arm_snake_timer
+                mins: 8
+          else:
+            - lambda: |-
+                id(press_start_b8) = millis();
+                ESP_LOGD("button", "B8 pressed (start=%lu)", (unsigned long) id(press_start_b8));
+            - script.execute: long_press_b8
+    on_release:
       - lambda: |-
-          if (id(cal_mode) == 0) {
-            id(cal_mode) = 1;  // Start ultrasonic calibration
-          } else if (id(cal_mode) == 1) {
-            id(empty_dist) = id(espresso_bean_level).state;  // Save empty level (first)
-            id(cal_mode) = 2;  // Move to 50g level
-          } else if (id(cal_mode) == 2) {
-            id(fifty_dist) = id(espresso_bean_level).state;  // Save 50g level
-            id(cal_mode) = 3;  // Move to full level
-          } else if (id(cal_mode) == 3) {
-            id(full_dist) = id(espresso_bean_level).state;  // Save full level (last)
-            id(cal_mode) = 4;  // Move to beep calibration
-          } else if (id(cal_mode) == 4) {
-            id(cal_mode) = 5;  // Save beep sample (placeholder)
-          } else if (id(cal_mode) == 5) {
-            id(cal_mode) = 0;  // Return to idle
+          static const int SCREEN_NOTIFY_IDX = 12;
+          static const uint32_t NOTIFY_SCROLL_MS_PER_CELL = 200u;
+          static const uint32_t NOTIFY_TAIL_DWELL_MS = 3000u;
+          const uint32_t now_ms = millis();
+          if (id(press_start_b8) == 0) {
+            ESP_LOGD("button", "B8 released after long-press already handled");
+            return;
           }
+          const int total = (int) id(notification_ids).size();
+          if (total > 0) {
+            id(current_notification_index) =
+                (id(current_notification_index) + 1) % total;
+          } else {
+            id(current_notification_index) = 0;
+          }
+          id(current_screen) = SCREEN_NOTIFY_IDX;
+          id(last_screen_change) = now_ms;
+          uint32_t hold_ms = NOTIFY_TAIL_DWELL_MS;
+          int idx = id(current_notification_index);
+          if (total > 0 && idx >= 0) {
+            int content_len = 0;
+            if (idx < (int) id(notification_messages).size() &&
+                !id(notification_messages)[idx].empty()) {
+              content_len = (int) id(notification_messages)[idx].size();
+            } else if (idx < (int) id(notification_titles).size()) {
+              content_len = (int) id(notification_titles)[idx].size();
+            }
+            const int total_scroll = (content_len + 4 - 8) > 0 ? (content_len + 4 - 8) : 0;
+            hold_ms = (uint32_t) total_scroll * NOTIFY_SCROLL_MS_PER_CELL
+                      + NOTIFY_TAIL_DWELL_MS;
+          }
+          id(notify_hold_until_ms) = now_ms + hold_ms;
+          ESP_LOGD("notify", "B8 hold-until set to now+%ums", (unsigned) hold_ms);
+
+# ------------------------------------------------------------------
+# HA-side buttons: air-fryer test + microphone diagnostic. Bean
+# calibration buttons are gone now that the bean-warning logic uses
+# fixed cm thresholds (5..12 cm) - see the espresso_bean_level
+# on_value handler. There's nothing to "set" on the device any more.
+# These appear in Home Assistant as buttons and don't take any TM1638
+# button slots.
+# ------------------------------------------------------------------
+button:
+  - platform: template
+    name: "Test Airfryer Beep"
+    id: test_airfryer_beep
+    on_press:
+      - script.execute: trigger_airfryer_beep_action
+
+  - platform: template
+    name: "Sample Airfryer Beep"
+    id: sample_airfryer_beep
+    on_press:
+      - script.execute: mic_sample_action
+
+  # Live mic-test button: kicks the same sampling routine without the
+  # "Sample" naming, useful for verifying the microphone hears anything
+  # at all (clap, whistle, etc).
+  - platform: template
+    name: "Microphone Self-Test"
+    id: mic_self_test_button
+    on_press:
+      - script.execute: mic_sample_action
+
+# Periodic rebuild of the active calendar event list.
+# Window: visible from 19:00 the day before start_time, until end_time.
+# Runs every 30s and updates cal_event_* globals consumed by the display.
+interval:
+  - interval: 30s
+    then:
+      - lambda: |-
+          id(cal_event_titles).clear();
+          id(cal_event_times).clear();
+          id(cal_event_show_time).clear();
+
+          auto now_time = id(homeassistant_time).now();
+          if (!now_time.is_valid()) {
+            return;
+          }
+          time_t now_ts = now_time.timestamp;
+
+          // Determine the device's current local UTC offset (in seconds)
+          // from the HA time component. We can't rely on mktime() picking
+          // up the TZ env var on this platform - the device log confirms
+          // mktime treats local-naive strings as UTC, which silently
+          // shifts every event by the local offset. Probing ESPTime's
+          // local fields against gmtime() gives us the right offset
+          // regardless of how (or whether) TZ was applied at boot.
+          int local_utc_offset_sec = 0;
+          {
+            struct tm gmt_tm;
+            gmtime_r(&now_ts, &gmt_tm);
+            int local_min = (int) now_time.hour * 60 + (int) now_time.minute;
+            int gmt_min = gmt_tm.tm_hour * 60 + gmt_tm.tm_min;
+            int diff_min = local_min - gmt_min;
+            // Wrap across the day boundary.
+            if (diff_min > 12 * 60) diff_min -= 24 * 60;
+            if (diff_min < -12 * 60) diff_min += 24 * 60;
+            local_utc_offset_sec = diff_min * 60;
+          }
+          ESP_LOGD("calendar", "Local UTC offset = %d s (is_dst=%d)",
+                   local_utc_offset_sec, (int) now_time.is_dst);
+
+          // Parse ISO-8601-ish timestamps from HA calendar attributes.
+          // Handles all of:
+          //   "2026-05-05T08:00:00+02:00"   (offset from UTC)
+          //   "2026-05-05T06:00:00Z"        (UTC)
+          //   "2026-05-05 08:00:00"         (no offset - assume device local)
+          //   "2026-05-05T08:00:00.123+02:00" (with fractional seconds)
+          //
+          // The previous version stripped *all* timezone info and called
+          // mktime() in the device's local TZ, which silently treated UTC
+          // strings as if they were Stockholm time and produced events that
+          // were off by the local UTC offset. We now compute a real UTC
+          // time_t using Howard Hinnant's days_from_civil algorithm and
+          // subtract the parsed offset, so localtime_r() in the display
+          // path is the *only* place the local TZ is applied.
+          auto parse_dt = [local_utc_offset_sec](const std::string &raw, time_t &out) -> bool {
+            if (raw.empty()) return false;
+            std::string s = raw;
+            for (auto &c : s) { if (c == 'T') c = ' '; }
+            int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+            int n = sscanf(s.c_str(), "%d-%d-%d %d:%d:%d",
+                           &year, &month, &day, &hour, &minute, &second);
+            if (n < 3) return false;
+
+            // Detect timezone marker. Search for it AFTER the seconds field
+            // so the date's own dashes (positions 4 and 7) are skipped.
+            bool tz_known = false;
+            int tz_offset_sec = 0;
+            const size_t tz_search_from = 19;
+            if (s.find('Z', tz_search_from) != std::string::npos) {
+              tz_known = true;
+              tz_offset_sec = 0;
+            } else {
+              size_t tz_pos = std::string::npos;
+              for (size_t i = tz_search_from; i < s.size(); i++) {
+                if (s[i] == '+' || s[i] == '-') { tz_pos = i; break; }
+              }
+              if (tz_pos != std::string::npos && tz_pos + 2 < s.size()) {
+                int sign = (s[tz_pos] == '+') ? 1 : -1;
+                int oh = 0, om = 0;
+                sscanf(s.c_str() + tz_pos + 1, "%2d:%2d", &oh, &om);
+                tz_offset_sec = sign * (oh * 3600 + om * 60);
+                tz_known = true;
+              }
+            }
+
+            // Always use days_from_civil so we never rely on mktime() picking
+            // up the TZ env var (which silently fails on this platform). For
+            // timestamps without an explicit offset we fall back to the local
+            // UTC offset captured from the HA time component above.
+            const int effective_offset_sec =
+                tz_known ? tz_offset_sec : local_utc_offset_sec;
+            int y = year;
+            unsigned m = (unsigned) month;
+            unsigned d = (unsigned) day;
+            y -= (m <= 2);
+            const int era = (y >= 0 ? y : y - 399) / 400;
+            const unsigned yoe = (unsigned)(y - era * 400);
+            const unsigned doy = (153u * (m > 2 ? m - 3 : m + 9) + 2u) / 5u + d - 1u;
+            const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+            const long long days_since_epoch = (long long) era * 146097LL
+                                              + (long long) doe - 719468LL;
+            const long long utc_seconds = days_since_epoch * 86400LL
+                                        + (long long) hour * 3600LL
+                                        + (long long) minute * 60LL
+                                        + (long long) second
+                                        - (long long) effective_offset_sec;
+            out = (time_t) utc_seconds;
+            ESP_LOGD("calendar",
+                     "parse_dt: raw='%s' tz_known=%d offset=%ds -> utc_ts=%lld",
+                     raw.c_str(), (int) tz_known, effective_offset_sec,
+                     (long long) out);
+            return true;
+          };
+
+          // Strip a leading "Name " from the event title so that the
+          // calendar's owner doesn't appear twice on the display (the
+          // calendar prefix already conveys whose event it is). Also
+          // collapse the well-known recurring activities to short labels
+          // that don't need to scroll.
+          auto shorten_title = [](const std::string &full) -> std::string {
+            std::string s = full;
+            // Common owner prefixes from the school calendars.
+            if (s.find("Felix ") == 0)  s = s.substr(6);
+            else if (s.find("Felix") == 0 && s.size() > 5) s = s.substr(5);
+            if (s.find("Isolde ") == 0) s = s.substr(7);
+            else if (s.find("Isolde") == 0 && s.size() > 6) s = s.substr(6);
+            if (s.find("Idrott") == 0)   return std::string("Gym");
+            if (s.find("Simning") == 0)  return std::string("Swim");
+            if (s.find("Swim") == 0)     return std::string("Swim");
+            if (s.find("Ridlekis") == 0) return std::string("Riding");
+            // Otherwise hand the body straight through; the display
+            // scrolling helper handles strings longer than 8 chars.
+            return s;
+          };
+
+          // Compose the displayed title given the cleaned body and the
+          // calendar prefix. For non-midnight events the prefix is
+          // prepended into the scrolling text ("F. Gym", "I. Swim") so
+          // the user sees whose calendar the event came from while the
+          // HHMM stays in the static slot. For midnight (all-day) events
+          // try_add_event puts the prefix into the static slot directly,
+          // and this function is called with cal_prefix="" so the title
+          // stays bare.
+          auto compose_title = [](const std::string &body,
+                                  const std::string &cal_prefix) {
+            if (cal_prefix.empty()) return body;
+            return cal_prefix + " " + body;
+          };
+
+          auto try_add_event = [&](const std::string &title_in,
+                                   const std::string &start_in,
+                                   const std::string &end_in,
+                                   const std::string &cal_prefix) {
+            if (title_in.empty() || start_in.empty()) return;
+            if (title_in == "unknown" || title_in == "unavailable" || title_in == "none") return;
+
+            time_t start_ts;
+            if (!parse_dt(start_in, start_ts)) return;
+
+            // Show window opens at 18:00 the day before the start. We
+            // compute this directly from start_ts rather than via mktime,
+            // because mktime ignores the TZ env var on this platform and
+            // would silently shift the window by the local offset (the
+            // same bug that made naive timestamps land 2 h late). Approach:
+            //   * localtime_r maps start_ts -> start_local (Stockholm).
+            //   * "local midnight of the start day" in UTC = start_ts -
+            //     (h*3600 + m*60 + s) using start_local's hh:mm:ss.
+            //   * 18:00 the day before = local_midnight - 6*3600.
+            // The 18:00 anchor (was 19:00) gives the user "after 6pm,
+            // unless there are evening events tonight, show the next
+            // day's events" - both today's evening events AND
+            // tomorrow's events end up in the active list at 18:00,
+            // so the cycler walks through whichever are present and
+            // the user only sees tomorrow if tonight is empty.
+            // This is correct except for the 1-hour DST-changeover edge
+            // case (twice a year) which we accept to keep the lambda
+            // simple and self-contained.
+            struct tm start_local;
+            localtime_r(&start_ts, &start_local);
+            const int local_secs_into_day =
+                start_local.tm_hour * 3600 +
+                start_local.tm_min * 60 +
+                start_local.tm_sec;
+            const time_t local_midnight = start_ts - local_secs_into_day;
+            const time_t show_from_ts = local_midnight - 6 * 3600;
+
+            // Use end_time when it's parseable, otherwise default to 1 hour
+            // after the start time so events without explicit end still fade out.
+            time_t end_ts = start_ts + 3600;
+            if (!end_in.empty()) {
+              time_t parsed_end;
+              if (parse_dt(end_in, parsed_end) && parsed_end > start_ts) {
+                end_ts = parsed_end;
+              }
+            }
+
+            if (now_ts < show_from_ts) return;
+            if (now_ts >= end_ts) return;
+
+            std::string body = shorten_title(title_in);
+            // Time classification:
+            //   * tm_hour == 0 && tm_min == 0  -> "all-day" / midnight event.
+            //                                     HA's calendar entities serialise
+            //                                     all-day events as starts at 00:00,
+            //                                     so we replace the static slot with
+            //                                     the calendar's owner-prefix instead
+            //                                     of an unhelpful "0000".
+            //   * tm_hour == 8 && tm_min == 0  -> "morning" event. We deliberately
+            //                                     suppress the static slot for these
+            //                                     so the title scrolls across the full
+            //                                     8 digits.
+            //   * everything else              -> static HHMM in slots 0..3 with the
+            //                                     title scrolling over the top.
+            const bool is_midnight = (start_local.tm_hour == 0 && start_local.tm_min == 0);
+            const bool is_8am      = (start_local.tm_hour == 8 && start_local.tm_min == 0);
+
+            std::string time_buf;
+            std::string disp_title;
+            if (is_midnight && !cal_prefix.empty()) {
+              // All-day event from a tagged calendar (Felix / Isolde):
+              // the prefix takes the static slot and the title scrolls
+              // bare so we don't double up the owner.
+              time_buf = cal_prefix;
+              while (time_buf.size() < 4) time_buf += ' ';
+              disp_title = body;
+            } else if (is_8am || is_midnight) {
+              // No static slot - title scrolls across all 8 chars. Even
+              // when there's a cal prefix we still inline it into the
+              // title so the user sees who the event belongs to.
+              time_buf = "";
+              disp_title = compose_title(body, cal_prefix);
+            } else {
+              // Normal event: HHMM static + prefixed title scrolling.
+              char tb[8];
+              snprintf(tb, sizeof(tb), "%02d%02d",
+                       start_local.tm_hour, start_local.tm_min);
+              time_buf = tb;
+              disp_title = compose_title(body, cal_prefix);
+            }
+            id(cal_event_titles).push_back(disp_title);
+            id(cal_event_times).push_back(time_buf);
+            id(cal_event_show_time).push_back(!time_buf.empty());
+          };
+
+          if (id(school_cal_1_message).has_state() && id(school_cal_1_start).has_state()) {
+            try_add_event(
+              id(school_cal_1_message).state,
+              id(school_cal_1_start).state,
+              id(school_cal_1_end).has_state() ? id(school_cal_1_end).state : std::string(""),
+              std::string("F."));
+          }
+          if (id(school_cal_2_message).has_state() && id(school_cal_2_start).has_state()) {
+            try_add_event(
+              id(school_cal_2_message).state,
+              id(school_cal_2_start).state,
+              id(school_cal_2_end).has_state() ? id(school_cal_2_end).state : std::string(""),
+              std::string("I."));
+          }
+          if (id(handl_f_message).has_state() && id(handl_f_start).has_state()) {
+            try_add_event(
+              id(handl_f_message).state,
+              id(handl_f_start).state,
+              id(handl_f_end).has_state() ? id(handl_f_end).state : std::string(""),
+              std::string(""));
+          }
+
+          int total = (int) id(cal_event_titles).size();
+          if (total <= 0 || id(cal_event_index) >= total || id(cal_event_index) < 0) {
+            id(cal_event_index) = 0;
+          }
+          ESP_LOGI("calendar", "Active events rebuilt: %d", total);
+
+  # Periodic heartbeat - if the device freezes mid-cycle this lets us see
+  # the last screen value in the logs and confirm the main loop is alive.
+  - interval: 60s
+    then:
+      - lambda: |-
+          ESP_LOGI("hb", "alive screen=%d cal_events=%d alarm=%d",
+                   id(current_screen),
+                   (int) id(cal_event_titles).size(),
+                   id(alarm_led_mode));
 
 # TM1638 Display Configuration
 display:
@@ -346,39 +2677,119 @@ display:
     stb_pin: GPIO5
     clk_pin: GPIO18
     dio_pin: GPIO17
-    update_interval: 500ms
+    # The TM1638 component polls its keys on every update(), so this also
+    # becomes the button polling rate. 100 ms (10 Hz) makes sure that even a
+    # quick ~200 ms tap is detected (a 500 ms poll could fall entirely
+    # between two presses and miss the event).
+    update_interval: 100ms
     intensity: 7
     lambda: |-
-      // Calibration mode display - takes priority
-      if (id(cal_mode) > 0) {
-        // Turn off all LEDs except LED8 (index 7) during calibration
-        for (int i = 0; i < 7; i++) {
-          it.set_led(i, false);
+      // 13 screens (0..12). Air-fryer and hours-to-target screens were
+      // removed because the device sits next to the air-fryer (visible
+      // power use already obvious) and hours-to-target was rarely useful.
+      static const int NUM_SCREENS = 13;
+      static const uint32_t SCREEN_HOLD_MS = 3500; // Standard auto-cycle dwell
+      static const uint32_t SCROLL_DURATION_MS = 3000; // Subtitle-style left-shift over the screen dwell
+      // Per-cell scroll rate for the notification title overlay. Keep in
+      // sync with the same constant in `Button 8 - Notifications` so the
+      // scroll completes precisely as `notify_hold_until_ms` expires.
+      static const uint32_t NOTIFY_SCROLL_MS_PER_CELL = 200u;
+
+      // Subtitle-style left-scroll: copy `width` chars of `full` into out[0..width-1]
+      // such that pos=0 at elapsed=0 and pos=(len-width) at elapsed>=duration.
+      // Strings <=width chars are space-padded. Width=8 is the "whole
+      // display" case (calendar / forecast); width=4 is used for the
+      // notification screen (HHMM static on the left, scrolling title in
+      // the right 4 slots).
+      auto scroll_text = [](const std::string &full, uint32_t elapsed_ms,
+                            uint32_t duration_ms, char *out, int width) {
+        const int len = (int) full.size();
+        const int max_pos = len > width ? len - width : 0;
+        int pos = 0;
+        if (max_pos > 0) {
+          if (elapsed_ms >= duration_ms) {
+            pos = max_pos;
+          } else {
+            pos = (int) (((uint64_t) elapsed_ms * (uint64_t) max_pos) /
+                         (uint64_t) duration_ms);
+          }
+          if (pos > max_pos) pos = max_pos;
         }
-        it.set_led(7, true);  // LED8 on during calibration
-        
-        if (id(cal_mode) == 1) {
-          it.print("caL");
-          it.printf(4, "Enpty");
-        } else if (id(cal_mode) == 2) {
-          it.print("caL");
-          it.printf(4, " 50g");
-        } else if (id(cal_mode) == 3) {
-          it.print("caL");
-          it.printf(4, "fuLL");
-        } else if (id(cal_mode) == 4) {
-          it.print("caL");
-          it.printf(4, "beep");
-        } else if (id(cal_mode) == 5) {
-          it.print("done");
-          it.printf(4, "    ");
+        for (int i = 0; i < width; i++) {
+          const int src = pos + i;
+          out[i] = (src < len) ? full[(size_t) src] : ' ';
         }
-        return;
-      }
-      
-      // Update alarm LED mode from Home Assistant state
+        out[width] = '\0';
+      };
+
+      // "Static prefix + scrolling title that walks over it" helper.
+      // Used by the calendar and notification screens so the time stays
+      // anchored on the left while the title scrolls leftwards across
+      // the whole 8 digits, eventually obscuring the time entirely.
+      //
+      // Layout, with prefix_len = 4:
+      //   t = 0:                  [P P P P|T0 T1 T2 T3]
+      //   t = mid:                [P P|T0 T1|T2 T3 T4 T5]
+      //   t = duration_ms:        [Tn-7 ... Tn-1]    (last 8 chars of title)
+      //
+      // Implementation matches the user's intuition exactly: render the
+      // prefix at slots 0..prefix_len-1 first, then "let the title scroll
+      // over it" by computing each slot from the title's index when
+      // valid, falling back to the prefix only where the title isn't
+      // currently covering that slot.
+      auto scroll_with_static_prefix = [](const std::string &prefix,
+                                          const std::string &title,
+                                          uint32_t elapsed_ms,
+                                          uint32_t duration_ms,
+                                          char *out) {
+        const int title_len  = (int) title.size();
+        const int prefix_len = (int) prefix.size();
+        // Total scroll travel: from "first prefix_len chars of title at
+        // slots prefix_len..7" to "last 8 chars of title at slots 0..7".
+        const int total_scroll =
+            (title_len + prefix_len - 8) > 0 ? (title_len + prefix_len - 8) : 0;
+        int scroll_done = 0;
+        if (total_scroll > 0) {
+          if (elapsed_ms >= duration_ms || duration_ms == 0) {
+            scroll_done = total_scroll;
+          } else {
+            scroll_done = (int) (((uint64_t) elapsed_ms * (uint64_t) total_scroll) /
+                                  (uint64_t) duration_ms);
+          }
+          if (scroll_done > total_scroll) scroll_done = total_scroll;
+        }
+        const int title_start = prefix_len - scroll_done;
+        for (int i = 0; i < 8; i++) {
+          const int title_idx = i - title_start;
+          if (title_idx >= 0 && title_idx < title_len) {
+            out[i] = title[(size_t) title_idx];
+          } else if (i < prefix_len) {
+            out[i] = prefix[(size_t) i];
+          } else {
+            out[i] = ' ';
+          }
+        }
+        out[8] = '\0';
+      };
+
+      // Screen indices (named for readability):
+      static const int SCREEN_BIO        = 0;
+      static const int SCREEN_HOTWATER   = 1;
+      static const int SCREEN_OUTSIDE    = 2;
+      static const int SCREEN_INSIDE     = 3;
+      static const int SCREEN_HUMIDITY   = 4;
+      static const int SCREEN_PRICE      = 5;
+      static const int SCREEN_BEANS      = 6;
+      static const int SCREEN_DATETIME   = 7;
+      static const int SCREEN_CALENDAR   = 8;
+      static const int SCREEN_MANIFOLD   = 9;
+      static const int SCREEN_FORECAST   = 10;
+      static const int SCREEN_DESIRED    = 11;
+      static const int SCREEN_NOTIFY     = 12;
+
+      // ----- Sync alarm LED mode from Home Assistant (every 1s) -----
       static unsigned long last_alarm_check = 0;
-      if (millis() - last_alarm_check > 1000) {  // Check every second
+      if (millis() - last_alarm_check > 1000) {
         if (id(alarm_level_state).has_state()) {
           std::string level = id(alarm_level_state).state;
           int mode = 0;
@@ -393,23 +2804,23 @@ display:
         }
         last_alarm_check = millis();
       }
-      
-      // Calculate alarm LED state based on mode (same as MiniDisplay)
+
+      // ----- Compute alarm flash phase (same patterns as MiniDisplay) -----
       const uint32_t now = millis();
       bool alarm_led_on = false;
       switch (id(alarm_led_mode)) {
-        case 0:  // OK - LED off
+        case 0:
           alarm_led_on = false;
           break;
-        case 1:  // Notify - single 300ms flash every 60 seconds
+        case 1:  // Notify - 300ms flash every 60s
           alarm_led_on = (now % 60000u) < 300u;
           break;
-        case 2: {  // Take Action - double flash every 20 seconds
+        case 2: {  // Take Action - double flash every 20s
           const uint32_t phase = now % 20000u;
           alarm_led_on = (phase < 200u) || (phase >= 300u && phase < 500u);
           break;
         }
-        case 3:  // Emergency - constant quick flash (200ms on/off)
+        case 3:  // Emergency - rapid 200ms on/off
           alarm_led_on = (now % 400u) < 200u;
           break;
         default:
@@ -417,94 +2828,600 @@ display:
           break;
       }
       id(alarm_led_state) = alarm_led_on;
-      
-      // Screen auto-cycling every 3.5 seconds
-      if (millis() - id(last_screen_change) > 3500) {
-        id(current_screen) = (id(current_screen) + 1) % 11;  // 0-10 screens
-        // Skip air fryer screen (0) if power is 0 or unavailable
-        if (id(current_screen) == 0) {
-          if (!id(airfryer_power).has_state() || id(airfryer_power).state <= 0) {
-            id(current_screen) = 1;  // Skip to next screen
+
+      // ----- Snake-select prompt (long-press of Button 5) -----
+      // Holding B5 opens a 5 s window during which buttons 1..8 each set
+      // the snake timer to N minutes. While the window is open we render
+      // a clear "Press 1-8" prompt with the seconds remaining so the user
+      // knows the device is waiting for input.
+      if (now < id(snake_select_until_ms)) {
+        const uint32_t remain_ms = id(snake_select_until_ms) - now;
+        const int remain_s = (int) ((remain_ms + 999u) / 1000u);
+        char buf[12];
+        snprintf(buf, sizeof(buf), "btn 1-8%d", remain_s);
+        it.print(buf);
+        // Light all 8 top LEDs as a "menu open" hint - they preview the
+        // 8 eggs that will appear once the user picks a duration.
+        for (int i = 0; i < 8; i++) {
+          it.set_led(i, true);
+        }
+        return;
+      }
+
+      // ----- Snake-egg cooking timer (long-press of Button 5) -----
+      //
+      // Animation contract (per the user's spec):
+      //   * The snake travels back and forth along the BOTTOM TWO ROWS
+      //     of the seven-segment display - the middle row (g segment,
+      //     looks like '-') and the bottom row (d segment, looks like
+      //     '_') - going round and round in a flat 18-cell loop:
+      //       cells  0..7  digits 0..7 with '_' (bottom L->R)
+      //       cell      8  digit 7 with  'j'  (c+d, RIGHT corner pivot
+      //                                       = lower-right vertical
+      //                                       + bottom; user's "mirror
+      //                                       of i")
+      //       cells  9..16 digits 7..0 with '-' (middle R->L)
+      //       cell     17  digit 0 with  'i'  (e, LEFT corner pivot
+      //                                       = lower-left vertical;
+      //                                       user's "i")
+      //     -> 18 cells * SNAKE_LOOP_STEP_MS = ~2.7 s per lap. Corner
+      //        cells get held SNAKE_LOOP_PIVOT_MS so the lower-vertical
+      //        glyph reads as a corner-rounding tick rather than a
+      //        flicker between '_' and '-'.
+      //   * Once a minute has PASSED the snake ASCENDS at the column
+      //     of the next egg (LED N is grabbed in minute N, sat above
+      //     digit N): (digit N, '-') -> (digit N, '>') a+b+g ->
+      //     (digit N, '~') top -> (digit N, '>') -> (digit N, '-')
+      //     in 5 cells * SNAKE_GRAB_STEP_MS = 4 s. Using '>' (a+b+g)
+      //     instead of '`' (just b) for the intermediate cells keeps
+      //     the g and a segments lit on the way up and down so the
+      //     head doesn't appear to "teleport" between '-' and '~'.
+      //     The LED for that egg goes OUT at the top of the climb
+      //     ("egg eaten"). The climb is placed in the LAST 4 s of each
+      //     minute so the user gets ~56 s of "round and round" first
+      //     per minute, matching "until a minute has passed and then
+      //     it will go up".
+      //   * The SNAKE GETS ONE LONGER each minute: the rendered length
+      //     starts at 2 (head + 1 trail cell) and grows by one segment
+      //     AT THE PEAK of each minute's climb (the moment the LED
+      //     goes out). Length is implemented as a trailing history of
+      //     the last N (digit, segment) cells the head occupied; the
+      //     body trails the head along whichever path it walks (loop
+      //     or climb).
+      //
+      // 7-segment encoding (sevenseg.h font):
+      //   bit 0 = a (top)            char '~' = 0x01
+      //   bit 1 = b (upper right)    char '`' = 0x02
+      //   bit 2 = c (lower right)    (no single-segment char in font)
+      //   bit 3 = d (bottom)         char '_' = 0x08
+      //   bit 4 = e (lower left)     char 'i' = 0x10  (','/'i' both)
+      //   bit 5 = f (upper left)     char '\''= 0x20
+      //   bit 6 = g (middle)         char '-' = 0x40
+      //
+      // The TM1638 component only supports printing single chars per
+      // digit (set_7seg_ is protected, no raw-byte API), so when
+      // several body cells share a digit we OR their segment bytes and
+      // look the result up in the font. The snake's vocabulary uses
+      // a, b, c, d, e, g - so the ORs we actually see are:
+      //   d         = '_'           d+g     = '='     a       = '~'
+      //   b         = '`'           a+b+g   = '>'     c+d     = 'j' (right pivot)
+      //   g         = '-'           e+g     = 'r' (body-only OR bridge)
+      //   e         = 'i'
+      // The head digit is always painted from head_char alone (see render
+      // block) so corners show 'j' / 'i' without bogus OR glyphs.
+      if (id(snake_timer_active)) {
+        // Honour the feedback overlay (e.g. "snake 5M" arm confirmation)
+        // before kicking into the animation so the user gets a clear
+        // confirmation that the press registered.
+        if (id(feedback_until) > now) {
+          for (int i = 0; i < 8; i++) it.set_led(i, false);
+          it.print("        ");
+          it.print(id(feedback_text).c_str());
+          return;
+        }
+        static const uint32_t SECS_PER_MIN_MS      = 60000u;
+        static const uint32_t SNAKE_GRAB_STEP_MS   = 800u;
+        static const uint32_t SNAKE_LOOP_STEP_MS   = 200u;     // straight-run cell
+        static const uint32_t SNAKE_LOOP_PIVOT_MS  = 500u;     // corner ('j'/'i') cell
+        static const int      SNAKE_LOOP_CELLS     = 18;
+        // Ending animation: long enough for the user to enjoy the
+        // fireworks AND ride out the trigger_airfryer_beep_action that
+        // is also fired at the start (display overlay 2.5 s, floodlight
+        // green 5 s, plus a mobile notification).
+        static const uint32_t SNAKE_END_MS         = 15000u;
+
+        // ---- char <-> segment-byte helpers ------------------------
+        // 7-segment encoding (see font excerpt at the top of this
+        // lambda). The snake only ever writes single chars per
+        // digit, but several body cells often share a digit so we OR
+        // their segment bytes and look the byte up in the font. The
+        // fallback for an OR with no glyph is "most recent char on
+        // that digit", keeping the head visible.
+        auto char_to_seg = [](char c) -> uint8_t {
+          switch (c) {
+            case '~': return 0x01;  // a
+            case '`': return 0x02;  // b
+            case '_': return 0x08;  // d
+            case 'i': return 0x10;  // e          (left corner pivot)
+            case '\'': return 0x20; // f
+            case '-': return 0x40;  // g
+            case '=': return 0x48;  // d+g
+            case '>': return 0x43;  // a+b+g      (smooth grab climb)
+            case '<': return 0x61;  // a+f+g
+            case '*': return 0x21;  // a+f
+            case ':': return 0x09;  // a+d
+            case 'j': return 0x0C;  // c+d        (right corner pivot)
+            case 'r': return 0x50;  // e+g        (left corner mid->in)
+            default:  return 0x00;
+          }
+        };
+        auto seg_to_char = [](uint8_t s) -> char {
+          switch (s) {
+            case 0x00: return ' ';
+            case 0x01: return '~';
+            case 0x02: return '`';
+            case 0x08: return '_';
+            case 0x09: return ':';
+            case 0x0C: return 'j';  // c+d  right corner pivot
+            case 0x10: return 'i';  // e    left  corner pivot
+            case 0x20: return '\'';
+            case 0x21: return '*';
+            case 0x40: return '-';
+            case 0x43: return '>';
+            case 0x48: return '=';
+            case 0x50: return 'r';  // e+g  left-corner mid->pivot OR
+            case 0x61: return '<';
+          }
+          return '\0';   // signal "no exact glyph - use fallback"
+        };
+        // 18-cell bottom+middle loop:
+        //   cells 0..7   digits 0..7 with '_'  (bottom L->R)
+        //   cell  8      digit 7    with 'j'  (right pivot c+d)
+        //   cells 9..16  digits 7..0 with '-' (middle R->L)
+        //   cell  17     digit 0    with 'i'  (left pivot e)
+        // The pivot cells are held SNAKE_LOOP_PIVOT_MS each (vs the
+        // straight-run SNAKE_LOOP_STEP_MS) so the user actually sees
+        // the lower-vertical glyph at the corner - 200 ms felt like a
+        // "hop" between '_' and '-'. 500 ms makes the corner tick
+        // visible. The body-OR trick gives a soft bridge on the way
+        // OUT of each corner ('-' OR 'i' = 'r' on the left; the right
+        // side's 'j' OR '-' = 0x4C has no glyph and falls back to '-',
+        // so the right corner reads slightly tighter than the left -
+        // acceptable since the font lacks a c-only glyph).
+        auto compute_loop_cell = [](int p, int &d, char &c) {
+          if (p < 8)        { d = p;             c = '_'; }
+          else if (p == 8)  { d = 7;             c = 'j'; }
+          else if (p < 17)  { d = 7 - (p - 9);   c = '-'; }
+          else              { d = 0;             c = 'i'; }
+        };
+        auto loop_step_for = [&](int idx) -> uint32_t {
+          return (idx == 8 || idx == 17) ? SNAKE_LOOP_PIVOT_MS
+                                         : SNAKE_LOOP_STEP_MS;
+        };
+        auto push_to_history = [](int d, char c) {
+          uint16_t packed = ((uint16_t)(d & 0x07) << 8) | (uint8_t) c;
+          // De-dup against the last push so we never accumulate
+          // identical entries (cheap insurance even though the state
+          // machine should never produce them).
+          if (!id(snake_history).empty() && id(snake_history).front() == packed) return;
+          id(snake_history).insert(id(snake_history).begin(), packed);
+          id(snake_last_head_packed) = packed;
+        };
+
+        const int total_minutes = id(snake_timer_minutes);
+        const uint32_t snake_elapsed = now - id(snake_timer_start_ms);
+        const bool snake_done =
+            (id(snake_next_egg) >= total_minutes) && !id(snake_in_grab);
+
+        if (!snake_done) {
+          // ====================================================
+          //  STATE MACHINE: LOOP <-> GRAB
+          // ====================================================
+          if (id(snake_in_grab)) {
+            // ---- GRAB phase: 5 cells, all on egg's digit ----
+            if (now - id(snake_grab_last_step_ms) >= SNAKE_GRAB_STEP_MS) {
+              id(snake_grab_idx) += 1;
+              id(snake_grab_last_step_ms) = now;
+              if (id(snake_grab_idx) > 4) {
+                // Grab finished. Resync the loop cursor onto cell
+                // (16 - just-grabbed-egg) which IS the (digit egg, '-')
+                // cell - the natural continuation of where the head
+                // sits at the end of the climb. This is the bit that
+                // makes the snake "carry on going round" instead of
+                // teleporting somewhere else.
+                const int last_egg = id(snake_next_egg);
+                id(snake_in_grab) = false;
+                id(snake_next_egg) = last_egg + 1;
+                id(snake_loop_idx) = 16 - last_egg;
+                id(snake_loop_last_step_ms) = now;
+                ESP_LOGI("snake", "Egg %d eaten - snake length now %d, loop resumes at cell %d",
+                         last_egg, last_egg + 2, id(snake_loop_idx));
+              } else {
+                // Push the new grab cell. snake_grab_idx is now 1..4:
+                //   1 - '>' (a+b+g) on the way up;
+                //   2 - '~' (a) at the top (LED goes off here);
+                //   3 - '>' (a+b+g) on the way back down;
+                //   4 - '-' (g) back to middle row.
+                // '>' is preferred over plain '`' (just b) because
+                // every adjacent pair in the sequence shares at least
+                // one segment ('-' & '>' share g, '>' & '~' share a,
+                // etc.), so the head visibly TRAVELS between the
+                // middle and top rows instead of teleporting from one
+                // standalone segment to another - this is what the
+                // user meant by "it jumps from where it is rather
+                // than travelling to it naturally".
+                const int d = id(snake_next_egg);
+                char c;
+                switch (id(snake_grab_idx)) {
+                  case 1: c = '>'; break;
+                  case 2: c = '~'; break;
+                  case 3: c = '>'; break;
+                  case 4: c = '-'; break;
+                  default: c = '-'; break;
+                }
+                push_to_history(d, c);
+              }
+            }
+          } else {
+            // ---- LOOP phase: walk 18-cell perimeter ----
+            const uint32_t step_ms = loop_step_for(id(snake_loop_idx));
+            if (now - id(snake_loop_last_step_ms) >= step_ms) {
+              id(snake_loop_idx) =
+                  (id(snake_loop_idx) + 1) % SNAKE_LOOP_CELLS;
+              id(snake_loop_last_step_ms) = now;
+              int d;
+              char c;
+              compute_loop_cell(id(snake_loop_idx), d, c);
+              push_to_history(d, c);
+
+              // After advancing, check whether the snake is now
+              // standing on the next egg's column AND that egg has
+              // become "ready" (i.e. its minute has rolled over).
+              // egg N is ready at t = (N+1)*60 s, which means the
+              // user gets a full minute of round-and-round walking
+              // BEFORE the first climb.
+              if (id(snake_next_egg) < total_minutes) {
+                const uint32_t ready_at_ms =
+                    (uint32_t)(id(snake_next_egg) + 1) * SECS_PER_MIN_MS;
+                const bool egg_ready = snake_elapsed >= ready_at_ms;
+                const int target_d = id(snake_next_egg);
+                if (egg_ready && d == target_d && c == '-') {
+                  id(snake_in_grab) = true;
+                  id(snake_grab_idx) = 0;
+                  id(snake_grab_last_step_ms) = now;
+                  ESP_LOGI("snake",
+                           "Egg %d ready and head at digit %d - starting climb",
+                           target_d, target_d);
+                }
+              }
+            }
+          }
+
+          // ---- Snake length / history trim ---------------------------
+          // Length starts at 2 (head + 1 trail cell, so "round and
+          // round" reads as a snake rather than a single flicker) and
+          // grows by 1 each time an egg is eaten. End length is
+          // total_minutes + 2.
+          int snake_length = id(snake_next_egg) + 2;
+          if (snake_length > total_minutes + 2) snake_length = total_minutes + 2;
+          while ((int) id(snake_history).size() > snake_length) {
+            id(snake_history).pop_back();
+          }
+
+          // ---- Render the snake body --------------------------------
+          // Always paint the head digit from head_char alone. OR-ing
+          // the head with trailing body on the same digit produced
+          // bogus glyphs at corners (e.g. 0x4C mapping to '3'). Body
+          // cells are taken from history[1..] only.
+          int head_digit = -1;
+          char head_char = ' ';
+          if (!id(snake_history).empty()) {
+            const uint16_t hp = id(snake_history)[0];
+            head_digit = (hp >> 8) & 0x07;
+            head_char  = (char) (hp & 0xFF);
+          }
+
+          uint8_t digit_segs[8] = {0,0,0,0,0,0,0,0};
+          char    digit_recent[8] = {' ',' ',' ',' ',' ',' ',' ',' '};
+          for (size_t i = 1; i < id(snake_history).size(); ++i) {
+            const uint16_t packed = id(snake_history)[i];
+            const int d = (packed >> 8) & 0x07;
+            const char c = (char) (packed & 0xFF);
+            if (d == head_digit) continue;
+            digit_segs[d] |= char_to_seg(c);
+            if (digit_recent[d] == ' ') digit_recent[d] = c;
+          }
+          char buf[2] = {' ', '\0'};
+          for (int d = 0; d < 8; ++d) {
+            char ch;
+            if (d == head_digit) {
+              ch = head_char;
+            } else {
+              ch = seg_to_char(digit_segs[d]);
+              if (ch == '\0') ch = digit_recent[d];
+            }
+            buf[0] = ch;
+            it.print((uint8_t) d, buf);
+          }
+
+          // ---- LEDs (eggs) -----------------------------------------
+          // Anchored to digit position: LED N == egg above digit N. An
+          // egg disappears the moment the snake's head reaches the top
+          // of its climb (snake_grab_idx >= 2). LEDs are initially lit
+          // only in positions 0..total_minutes-1.
+          int eggs_eaten = id(snake_next_egg);
+          if (id(snake_in_grab) && id(snake_grab_idx) >= 2) eggs_eaten++;
+          if (eggs_eaten > total_minutes) eggs_eaten = total_minutes;
+          for (int i = 0; i < 8; ++i) {
+            it.set_led(i, i < total_minutes && i >= eggs_eaten);
+          }
+          return;
+        }
+
+        // ====================================================
+        //  ENDING ANIMATION (all eggs eaten)
+        // ====================================================
+        // Always plays the "fireworks" pattern (was the kind==2 branch
+        // of three rotating variants) because that's what the user
+        // wanted. We also kick off trigger_airfryer_beep_action ONCE
+        // at the start of the ending so the kitchen gets the same
+        // floodlight-flash + mobile-notification alert as a real
+        // airfryer beep - the snake-timer ending is effectively a
+        // "your bake is done" cue.
+        if (id(snake_done_at_ms) == 0) {
+          id(snake_done_at_ms) = now;
+          ESP_LOGI("snake",
+                   "All %d eggs eaten in %lus - firing airfryer alert and "
+                   "playing fireworks for %lu ms",
+                   total_minutes,
+                   (unsigned long)(snake_elapsed / 1000),
+                   (unsigned long) SNAKE_END_MS);
+          id(trigger_airfryer_beep_action).execute();
+        }
+        const uint32_t end_phase = now - id(snake_done_at_ms);
+        if (end_phase < SNAKE_END_MS) {
+          // Fireworks: flash "88888888" alternated with ". . . . " and
+          // strobe all 8 LEDs together. Simple, bright, unambiguous.
+          const bool flash = ((end_phase / 200u) & 1u) != 0u;
+          if (flash) {
+            it.print("88888888");
+            for (int i = 0; i < 8; i++) it.set_led(i, true);
+          } else {
+            it.print(". . . . ");
+            for (int i = 0; i < 8; i++) it.set_led(i, false);
+          }
+          return;
+        }
+        ESP_LOGI("snake", "Ending animation finished - returning to screens");
+        id(snake_timer_active) = false;
+        // Fall through to normal screen rotation below.
+      }
+
+      // ----- Auto-cycling logic (with calendar event sub-cycle) -----
+      const int num_cal_events = (int) id(cal_event_titles).size();
+      // SCREEN_NOTIFY observes a per-press extended hold so a manual cycle
+      // (B8 short press) can let a long title fully scroll past + a few
+      // seconds of dwell before the auto-rotation kicks in again.
+      const bool notify_hold_active =
+          (id(current_screen) == SCREEN_NOTIFY) &&
+          (now < id(notify_hold_until_ms));
+      if (!notify_hold_active && now - id(last_screen_change) > SCREEN_HOLD_MS) {
+        bool advance_outer = true;
+        if (id(current_screen) == SCREEN_CALENDAR && num_cal_events > 0) {
+          // Stay on calendar while there are more events to cycle through.
+          if (id(cal_event_index) < num_cal_events - 1) {
+            id(cal_event_index) += 1;
+            advance_outer = false;
+          } else {
+            id(cal_event_index) = 0;
           }
         }
-        // Skip manifold screen (10) if temperatures unavailable
-        if (id(current_screen) == 10) {
+        // Honour the Button 5 "force calendar visible" override even when
+        // there are zero events, so the user actually sees "noEvent" for
+        // a few seconds after pressing the button.
+        if (id(current_screen) == SCREEN_CALENDAR &&
+            now < id(force_calendar_until)) {
+          advance_outer = false;
+        }
+        if (advance_outer) {
+          id(current_screen) = (id(current_screen) + 1) % NUM_SCREENS;
+        }
+
+        // Skip-rules for screens that need data to be meaningful.
+        // The calendar skip is suspended for ~5 s after Button 5 is pressed
+        // (force_calendar_until) so the user sees "noEvent" instead of the
+        // press feeling like a no-op.
+        if (id(current_screen) == SCREEN_CALENDAR && num_cal_events == 0 &&
+            now >= id(force_calendar_until)) {
+          id(current_screen) = SCREEN_MANIFOLD;
+        }
+        // Beans screen is now low-only: when bean_warning_active is false
+        // we don't show it at all (LED8 is dark too). This stops the
+        // hopper from contributing a "everything's fine" indicator to the
+        // normal cycle - the user only sees the screen when there's
+        // something to act on.
+        if (id(current_screen) == SCREEN_BEANS && !id(bean_warning_active)) {
+          id(current_screen) = SCREEN_DATETIME;
+        }
+        if (id(current_screen) == SCREEN_MANIFOLD) {
           if (!id(lowest_loop_temp).has_state() && !id(manifold_air_temp).has_state()) {
-            id(current_screen) = 0;  // Skip if no manifold data
+            id(current_screen) = SCREEN_FORECAST;
           }
         }
-        // Skip calendar screen (9) if no relevant events
-        if (id(current_screen) == 9) {
-          // Check binary sensors from Home Assistant for reliable morning alerts
-          bool show_felix = id(felix_morning_alert).has_state() && id(felix_morning_alert).state;
-          bool show_isolde = id(isolde_morning_alert).has_state() && id(isolde_morning_alert).state;
-          
-          if (!show_felix && !show_isolde) {
-            id(current_screen) = 0;  // Skip calendar screen - no alerts active
+        if (id(current_screen) == SCREEN_FORECAST &&
+            !id(forecast_today_max).has_state() &&
+            !id(forecast_tonight_min).has_state() &&
+            !id(outside_temp).has_state()) {
+          id(current_screen) = SCREEN_DESIRED;
+        }
+        if (id(current_screen) == SCREEN_DESIRED && !id(sam_target_temp).has_state()) {
+          id(current_screen) = SCREEN_NOTIFY;
+        }
+        if (id(current_screen) == SCREEN_NOTIFY) {
+          bool has_alarm = id(alarm_led_mode) > 0;
+          bool has_notes = id(notification_ids_csv).has_state() &&
+                           !id(notification_ids_csv).state.empty();
+          if (!has_alarm && !has_notes) {
+            id(current_screen) = SCREEN_BIO;
           }
         }
         id(last_screen_change) = millis();
       }
-      
-      // If button pressed, show On/Off for 1 second
-      if (id(button_pressed) && millis() - id(button_press_time) < 1000) {
-        it.print("  on  ");  // Placeholder - will be updated based on actual state
+
+      // ----- Generic feedback overlay (lights buttons / cal / notify) -----
+      // Used by:
+      //  * HA bean-calibration buttons     ("Em XX.X" etc.)
+      //  * TM1638 lights buttons 1-3       ("Liv  on " / "Liv FuLL" etc.)
+      //  * TM1638 Button 8 notifications   ("noteDIS " / "noteNONE")
+      if (id(feedback_until) > now) {
+        for (int i = 0; i < 8; i++) {
+          it.set_led(i, false);
+        }
+        // Fully clear the 8-digit buffer so leftover chars don't bleed through.
+        it.print("        ");
+        it.print(id(feedback_text).c_str());
+        if (alarm_led_on) {
+          for (int i = 0; i < 8; i++) it.set_led(i, true);
+        }
+        return;
+      }
+
+      // ----- Lily feed display (Button 7 - overrides screens) -----
+      if (id(lily_display_until) > now) {
+        for (int i = 0; i < 8; i++) {
+          it.set_led(i, false);
+        }
+        it.print("        ");
+        if (id(lily_last_feed_ms) == 0) {
+          it.print("  --:--");
+        } else {
+          const uint32_t ago_s = (now - id(lily_last_feed_ms)) / 1000u;
+          unsigned hrs = (unsigned) (ago_s / 3600u);
+          unsigned mins = (unsigned) ((ago_s % 3600u) / 60u);
+          if (hrs > 99u) {
+            hrs = 99u;
+          }
+          it.printf(0, "%02u:%02u", hrs, mins);
+        }
+        it.printf(5, "%3.1f", id(lily_pouch_count));
+        if (alarm_led_on) {
+          for (int i = 0; i < 8; i++) it.set_led(i, true);
+        }
+        return;
+      }
+
+      // ----- Temp button feedback display (overrides screen content) -----
+      if (id(temp_button_display_until) > now) {
+        for (int i = 0; i < 8; i++) {
+          it.set_led(i, false);
+        }
+        // Clear all 8 digits so a previous longer message doesn't bleed through.
+        it.print("        ");
+        if (id(temp_button_step) == 0) {
+          // First press: just show the inside temperature.
+          it.print("in  ");
+          if (id(inside_temp).has_state()) {
+            it.printf(4, "%4.1fC", id(inside_temp).state);
+          } else {
+            it.print(4, " --C");
+          }
+        } else {
+          static const int kTargets[] = {0, 23, 20, 17};
+          int t = kTargets[id(temp_button_step) % 4];
+          it.print("Set ");
+          it.printf(4, "%3dC", t);
+        }
+        if (alarm_led_on) {
+          for (int i = 0; i < 8; i++) it.set_led(i, true);
+        }
+        return;
+      }
+
+      // ----- Generic 1s "On/Off" feedback after lights/climate buttons -----
+      if (id(button_pressed) && now - id(button_press_time) < 1000) {
+        it.print("  on  ");
         return;
       } else {
         id(button_pressed) = false;
       }
-      
-      // Turn off all LEDs first
+
+      // ----- Baseline LED states (per-screen + ambient indicators) -----
       for (int i = 0; i < 8; i++) {
         it.set_led(i, false);
       }
-      
-      // LED7: Alarm level indicator (always active based on alarm state)
-      it.set_led(6, id(alarm_led_state));
-      
-      // LED6: Boiler connected or heater relays active
-      bool boiler_or_heater = false;
-      if (id(boiler_relay_1).has_state() && id(boiler_relay_1).state) {
-        boiler_or_heater = true;
+      // LEDs 1-3 are the three "screen indicator" lights, kept on the
+      // left so the row reads as: [screens][ambient state][alerts].
+      // LED1 (index 0): Manifold screen
+      if (id(current_screen) == SCREEN_MANIFOLD) {
+        it.set_led(0, true);
       }
-      if (id(boiler_relay_2).has_state() && id(boiler_relay_2).state) {
-        boiler_or_heater = true;
+      // LED2 (index 1): Bio Office screen
+      if (id(current_screen) == SCREEN_BIO) {
+        it.set_led(1, true);
       }
-      it.set_led(5, boiler_or_heater);
-      
-      // LED5: Power price screen indicator
-      if (id(current_screen) == 6) {
+      // LED3 (index 2): Power price screen
+      if (id(current_screen) == SCREEN_PRICE) {
+        it.set_led(2, true);
+      }
+      // LED4 (index 3): Notifications waiting (steady ambient indicator)
+      bool any_notes = id(notification_ids_csv).has_state() &&
+                       !id(notification_ids_csv).state.empty();
+      if (any_notes) {
+        it.set_led(3, true);
+      }
+      // LED5 (index 4): Hot water on/off (steady) - mirrors the
+      // switch.smart_plug_2_socket_1 state regardless of which screen is up.
+      if (id(hot_water).has_state() && id(hot_water).state) {
         it.set_led(4, true);
       }
-      
-      // Check if beans are low and flash LED8
-      float bean_threshold = id(full_dist) + (id(empty_dist) - id(full_dist)) * 0.2;
+      // LED6 (index 5): Boiler / heater relays active
+      bool boiler_or_heater = false;
+      if (id(boiler_relay_1).has_state() && id(boiler_relay_1).state) boiler_or_heater = true;
+      if (id(boiler_relay_2).has_state() && id(boiler_relay_2).state) boiler_or_heater = true;
+      it.set_led(5, boiler_or_heater);
+      // LED7 (index 6): Cheap power - lit when current Nordpool price is in the "low" band
+      if (id(power_price_is_low).has_state() && id(power_price_is_low).state) {
+        it.set_led(6, true);
+      }
+      // LED8 (index 7): Low-beans flashing alert. The warning state is
+      // computed by the espresso_bean_level on_value handler: it only
+      // goes true once the reading has stayed in the 5..12 cm "reliable
+      // low" band for 10 s continuously, so transient bean shifts when
+      // pouring fresh beans in don't trigger a false alarm.
       static unsigned long last_bean_flash = 0;
       static bool bean_led_state = false;
-      if (id(espresso_bean_level).state > bean_threshold && id(espresso_bean_level).state > 0) {
-        if (millis() - last_bean_flash > 500) {  // Flash every 500ms
+      const bool beans_low = id(bean_warning_active);
+      if (beans_low) {
+        if (now - last_bean_flash > 500) {
           bean_led_state = !bean_led_state;
-          last_bean_flash = millis();
+          last_bean_flash = now;
         }
-        it.set_led(7, bean_led_state);  // Flash LED8
+        it.set_led(7, bean_led_state);
       }
-      
-      // Clear display
-      it.print("        ");  // 8 spaces to clear all digits
-      
-      // Display based on current screen
-      if (id(current_screen) == 0) {
-        // Screen 0: Air Fryer Power (only shown when power > 0)
-        it.print("AirW");
-        if (id(airfryer_power).has_state()) {
-          int power = (int)id(airfryer_power).state;  // Display whole watts only
-          it.printf(4, "%d", power);
-        } else {
-          it.print(4, " --");
+
+      // Alarm overlay: when the alarm flash phase is ON, light all 8 LEDs.
+      // Between flashes the ambient/per-screen LEDs are visible again.
+      if (alarm_led_on) {
+        for (int i = 0; i < 8; i++) {
+          it.set_led(i, true);
         }
-      } else if (id(current_screen) == 1) {
-        // Screen 1: Bio Office - climate mode on left, current temperature on right, LED2 on
-        it.set_led(1, true);  // LED2 (matches Button 2)
+      }
+
+      // ----- Clear display before drawing -----
+      it.print("        ");
+
+      // ----- Render screens -----
+      // Note on right-alignment for the TM1638 8-digit display:
+      //  - The decimal point is absorbed into the previous digit, so "%.1f"
+      //    occupies 3 display positions for "23.5" but only 2 positions of
+      //    actual character drawing.
+      //  - To right-align a "%.1f" value into a 4-position slot we therefore
+      //    use "%5.1f" (5-char string -> 4 display positions including the
+      //    leading space). Same logic for "%5.2f" (price), "%4d" (integer)
+      //    and "%4.1fC" / "%4.1fh" where the trailing unit char takes a slot.
+      //  - This guarantees no trailing blank on the right edge.
+      if (id(current_screen) == SCREEN_BIO) {
+        // Bio Office HVAC mode + current temperature
         if (id(bio_office_hvac_state).has_state()) {
           std::string hvac_state = id(bio_office_hvac_state).state;
           if (hvac_state == "heat" || hvac_state == "auto") {
@@ -516,51 +3433,49 @@ display:
           it.print(" ---");
         }
         if (id(bio_office_current_temp).has_state()) {
-          it.printf(4, "%.1fC", id(bio_office_current_temp).state);
+          it.printf(4, "%4.1fC", id(bio_office_current_temp).state);
         } else {
           it.print(4, " ---");
         }
-      } else if (id(current_screen) == 2) {
-        // Screen 2: Hot Water Status with Boiler Temperature
+      } else if (id(current_screen) == SCREEN_HOTWATER) {
+        // Hot Water status + boiler temperature
         it.print("hot ");
         if (id(hot_water).has_state() && id(hot_water).state) {
           it.printf(4, " on ");
         } else {
           it.printf(4, " off");
         }
-        // Override right side with boiler temp if available
         if (id(hot_water_boiler_temp).has_state()) {
-          it.printf(4, "%.1fC", id(hot_water_boiler_temp).state);
+          it.printf(4, "%4.1fC", id(hot_water_boiler_temp).state);
         }
-      } else if (id(current_screen) == 3) {
-        // Screen 3: Outside Temperature
+      } else if (id(current_screen) == SCREEN_OUTSIDE) {
+        // Outside Temperature
         it.print("out ");
         if (id(outside_temp).has_state()) {
-          it.printf(4, "%.1fC", id(outside_temp).state);
+          it.printf(4, "%4.1fC", id(outside_temp).state);
         } else {
           it.print(4, " --C");
         }
-      } else if (id(current_screen) == 4) {
-        // Screen 4: Inside Temperature
+      } else if (id(current_screen) == SCREEN_INSIDE) {
+        // Inside Temperature
         it.print("in  ");
         if (id(inside_temp).has_state()) {
-          it.printf(4, "%.1fC", id(inside_temp).state);
+          it.printf(4, "%4.1fC", id(inside_temp).state);
         } else {
           it.print(4, " --C");
         }
-      } else if (id(current_screen) == 5) {
-        // Screen 5: Inside Humidity
+      } else if (id(current_screen) == SCREEN_HUMIDITY) {
+        // Inside Humidity (no unit -> right-align in full 4 slots)
         it.print("in h");
         if (id(inside_humidity).has_state()) {
-          it.printf(4, "%.1f", id(inside_humidity).state);
+          it.printf(4, "%5.1f", id(inside_humidity).state);
         } else {
-          it.print(4, " --");
+          it.print(4, "  --");
         }
-      } else if (id(current_screen) == 6) {
-        // Screen 6: Power Price (LED5 on, show price on left, Lo/High on right)
-        // LED already set above
+      } else if (id(current_screen) == SCREEN_PRICE) {
+        // Power Price + Lo/High band (price has no unit on left)
         if (id(power_price).has_state()) {
-          it.printf("%.2f", id(power_price).state);
+          it.printf("%5.2f", id(power_price).state);
           if (id(power_price_is_low).has_state() && id(power_price_is_low).state) {
             it.print(4, "  Lo");
           } else {
@@ -569,76 +3484,265 @@ display:
         } else {
           it.print(" ---");
         }
-      } else if (id(current_screen) == 7) {
-        // Screen 7: Coffee Bean Level (no LED, LED8 flashes for low beans)
-        float threshold = id(full_dist) + (id(empty_dist) - id(full_dist)) * 0.2;
-        if (id(espresso_bean_level).state > threshold && id(espresso_bean_level).state > 0) {
-          it.print("beanLo");
+      } else if (id(current_screen) == SCREEN_BEANS) {
+        // Coffee Bean Level. The display is intentionally minimal now -
+        // when the warning is active the screen just reads "Bean Lo ";
+        // the live cm value is still published to HA via
+        // sensor.kitchen_detectorer_espresso_bean_level for diagnostics.
+        // The auto-cycle skip-rule below makes sure we never even land
+        // on this screen while the warning is inactive, so the user
+        // only sees it when there is actually something to act on.
+        if (id(bean_warning_active)) {
+          it.print("Bean Lo ");
         } else {
-          it.print("beanok");
+          // Defensive: should never be visible thanks to the skip rule.
+          it.print("Beans   ");
         }
-        it.printf(4, "%.1f", id(espresso_bean_level).state);
-      } else if (id(current_screen) == 8) {
-        // Screen 8: Date and Time
-        auto time = id(homeassistant_time).now();
-        if (time.is_valid()) {
-          it.printf("%02d.%02d", time.day_of_month, time.month);
-          it.printf(4, "%02d.%02d", time.hour, time.minute);
+      } else if (id(current_screen) == SCREEN_DATETIME) {
+        // Date and Time
+        auto t = id(homeassistant_time).now();
+        if (t.is_valid()) {
+          it.printf("%02d.%02d", t.day_of_month, t.month);
+          it.printf(4, "%02d.%02d", t.hour, t.minute);
         } else {
           it.print("--.--.--");
         }
-      } else if (id(current_screen) == 9) {
-        // Screen 9: Calendar Events (Felix activities, Isolde riding) - no specific LED
-        
-        bool felix_alert = id(felix_morning_alert).has_state() && id(felix_morning_alert).state;
-        bool isolde_alert = id(isolde_morning_alert).has_state() && id(isolde_morning_alert).state;
-        
-        if (felix_alert && id(felix_calendar_event).has_state()) {
-          std::string event = id(felix_calendar_event).state;
-          
-          // Check for Felix events and shorten
-          if (event.find("Felix Swim") == 0) {
-            it.print("F. Swim");
-          } else if (event.find("Felix Idrott") == 0) {
-            it.print("F.   PE");
-          } else if (event.find("Felix") == 0) {
-            // Generic Felix event
-            it.print("F.");
-            if (event.length() > 6) {
-              it.printf(4, event.substr(6, 4).c_str());
-            }
+      } else if (id(current_screen) == SCREEN_CALENDAR) {
+        // Calendar Events. The HHMM stays anchored at slots 0..3 while
+        // the event title scrolls leftwards across the whole display
+        // over SCROLL_DURATION_MS (3 s) - so an 18-char title still fits
+        // and the user reads it as "(static time) (title walking past)".
+        // 8am-exact events skip the static time portion entirely and
+        // just scroll the title across all 8 slots. Long-press / Button
+        // 5 still cycles between events; the auto-cycle holds each
+        // event for SCREEN_HOLD_MS (3.5 s) before advancing.
+        if (num_cal_events == 0) {
+          it.print("noEvent ");
+        } else {
+          int idx = id(cal_event_index);
+          if (idx >= num_cal_events) idx = 0;
+          const std::string &title = id(cal_event_titles)[idx];
+          const std::string &time_str = id(cal_event_times)[idx]; // "HHMM"
+          const bool show_t = id(cal_event_show_time)[idx];
+
+          char buf[9];
+          const uint32_t elapsed = now - id(last_screen_change);
+          if (show_t && time_str.size() >= 4) {
+            scroll_with_static_prefix(time_str, title, elapsed,
+                                      SCROLL_DURATION_MS, buf);
           } else {
-            // Fallback if calendar doesn't show Felix event but alert is active
-            it.print("Felix");
-            it.printf(4, " 8am");
+            scroll_text(title, elapsed, SCROLL_DURATION_MS, buf, 8);
           }
-        } else if (isolde_alert) {
-          it.print("Riding");
-          it.printf(4, " 930");
-        } else {
-          // Shouldn't get here, but fallback
-          it.print("Event");
+          it.print(buf);
         }
-      } else if (id(current_screen) == 10) {
-        // Screen 10: Manifold Temperatures (Loop & Air) with LED indicator
-        it.set_led(0, true);  // LED1 for manifold screen
-        // Show loop temp on left half (3 chars), air temp on right half (5 chars with "C")
+      } else if (id(current_screen) == SCREEN_MANIFOLD) {
+        // Manifold Loop Return (left, with C) + Air Temperature (right, with C).
+        // Both halves use %4.1fC so the rightmost digit is always a temperature
+        // digit or the "C" unit, never a blank.
         if (id(lowest_loop_temp).has_state()) {
-          it.printf("%.1f", id(lowest_loop_temp).state);
+          it.printf("%4.1fC", id(lowest_loop_temp).state);
         } else {
-          it.print(" --");
+          it.print(" --C");
         }
         if (id(manifold_air_temp).has_state()) {
-          it.printf(4, "%.1fC", id(manifold_air_temp).state);
+          it.printf(4, "%4.1fC", id(manifold_air_temp).state);
         } else {
           it.print(4, " --C");
         }
-      }
+      } else if (id(current_screen) == SCREEN_FORECAST) {
+        // Forecast screen - scrolls D/N forecast temp + condition + live
+        // outside temp. Same 15:00-03:00 night-min rule as LoftWay.
+        //
+        // Format (over SCROLL_DURATION_MS = 3 s):
+        //   "D12.3 pCLOUd Out 9.0" before 15:00 and from 03:00
+        //   "N 8.2 RAIN  Out 9.0" from 15:00-03:00
+        bool show_night_min = false;
+        if (id(homeassistant_time).now().is_valid()) {
+          const int h = id(homeassistant_time).now().hour;
+          show_night_min = (h >= 15) || (h < 3);
+        }
+        auto fc_ok = [](float v, bool has) {
+          if (!has) return false;
+          if (v != v) return false;
+          if (v >  1.0e6f) return false;
+          if (v < -1.0e6f) return false;
+          return true;
+        };
+        char fc_buf[8];
+        if (show_night_min) {
+          float v = id(forecast_tonight_min).state;
+          if (fc_ok(v, id(forecast_tonight_min).has_state())) {
+            snprintf(fc_buf, sizeof(fc_buf), "N%4.1f", v);
+          } else {
+            snprintf(fc_buf, sizeof(fc_buf), "N --");
+          }
+        } else {
+          float v = id(forecast_today_max).state;
+          if (fc_ok(v, id(forecast_today_max).has_state())) {
+            snprintf(fc_buf, sizeof(fc_buf), "D%4.1f", v);
+          } else {
+            snprintf(fc_buf, sizeof(fc_buf), "D --");
+          }
+        }
+        char out_buf[8];
+        {
+          float v = id(outside_temp).state;
+          if (fc_ok(v, id(outside_temp).has_state())) {
+            snprintf(out_buf, sizeof(out_buf), "Out%4.1f", v);
+          } else {
+            snprintf(out_buf, sizeof(out_buf), "Out --");
+          }
+        }
+        std::string condition;
+        if (id(openweathermap_condition).has_state()) {
+          const std::string &raw = id(openweathermap_condition).state;
+          if (raw == "clear-night")           condition = "clear";
+          else if (raw == "cloudy")           condition = "cloudy";
+          else if (raw == "fog")              condition = "fog";
+          else if (raw == "hail")             condition = "hail";
+          else if (raw == "lightning")        condition = "storm";
+          else if (raw == "lightning-rainy")  condition = "storm";
+          else if (raw == "partlycloudy")     condition = "pCLOUd";
+          else if (raw == "pouring")          condition = "RAIN";
+          else if (raw == "rainy")            condition = "RAIN";
+          else if (raw == "snowy")            condition = "SNOW";
+          else if (raw == "snowy-rainy")      condition = "SLEEt";
+          else if (raw == "sunny")            condition = "SUN";
+          else if (raw == "windy")            condition = "WIND";
+          else if (raw == "windy-variant")    condition = "WIND";
+          else if (raw == "exceptional")      condition = "EXCEPt";
+          else condition = raw.substr(0, 6);
+        }
+        std::string full = std::string(fc_buf);
+        if (!condition.empty()) {
+          full += " ";
+          full += condition;
+        }
+        full += " ";
+        full += out_buf;
+        char buf[16];
+        const uint32_t elapsed = now - id(last_screen_change);
+        scroll_text(full, elapsed, SCROLL_DURATION_MS, buf, 8);
+        it.print(buf);
+      } else if (id(current_screen) == SCREEN_DESIRED) {
+        // Sam Desired Temperature (the value Button 6 changes)
+        it.print("Set ");
+        if (id(sam_target_temp).has_state()) {
+          it.printf(4, "%4.1fC", id(sam_target_temp).state);
+        } else {
+          it.print(4, " --C");
+        }
+      } else if (id(current_screen) == SCREEN_NOTIFY) {
+        // Notification screen.
+        //
+        // Layout matches the calendar's "static time + scrolling title":
+        //   slots 0..3 = HHMM the notification first appeared (captured
+        //                in notification_times so per-notification timing
+        //                survives auto-cycle / B8 advance / dismiss).
+        //   slots 0..7 = title scrolls left over the time, dwells with
+        //                the last 8 chars visible, then resets when the
+        //                screen leaves and re-enters.
+        // The scroll RATE is fixed per-cell (NOTIFY_SCROLL_MS_PER_CELL)
+        // so a 30-char title takes ~5 s and a 4-char title takes ~0 s.
+        // When the user manually opens this screen (B8 short press) the
+        // auto-cycle defers advancing until notify_hold_until_ms - which
+        // is computed from the same per-cell rate - so the entire title
+        // really does scroll past, plus 3 s of dwell, before moving on.
+        // 0 notifications fall back to "noNote  " or the alarm-level label.
+        // Long-press on Button 8 dismisses the currently-shown entry.
+        const int total = (int) id(notification_ids).size();
+        int idx = id(current_notification_index);
+        if (idx < 0) idx = 0;
+        if (total > 0 && idx >= total) idx = 0;
+        if (total <= 0) {
+          if (id(alarm_led_mode) > 0) {
+            const char *labels[] = {"OK  ", "Note", "Aler", "Act!"};
+            int lvl = id(alarm_led_mode);
+            if (lvl < 0) lvl = 0;
+            if (lvl > 3) lvl = 3;
+            it.print(labels[lvl]);
+            it.print(4, "   0");
+          } else {
+            it.print("noNote  ");
+          }
+        } else {
+          // --- Pick the best content string for this notification.
+          // HA `persistent_notification.create` calls usually leave
+          // `title` empty and put the actual readable text in `message`,
+          // so we prefer message > title > alarm-level fallback. The
+          // resulting string is sanitised (TM1638-renderable chars only)
+          // and trimmed before being scrolled across the display.
+          std::string title_raw;
+          if (idx < (int) id(notification_messages).size() &&
+              !id(notification_messages)[idx].empty()) {
+            title_raw = id(notification_messages)[idx];
+          } else if (idx < (int) id(notification_titles).size() &&
+                     !id(notification_titles)[idx].empty()) {
+            title_raw = id(notification_titles)[idx];
+          } else {
+            const char *labels[] = {"OK", "Note", "Alert", "Action"};
+            int lvl = id(alarm_led_mode);
+            if (lvl < 0) lvl = 0;
+            if (lvl > 3) lvl = 3;
+            title_raw = std::string(labels[lvl]);
+          }
+          std::string title;
+          title.reserve(title_raw.size());
+          for (char c : title_raw) {
+            const bool ok =
+                (c >= '0' && c <= '9') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= 'a' && c <= 'z') ||
+                c == ' ' || c == '.' || c == '-' || c == '_';
+            title += ok ? c : ' ';
+          }
+          // Collapse runs of whitespace.
+          std::string compact;
+          bool prev_space = true;
+          for (char c : title) {
+            if (c == ' ') {
+              if (!prev_space) compact += ' ';
+              prev_space = true;
+            } else {
+              compact += c;
+              prev_space = false;
+            }
+          }
+          while (!compact.empty() && compact.back() == ' ') compact.pop_back();
+          if (compact.empty()) compact = "(empty)";
+          // For multi-notification cases prepend the count so the user
+          // still gets "1 of 3" without a separate count phase.
+          if (total > 1) {
+            char prefix[16];
+            snprintf(prefix, sizeof(prefix), "%d of %d  ", idx + 1, total);
+            compact = std::string(prefix) + compact;
+          }
 
-# Time component for date/time display
-time:
-  - platform: homeassistant
-    id: homeassistant_time
+          // --- HHMM on the left (slots 0..3). ---
+          std::string hhmm;
+          if (idx < (int) id(notification_times).size() &&
+              id(notification_times)[idx].length() == 4) {
+            hhmm = id(notification_times)[idx];
+          } else {
+            hhmm = "----";
+          }
+
+          // --- Title scrolls leftwards over the static HHMM. Duration
+          // = (cells of travel) * NOTIFY_SCROLL_MS_PER_CELL, computed
+          // here so it matches the per-press hold the B8 handler set. ---
+          const int title_len = (int) compact.size();
+          const int total_scroll =
+              (title_len + 4 - 8) > 0 ? (title_len + 4 - 8) : 0;
+          const uint32_t scroll_duration_ms =
+              (uint32_t) total_scroll * NOTIFY_SCROLL_MS_PER_CELL;
+          const uint32_t since_show = now - id(last_screen_change);
+
+          char buf[9];
+          scroll_with_static_prefix(hhmm, compact, since_show,
+                                    scroll_duration_ms, buf);
+          it.print(buf);
+        }
+      }
 
 # Bluetooth Proxy (extends HA BLE range)
 bluetooth_proxy:

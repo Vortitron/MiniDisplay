@@ -1,0 +1,71 @@
+# Daily forecast template sensors for MiniDisplay devices.
+# Include from configuration.yaml, e.g.:
+#   homeassistant:
+#     packages:
+#       minidisplay_forecast: !include MiniDisplay/ElectricAutomations/forecast_sensors.yaml
+#
+# Produces sensor.forecast_today_max, sensor.forecast_tonight_min, and
+# sensor.forecast_outside_at_23. The 4-hour average forecast lives in
+# input_number.forecast_outside_4h (written by HouseThermalModel.yaml).
+
+template:
+  - trigger:
+      - platform: time_pattern
+        minutes: "/15"
+      - platform: homeassistant
+        event: start
+    action:
+      - action: weather.get_forecasts
+        target:
+          entity_id: weather.openweathermap
+        data:
+          type: daily
+        response_variable: forecast_response
+    sensor:
+      - name: "Forecast Today Max"
+        unique_id: forecast_today_max
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {{ forecast_response['weather.openweathermap'].forecast[0].temperature
+             if forecast_response.get('weather.openweathermap') else none }}
+      - name: "Forecast Tonight Min"
+        unique_id: forecast_tonight_min
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {{ forecast_response['weather.openweathermap'].forecast[0].templow
+             if forecast_response.get('weather.openweathermap') else none }}
+
+  - trigger:
+      - platform: time_pattern
+        minutes: "/15"
+      - platform: homeassistant
+        event: start
+    action:
+      - action: weather.get_forecasts
+        target:
+          entity_id: weather.openweathermap
+        data:
+          type: hourly
+        response_variable: hourly_fc
+    sensor:
+      - name: "Forecast Outside At 23"
+        unique_id: forecast_outside_at_23
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: >-
+          {% set data = hourly_fc.get('weather.openweathermap', {}).get('forecast', []) %}
+          {% set ns = namespace(temp=none) %}
+          {% for entry in data %}
+            {% if entry.datetime is defined and entry.temperature is not none %}
+              {% set ts = entry.datetime | as_datetime | as_local %}
+              {% if ts.date() == now().date() and ts.hour == 23 %}
+                {% set ns.temp = entry.temperature %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.temp }}

@@ -112,10 +112,6 @@ Plus:
 
 ## Using the model in DaytimeCheapHeat
 
-Once enough data is collected (run the automation for 2–3 days first), `DaytimeCheapHeat.yaml` can consult `input_number.hours_to_evening_target` to decide pre-warming start times.
+`DaytimeCheapHeat.yaml` reads **k**, **h**, **τ**, `hours_to_evening_target`, `forecast_outside_4h`, plus `sensor.forecast_tonight_min` and `sensor.forecast_outside_at_23` (from `forecast_sensors.yaml`). It writes the decision audit to **`input_text.sam_preheat_calc`**.
 
-Suggested future rule (not yet implemented):
-
-- If `hours_to_evening_target + 0.5h_margin > hours_until_19:00` **and** electricity is not in its peak → start heating now regardless of rank.
-
-This means we can replace the hard-coded 15:00–19:00 pre-warm window with a data-driven start time based on actual thermal behaviour and current outside temperature.
+Evening 25°C pre-warm is skipped when a mild night is forecast (e.g. only ~17°C at 23:00) and the house is already warm enough or the model says you will reach 20°C before 19:00 anyway.

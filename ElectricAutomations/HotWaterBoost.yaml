@@ -1,0 +1,26 @@
+alias: Hot Water Boost (2h)
+description: >-
+  Press input_button.hot_water_boost_2h to force the boiler ON for the
+  next 2 hours regardless of price/schedule. Sets the manual override
+  datetime and turns the switch on; HotWater.yaml then keeps it on
+  until the override expires.
+triggers:
+  - trigger: state
+    entity_id: input_button.hot_water_boost_2h
+conditions: []
+actions:
+  - action: input_datetime.set_datetime
+    target:
+      entity_id: input_datetime.hot_water_manual_override_until
+    data:
+      datetime: "{{ (now() + timedelta(hours=2)).isoformat() }}"
+  - action: switch.turn_on
+    target:
+      entity_id: switch.smart_plug_2_socket_1
+  - action: logbook.log
+    data:
+      name: Hot Water
+      message: >-
+        Boost button pressed — boiler ON for 2 hours
+        (override until {{ (now() + timedelta(hours=2)).strftime('%H:%M') }}).
+mode: single
