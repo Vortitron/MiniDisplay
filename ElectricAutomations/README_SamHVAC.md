@@ -172,8 +172,19 @@ The `DaytimeCheapHeat.yaml` automation re-evaluates on:
 - `input_boolean.holiday_mode`
 - `sensor.t_h_sensor_temperature` (living room)
 - `sensor.bedroomlights_bedroomlights_temperature` (bedroom)
-- `climate.mama_bedroom_thermostat` (target temperature attribute)
+- `climate.mama_bedroom_thermostat` (target temperature attribute) — **⚠ currently MISSING from the live HA** (see below)
 - `climate.circulation_fan` (on/off state)
+
+> **⚠ Missing entity: `climate.mama_bedroom_thermostat`.** As of the last check this
+> entity does not exist in Home Assistant (the API returns *"Entity not found"*;
+> the only climate entities are `bio_office_heat`, `boiler_relay_1/2_thermostat`,
+> `circulation_fan`, `sam`). `sam.yaml` degrades gracefully — `bedroom_target_raw`
+> is `None`, so `desired_effective` falls back to the control temperature and the
+> bedroom-blend feature is **inert**. `BedroomHeatingAutomation.yaml`
+> (`Mama Bedroom Smart Heating`, currently **off**) *writes* to the same missing
+> entity, so it is a no-op too. Either (a) create/rename the bedroom thermostat
+> `climate` entity, or (b) remove the references if the bedroom thermostat has
+> been retired.
 
 ## Helper entities to create in Home Assistant
 
@@ -213,7 +224,8 @@ Both automations write `logbook.log` entries.
 
 ### `input_text.sam_hvac_status`
 - **Set by:** `sam.yaml` each evaluation
-- **Format:** `{{ headline }} | Heating: mode=…` plus full sensor detail.
+- **Format:** pure diagnostic detail, e.g. `Heating: mode=… control=… effective=… need=… boost=… setpoint=… remote=… living=… bedroom=… guard=… fan=… outdoor=… internal=…` (the short reason·action summary lives in `sam_hvac_headline`, so it is no longer duplicated here).
+- **Length cap:** the value is `truncate`d to **255 chars** before writing. The `input_text` helper has `max: 255`; the old status string rendered ~291 chars, so `input_text.set_value` was silently **rejected every run** and the helper stuck at `Initializing...`. The truncate guard means the write can never be rejected again, regardless of future content.
 
 `sam.yaml` also updates `input_text.sam_hvac_status` each time it evaluates, including:
 
@@ -221,6 +233,23 @@ Both automations write `logbook.log` entries.
 - which remote temperature is used (and its source)
 - fan state
 - indoor/outdoor/internal readings
+
+### Single source of truth for the heat/cool maths
+
+The heating/cooling **mode** and **setpoint** maths are computed once in the
+automation `variables:` block (`cool_active`, `cool_room_warm`, `cool_fan_only`,
+`cool_mode`, `cool_setpoint`, `heat_diff`, `heat_need`, `heat_boost`,
+`heat_fan_only`, `heat_mode`, `heat_setpoint`, `heat_action_label`) and then
+referenced by every action (set_hvac_mode, set_temperature, logbook, headline,
+status). Previously the same expressions were copied up to four times and had to
+be kept in sync by hand. `ElectricAutomations/tests/test_sam_hvac_templates.py`
+pins the maths down and proves the extracted variables are behaviour-identical to
+the original inline copies (run with `python3 ElectricAutomations/tests/test_sam_hvac_templates.py`).
+
+> **Subtle point preserved by the tests:** the cool **mode** uses
+> `room warm AND outdoor cooler than target`, but the cool **setpoint** `-1°C`
+> nudge uses only `room warm`. These are deliberately different conditions
+> (`cool_fan_only` vs `cool_room_warm`).
 
 ## Quick test (Home Assistant)
 
