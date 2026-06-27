@@ -9,6 +9,8 @@ triggers:
   - trigger: state
     entity_id: sensor.nordpool_kwh_se4_sek_3_10_025
     attribute: raw_tomorrow
+  - trigger: state
+    entity_id: input_boolean.on_fixed_price_feed
 conditions: []
 actions:
   - choose:
@@ -34,7 +36,8 @@ actions:
                 {% set avg_price = ns.total / ns.count %}
                 {% set current = states('sensor.nordpool_kwh_se4_sek_3_10_025') |
                 float(0) %}
-                {{ current <= (avg_price / 2) }}
+                {# On the fixed-price feed, 15-min spot price is irrelevant -> never "cheap". #}
+                {{ current <= (avg_price / 2) and is_state('input_boolean.on_fixed_price_feed', 'off') }}
               {% endif %}
         sequence:
           - action: input_boolean.turn_on

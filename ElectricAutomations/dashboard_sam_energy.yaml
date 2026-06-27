@@ -1,0 +1,274 @@
+# Sam & Energy dashboard (Lovelace, "sections" view).
+#
+# Deployed to Home Assistant as a storage-mode dashboard at /sam-energy via the
+# WebSocket API (see the chat that created it). This file is the version-control
+# copy / source of truth. To re-deploy after editing, run the deploy step again
+# or paste it into Settings -> Dashboards -> (new) -> raw config editor.
+#
+# Uses only built-in cards (thermostat, entities, glance, gauge, history-graph,
+# markdown, heading) so it needs no HACS/custom cards.
+title: Sam & Energy
+views:
+  - title: Overview
+    path: overview
+    icon: mdi:home-thermometer
+    type: sections
+    max_columns: 3
+    sections:
+      # ---------------------------------------------------------------- Sam
+      - type: grid
+        cards:
+          - type: heading
+            heading: Sam — living-room heat pump
+            icon: mdi:heat-pump
+          - type: markdown
+            content: >
+              ## {{ states('input_text.sam_hvac_headline') }}
+
+              {{ states('input_text.sam_hvac_status') }}
+          - type: thermostat
+            entity: climate.sam
+          - type: entities
+            title: Targets & plan
+            show_header_toggle: false
+            entities:
+              - entity: input_number.sam_desired_temperature
+                name: Desired (comfort)
+                icon: mdi:home-thermometer
+              - entity: input_number.sam_control_temperature
+                name: Control (price-adjusted)
+                icon: mdi:thermostat
+              - entity: input_text.sam_hvac_reason
+                name: Reason
+              - entity: input_datetime.sam_desired_lock_until
+                name: Manual lock until
+              - entity: input_boolean.holiday_mode
+                name: Holiday mode
+          - type: entities
+            title: TVs (comfort signal)
+            show_header_toggle: false
+            entities:
+              - entity: media_player.lgnano_55
+                name: Living-room TV
+              - entity: media_player.telia_tv
+                name: Telia TV
+      # -------------------------------------------------------- Temperatures
+      - type: grid
+        cards:
+          - type: heading
+            heading: Temperatures
+            icon: mdi:thermometer
+          - type: glance
+            columns: 2
+            entities:
+              - entity: sensor.t_h_sensor_temperature
+                name: Living room
+              - entity: sensor.sam_inside_temperature
+                name: Sam unit
+              - entity: sensor.sam_outside_temperature
+                name: Outside
+              - entity: sensor.bedroomlights_bedroomlights_temperature
+                name: Bedroom
+          - type: history-graph
+            title: Last 24 h
+            hours_to_show: 24
+            entities:
+              - entity: sensor.t_h_sensor_temperature
+                name: Living
+              - entity: sensor.sam_inside_temperature
+                name: Sam unit
+              - entity: sensor.sam_outside_temperature
+                name: Outside
+          - type: entities
+            title: Forecast
+            show_header_toggle: false
+            entities:
+              - entity: sensor.forecast_today_max
+                name: Today max
+              - entity: sensor.forecast_tonight_min
+                name: Tonight min
+              - entity: input_number.forecast_outside_4h
+                name: Next 4 h avg
+      # ------------------------------------------------------ Electricity price
+      - type: grid
+        cards:
+          - type: heading
+            heading: Electricity price
+            icon: mdi:cash-multiple
+          - type: gauge
+            entity: input_number.electricity_price_rank
+            name: Price rank (0 = cheapest)
+            min: 0
+            max: 24
+            severity:
+              green: 0
+              yellow: 8
+              red: 16
+          - type: glance
+            columns: 3
+            entities:
+              - entity: sensor.nordpool_kwh_se4_sek_3_10_025
+                name: Now SEK/kWh
+              - entity: input_number.electricity_price_rank_4h
+                name: 4 h rank
+              - entity: input_number.electricity_price_rank_daytime
+                name: Daytime rank
+          - type: entities
+            show_header_toggle: false
+            entities:
+              - entity: input_boolean.daytime_cheap_7_21
+                name: Daytime cheap window
+              - entity: input_boolean.cheap_leccy
+                name: Cheap (≤ 50% of avg)
+      # --------------------------------------------------- Super-expensive mode
+      - type: grid
+        cards:
+          - type: heading
+            heading: Super-expensive mode
+            icon: mdi:flash-alert
+          - type: markdown
+            content: >
+              ## {{ 'ACTIVE — shedding loads' if is_state('input_boolean.super_expensive_active','on') else 'Normal' }}
+
+              Base price **{{ states('sensor.nordpool_kwh_se4_sek_3_10_0') }}** /
+              {{ states('input_number.super_expensive_threshold') }} SEK/kWh threshold.
+              {% if is_state('input_boolean.super_expensive_active','on') %}Sheds Sam (if idle, >19°C), circulation fan, Bio office heat, flood lights and Loft Wet.{% endif %}
+          - type: entities
+            show_header_toggle: false
+            entities:
+              - entity: input_boolean.super_expensive_active
+                name: Active (auto)
+              - entity: input_number.super_expensive_threshold
+                name: Threshold (base SEK/kWh, ex-VAT)
+              - entity: sensor.nordpool_kwh_se4_sek_3_10_0
+                name: Base price now (ex-VAT)
+          - type: entities
+            title: Shed loads
+            show_header_toggle: false
+            entities:
+              - entity: climate.circulation_fan
+                name: Circulation fan
+              - entity: climate.bio_office_heat
+                name: Bio office heat
+              - entity: light.led_flood_light
+                name: LED flood light
+              - entity: light.bio_floodlight
+                name: Bio floodlight
+              - entity: switch.t34_smart_plug_switch_1
+                name: Loft Wet humidifier
+      # -------------------------------------------------------- Fixed-price feed
+      - type: grid
+        cards:
+          - type: heading
+            heading: Fixed-price feed
+            icon: mdi:transmission-tower-export
+          - type: markdown
+            content: >
+              ## {{ 'ON FIXED — spot logic disabled' if is_state('input_boolean.on_fixed_price_feed','on') else 'On SPOT (15-min pricing)' }}
+
+              *Auto-detected from feed power — Hem = monthly, Bio = spot.*
+
+              {% set hem = states('sensor.hem_p1ib_active_power_a0b765527004') %}
+              {% set bio = states('sensor.bio_p1ib_active_power_a0b7655105e0') %}
+              Live feed power: Hem **{{ hem }}** · Bio **{{ bio }}** kW
+
+              {% set b = states('input_number.spot_30d_avg') | float(0) %}
+              {% set f = states('input_number.spot_next24h_avg') | float(0) %}
+              {% set w = states('input_number.spot_next24h_avg_weighted') | float(0) %}
+              {% set m = states('input_number.fixed_swap_margin_pct') | float(10) %}
+              Next 24h **{{ f | round(2) }}** (used-weighted **{{ w | round(2) }}**)
+              vs 30-day **{{ b | round(2) }}** SEK/kWh.
+              {% if b > 0 and [f, w] | max > b * (1 + m / 100) %}⚠ Spot looks dearer than usual — consider the fixed feed.
+              {% elif is_state('input_boolean.on_fixed_price_feed','on') and b > 0 and [f, w] | min < b * (1 - m / 100) %}🟢 Spot looks cheap again — consider swapping back.{% endif %}
+          - type: entities
+            show_header_toggle: false
+            entities:
+              - entity: input_boolean.on_fixed_price_feed
+                name: On fixed feed (auto-detected — disables spot logic)
+              - entity: sensor.hem_p1ib_active_power_a0b765527004
+                name: Hem feed power (monthly)
+              - entity: sensor.bio_p1ib_active_power_a0b7655105e0
+                name: Bio feed power (spot)
+              - entity: input_number.spot_next24h_avg
+                name: Next 24h average (base)
+              - entity: input_number.spot_next24h_avg_weighted
+                name: Next 24h, usage-weighted (base)
+              - entity: input_number.spot_30d_avg
+                name: 30-day average (base)
+              - entity: input_number.fixed_swap_margin_pct
+                name: Swap margin
+              - entity: input_datetime.fixed_swap_last_suggested
+                name: Last suggestion
+      # ------------------------------------------------------------- Hot water
+      - type: grid
+        cards:
+          - type: heading
+            heading: Hot water
+            icon: mdi:water-boiler
+          - type: gauge
+            entity: sensor.manifoldtemperature_hot_water_boiler_temp
+            name: Pipe temp
+            needle: true
+            min: 0
+            max: 70
+          - type: entities
+            show_header_toggle: false
+            entities:
+              - entity: switch.smart_plug_2_socket_1
+                name: Boiler heating
+                icon: mdi:water-boiler
+              - entity: input_boolean.hot_water_notified
+                name: Reheat needed
+              - entity: input_number.hot_water_reheat_minutes_remaining
+                name: Reheat remaining
+              - entity: input_datetime.hot_water_manual_override_until
+                name: Manual boost until
+              - entity: input_button.hot_water_boost_2h
+                name: Boost 2 h now
+          # Draws spike the pipe up; a depleted tank drops it to ~19°C and
+          # holds there (vs ~33-37°C when full and idle). Heating bars show
+          # when the boiler ran.
+          - type: history-graph
+            title: Pipe temp & heating (24 h)
+            hours_to_show: 24
+            entities:
+              - entity: sensor.manifoldtemperature_hot_water_boiler_temp
+                name: Pipe temp
+              - entity: switch.smart_plug_2_socket_1
+                name: Boiler
+      # ------------------------------------------ Washing machine & thermal model
+      - type: grid
+        cards:
+          - type: heading
+            heading: Washing machine
+            icon: mdi:washing-machine
+          - type: entities
+            show_header_toggle: false
+            entities:
+              - entity: input_boolean.washing_machine_cycle_active
+                name: Cycle active
+              - entity: sensor.smart_plug_3_power
+                name: Power
+              - entity: sensor.smart_plug_3_energy
+                name: Energy (total)
+              - entity: input_datetime.washing_machine_start_time
+                name: Started
+          - type: heading
+            heading: House thermal model
+            icon: mdi:home-analytics
+          - type: glance
+            columns: 2
+            entities:
+              - entity: input_number.house_heat_loss_k
+                name: k (loss)
+              - entity: input_number.house_heat_rate
+                name: h (rate °C/h)
+              - entity: input_number.house_thermal_tau
+                name: τ (hours)
+              - entity: input_number.hours_to_evening_target
+                name: Hrs → 20°C
+          - type: markdown
+            content: >
+              {{ states('input_text.house_thermal_status') }}
+
+              _{{ states('input_text.sam_preheat_calc') }}_

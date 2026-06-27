@@ -1,0 +1,29 @@
+alias: Notification Counters Daily Reset
+description: >-
+  Resets the per-notification occurrence counters at midnight so the deduped
+  persistent notifications show a fresh per-day count:
+
+    - counter.hot_water_used       -> "Hot water used ×N"      (HotWaterTemperature.yaml)
+    - counter.movement_downstairs  -> "Movement downstairs ×N" (HA: Movement Downstairs)
+    - counter.loft_wet_refill      -> "Refill loft wet ×N"     (HA: Loft Wet On)
+
+  Each of those notifications carries a notification_id so it REPLACES in place
+  (no stacking) and shows the running count. The count is "this is occurrence
+  N", computed as the counter value + 1 at fire time, then the counter is
+  incremented — so it stays correct without depending on state-read timing.
+triggers:
+  - trigger: time
+    at: "00:00:00"
+conditions: []
+actions:
+  - action: counter.reset
+    target:
+      entity_id:
+        - counter.hot_water_used
+        - counter.movement_downstairs
+        - counter.loft_wet_refill
+  - action: logbook.log
+    data:
+      name: Notification Counters
+      message: Daily reset of hot-water / movement / loft-wet notification counters.
+mode: single

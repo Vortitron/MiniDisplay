@@ -97,6 +97,17 @@ input_number:
     unit_of_measurement: "min"
     icon: mdi:timer-sand
 
+  # ---- Lily cat feed counter (KitchenDetectorer Button 7) -----------------
+  # NB: was wrongly declared under input_boolean: (with min/max/step, which
+  # booleans do not support) — it is a counter, so it lives here instead.
+  lily_pouch_count:
+    name: Lily Pouch Count
+    min: 0
+    max: 20
+    step: 0.5
+    icon: mdi:cat
+    initial: 0
+
 input_datetime:
   # ---- Hot water ----------------------------------------------------------
   hot_water_manual_override_until:
@@ -109,6 +120,13 @@ input_datetime:
     name: Thermal Model Last Sample
     has_date: true
     has_time: true
+
+  # ---- Lily cat feed (KitchenDetectorer Button 7) -------------------------
+  lily_last_feed:
+    name: Lily Last Feed
+    has_date: true
+    has_time: true
+    icon: mdi:cat
 
 input_text:
   sam_hvac_status:
@@ -147,22 +165,6 @@ input_boolean:
   daytime_cheap_7_21:
     name: Daytime Cheap 7-21
     icon: mdi:cash-clock
-
-  # ---- Lily cat feed counter (KitchenDetectorer Button 7) ---------------
-  lily_pouch_count:
-    name: Lily Pouch Count
-    min: 0
-    max: 20
-    step: 0.5
-    icon: mdi:cat
-    initial: 0
-
-input_datetime:
-  lily_last_feed:
-    name: Lily Last Feed
-    has_date: true
-    has_time: true
-    icon: mdi:cat
 
 input_button:
   # ---- Hot water ----------------------------------------------------------

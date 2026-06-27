@@ -14,7 +14,9 @@ description: >-
   Check input_text.sam_hvac_headline (short), sam_hvac_status (detail), and
   the DaytimeCheapHeat logbook entry.
 
-  effective_target = max(control, bedroom_thermostat_target)
+  effective_target = control (the price-adjusted sam_control_temperature).
+  (The old max(control, mama_bedroom_thermostat) blend was retired in summer
+  2026 when the bedroom heater + thermostat were removed.)
 
   ## Remote temperatures
 
@@ -30,20 +32,62 @@ description: >-
   3. Remote at/above target → nudge setpoint down to stop heating.
   4. Remote cold but outdoor warm → fan_only (free cooling opportunity).
 
-  ## Cooling behaviour
+  ## Cooling behaviour (summer)
 
-  Triggered when living > 26°C OR (outdoor ≥ 25°C AND living > 20°C).
-  Uses Sam internal sensor + offsets; may switch to fan_only when outdoor
-  air is cooler than the effective target.
+  Default is to do NOTHING energy-hungry. The compressor (cool mode) runs when:
+    - it is genuinely hot BOTH inside and out (living ≥ 27°C AND outdoor ≥ 27°C), or
+    - the scorcher override fires — outdoor > 30°C AND either room (living OR
+      bedroom) > 27°C AND power is cheap, or
+    - pre-cooling (see below).
+  Otherwise, if the room is merely too warm (≥ 25°C and it's ≥ 22°C outside), Sam
+  just circulates air (fan_only) — no compressor. Cooling is never engaged when
+  it's cold outside (so it can't fight the winter evening pre-warm).
+
+  Smart extras:
+  - Pre-cool: on a hot day (forecast max ≥ 27°C) when power is cheap now and it
+    is not about to get cooler outside, run the compressor early to pull the
+    room down toward 23°C before the expensive afternoon peak. "Cheap now" =
+    cheap_leccy on (≤ 50% of the daily average — catches a cheap morning even if
+    it's cheaper still later) OR cheaper now than in 4h.
+  - Don't cool if it's getting cooler outside anyway — pre-cool is suppressed
+    when the next-4h forecast is meaningfully below the current temperature. The
+    baseline is capped at today's forecast max so a sun-baked outdoor sensor
+    (e.g. reading 38°C against a flat 32°C forecast) can't fake a cooling trend.
+    The scorcher override is NOT subject to this — when it's truly hot it cools
+    regardless.
+  - Circulation fan: the Tuya plug behind climate.circulation_fan
+    (switch.smart_plug_5_socket_1) is run whenever Sam is cooling (compressor OR
+    fan_only) to spread the cool air, and switched off when cooling stops in warm
+    weather. Untouched when it's cold out (outdoor < cool_outdoor_gate).
 
   ## Holiday mode
 
   Forces preset heat_8_15, heat mode, 10°C setpoint (frost protection).
   Clears preset when holiday mode turns off.
 variables:
-  cool_indoor_threshold: 26
-  cool_outdoor_threshold: 25
-  cool_indoor_min: 20
+  # ---- Cooling thresholds (air-to-air heat pump; summer) ----
+  # Compressor (real, energy-using cooling) only when it is genuinely hot BOTH
+  # inside and out. Below this Sam just circulates air (fan_only).
+  cool_compressor_in: 27
+  cool_compressor_out: 27
+  # "Too warm" point: at/above this indoor temp (and warm enough outside) Sam
+  # reacts — with the fan, unless the 27/27 compressor rule above is met.
+  cool_fan_target: 25
+  # Only consider active cooling when it is summer-warm outside. Stops the
+  # winter evening pre-warm (which deliberately drives the living room to ~25°C)
+  # from being mistaken for "too hot" and flipped into cooling/fan.
+  cool_outdoor_gate: 22
+  # Pre-cool (run the compressor early, on cheap power, ahead of a hot+expensive
+  # afternoon):
+  cool_precool_day_max: 27   # only on days forecast at least this warm
+  cool_precool_floor: 23     # do not pre-cool the room below this
+  cool_trend_margin: 1.0     # "getting cooler outside" = forecast 4h avg this far below now
+  # Genuinely-hot override: when it's this hot OUTSIDE and either room is this
+  # warm INSIDE, run the compressor outright (provided power is cheap). This is a
+  # reliable "it's a scorcher, just cool" rule that does not depend on the
+  # cheaper-still-later / cooling-trend smarts.
+  cool_hot_outdoor: 30
+  cool_hot_room: 27
   heat_offset: 1
   cool_offset: -1
   base_stop_heat_offset: -2
@@ -55,6 +99,12 @@ variables:
   # Fallbacks if the climate entity does not expose min/max temp attributes
   sam_min_temp_fallback: 10
   sam_max_temp_fallback: 30
+  # Super-expensive mode: only switch Sam fully off when it is just idling — i.e.
+  # the living room is comfortably ABOVE this temperature (set by
+  # SuperExpensive.yaml via input_boolean.super_expensive_active). At/below it Sam
+  # may be actively heating, so leave it running. If the living temperature is
+  # unknown, Sam is also left running (never shed blind).
+  super_expensive_off_above: 19
 triggers:
   - trigger: state
     entity_id:
@@ -69,9 +119,8 @@ triggers:
     entity_id:
       - climate.circulation_fan
       - input_boolean.holiday_mode
-  - trigger: state
-    entity_id: climate.mama_bedroom_thermostat
-    attribute: temperature
+      - input_boolean.super_expensive_active
+      - input_boolean.on_fixed_price_feed
   - trigger: state
     entity_id:
       - input_text.sam_hvac_reason
@@ -81,6 +130,7 @@ triggers:
 actions:
   - variables:
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
+      super_expensive: "{{ is_state('input_boolean.super_expensive_active', 'on') }}"
       sam_preset: "{{ state_attr('climate.sam', 'preset_mode') | default('none', true) }}"
       living_room_temp_state: "{{ states('sensor.t_h_sensor_temperature') }}"
       bedroom_temp_state: "{{ states('sensor.bedroomlights_bedroomlights_temperature') }}"
@@ -88,7 +138,6 @@ actions:
       sam_internal_state: "{{ states('sensor.sam_inside_temperature') }}"
       sam_desired_state: "{{ states('input_number.sam_desired_temperature') }}"
       sam_control_state: "{{ states('input_number.sam_control_temperature') }}"
-      bedroom_target_raw: "{{ state_attr('climate.mama_bedroom_thermostat', 'temperature') }}"
       fan_state: "{{ states('climate.circulation_fan') }}"
       fan_running: "{{ fan_state not in ['off', 'unknown', 'unavailable', 'none', ''] }}"
 
@@ -103,7 +152,6 @@ actions:
       outdoor: "{{ sam_outdoor_state | float(0) }}"
       internal: "{{ sam_internal_state | float(0) }}"
       desired_base: "{{ sam_control_state | float(0) }}"
-      bedroom_target: "{{ bedroom_target_raw | float(0) }}"
       sam_min_temp: "{{ state_attr('climate.sam', 'min_temp') | float(sam_min_temp_fallback) }}"
       sam_max_temp: "{{ state_attr('climate.sam', 'max_temp') | float(sam_max_temp_fallback) }}"
       reason_state: "{{ states('input_text.sam_hvac_reason') }}"
@@ -138,15 +186,11 @@ actions:
         {% endif %}
       internal_at_unit_hot: "{{ internal_ok and internal >= sam_setpoint_cap }}"
 
-      # Sam should heat for whichever needs more:
-      # - the price-adjusted control temperature (input_number.sam_control_temperature), or
-      # - the bedroom thermostat target (climate.mama_bedroom_thermostat.temperature)
-      desired_effective: >-
-        {% if bedroom_target_raw is not none %}
-          {{ [desired_base, bedroom_target] | max }}
-        {% else %}
-          {{ desired_base }}
-        {% endif %}
+      # Effective heating/cooling target. This used to blend in the mama
+      # bedroom thermostat target, but that thermostat/heater was retired
+      # (summer 2026 — bedroom heater removed, smart socket repurposed), so
+      # the effective target is simply the price-adjusted control temperature.
+      desired_effective: "{{ desired_base }}"
 
       # Cooling still uses the living room sensor.
       remote_cool: "{{ living_room_temp }}"
@@ -204,17 +248,78 @@ actions:
           0
         {% endif %}
 
+      # ---- Cooling inputs (price + forecast) for smart cooling ----
+      price_rank: "{{ states('input_number.electricity_price_rank') | int(12) }}"
+      price_rank_4h: "{{ states('input_number.electricity_price_rank_4h') | int(12) }}"
+      # On the fixed-price feed, no price-driven pre-cool (comfort cooling still runs).
+      on_fixed_price: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
+      # "Power is cheap right now" for pre-cooling. Two ways to qualify:
+      #   - cheap_leccy: today's price is <= 50% of the daily average (an absolute
+      #     cheap window — catches a cheap morning even when it's cheaper still
+      #     later, which the rank-vs-4h test alone misses), OR
+      #   - price_rank < price_rank_4h: cheaper now than in 4h (act-now signal).
+      # Suppressed on the fixed-price feed (no spot signal there).
+      cheap_now: "{{ (is_state('input_boolean.cheap_leccy', 'on') or price_rank < price_rank_4h) and not on_fixed_price }}"
+      # Circulation fan = Tuya smart plug (switch.smart_plug_5_socket_1) behind the
+      # climate.circulation_fan generic_thermostat. Driven directly (the thermostat
+      # stays 'off') so it runs while Sam is actively cooling, spreading the cool air.
+      circ_fan_on: "{{ is_state('switch.smart_plug_5_socket_1', 'on') }}"
+      forecast_day_max: "{{ states('sensor.forecast_today_max') | float(0) }}"
+      forecast_out_4h: >-
+        {% set v = states('input_number.forecast_outside_4h') %}
+        {{ v | float(outdoor) if v not in ['unknown', 'unavailable', 'none', ''] else outdoor }}
+      # Baseline for the "getting cooler" test. The outdoor SENSOR can sit well
+      # above the forecast air temp when it's sun-baked (e.g. a 38°C sensor while
+      # the forecast is a flat 32-33°C all afternoon), which fakes a cooling trend
+      # and wrongly suppresses pre-cool. Cap the baseline at today's forecast max
+      # so a sun-baked reading can't invent a downward trend; otherwise use the
+      # live sensor.
+      cool_trend_baseline: >-
+        {{ [outdoor, forecast_day_max] | min if forecast_day_max > 0 else outdoor }}
+      # Is it forecast to get meaningfully cooler outside over the next few hours?
+      outdoor_cooling_trend: "{{ forecast_out_4h < cool_trend_baseline - cool_trend_margin }}"
+
       # ---- Cooling decision (single source of truth: used by action + status) ----
-      # Should Sam be in a cooling regime at all?
-      cool_active: "{{ remote_cool > cool_indoor_threshold or (outdoor >= cool_outdoor_threshold and remote_cool > cool_indoor_min) }}"
-      # Room warm enough to warrant the -1°C cool nudge (independent of outdoor).
-      cool_room_warm: "{{ remote_cool > desired_effective + temp_tolerance }}"
-      # Use the fan (free cooling) only when the room is warm AND it is cooler outside.
-      cool_fan_only: "{{ cool_room_warm and outdoor < desired_effective }}"
-      cool_mode: "{{ 'fan_only' if cool_fan_only else 'cool' }}"
+      # Warm enough outside to consider any active cooling (stops the winter
+      # evening pre-warm — room hot, outside cold — being read as "too hot").
+      cool_season: "{{ outdoor >= cool_outdoor_gate }}"
+      # Room is too warm for comfort.
+      room_too_warm: "{{ remote_cool >= cool_fan_target }}"
+      # Genuinely hot BOTH inside and out -> compressor cooling justified.
+      very_hot: "{{ remote_cool >= cool_compressor_in and outdoor >= cool_compressor_out }}"
+      # Scorcher override: it's really hot outside and EITHER room (living or
+      # bedroom) is uncomfortably warm. On cheap power, just cool — no cooling-
+      # trend / cheaper-still-later guessing.
+      cool_hot_rooms: >-
+        {{ (living_room_temp_ok and living_room_temp > cool_hot_room)
+           or (bedroom_temp_ok and bedroom_temp > cool_hot_room) }}
+      hot_cheap_cool: "{{ cheap_now and outdoor > cool_hot_outdoor and cool_hot_rooms }}"
+      # Pre-cool opportunity: power cheap now, a hot day forecast, NOT about to
+      # get cooler outside, and there is still warmth to remove from the room.
+      precool_now: >-
+        {{ cheap_now and forecast_day_max >= cool_precool_day_max
+           and not outdoor_cooling_trend
+           and remote_cool > cool_precool_floor
+           and outdoor >= cool_outdoor_gate }}
+      # Enter the cooling branch when the room is too warm in summer, when
+      # pre-cooling, or on the scorcher override.
+      cool_active: "{{ (cool_season and room_too_warm) or precool_now or hot_cheap_cool }}"
+      # Run the compressor when very hot (27/27), pre-cooling, or on the scorcher
+      # override (>30 out + >27 in either room + cheap). Otherwise just circulate
+      # air with the fan (no energy-hungry cooling).
+      cool_use_compressor: "{{ very_hot or precool_now or hot_cheap_cool }}"
+      cool_mode: "{{ 'cool' if cool_use_compressor else 'fan_only' }}"
       cool_setpoint: >-
-        {% set unclamped = internal + (cool_offset if cool_room_warm else 0) %}
+        {% if cool_use_compressor %}
+          {% set unclamped = internal + cool_offset %}
+        {% else %}
+          {% set unclamped = internal %}
+        {% endif %}
         {{ [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max }}
+      cool_action_label: >-
+        {% if cool_use_compressor and precool_now and not very_hot and not hot_cheap_cool %}Pre-cool (cheap)
+        {% elif cool_use_compressor %}Cooling
+        {% else %}Fan only{% endif %}
 
       # ---- Heating decision (single source of truth: used by action + status) ----
       heat_diff: "{{ remote_heat - desired_effective }}"
@@ -252,7 +357,7 @@ actions:
         data:
           name: Sam HVAC
           message: >-
-            Skipping update (missing data). fan={{ fan_state }}, living={{ living_room_temp_state }}, bedroom={{ bedroom_temp_state }}, outdoor={{ sam_outdoor_state }}, internal={{ sam_internal_state }}, desired_ui={{ sam_desired_state }}, control={{ sam_control_state }}, bedroom_target={{ bedroom_target_raw }}
+            Skipping update (missing data). fan={{ fan_state }}, living={{ living_room_temp_state }}, bedroom={{ bedroom_temp_state }}, outdoor={{ sam_outdoor_state }}, internal={{ sam_internal_state }}, desired_ui={{ sam_desired_state }}, control={{ sam_control_state }}
       - stop: "Missing sensor data"
   - if:
       - condition: template
@@ -321,6 +426,35 @@ actions:
           entity_id: climate.sam
         data:
           preset_mode: none
+  - if:
+      - condition: template
+        value_template: >-
+          {{ super_expensive and living_room_temp_ok and living_room_temp > super_expensive_off_above }}
+    then:
+      - action: climate.set_hvac_mode
+        target:
+          entity_id: climate.sam
+        data:
+          hvac_mode: "off"
+      - action: logbook.log
+        data:
+          name: Sam HVAC
+          message: >-
+            Super-expensive: Sam OFF (idle + price-shed). living={{ living_room_temp | round(1) }}°C,
+            outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C, off_above={{ super_expensive_off_above }}°C
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.sam_hvac_headline
+        data:
+          value: "Super-expensive · Off"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.sam_hvac_status
+        data:
+          value: >-
+            {% set s %}Super-expensive shed: Sam OFF, living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C, off_above={{ super_expensive_off_above }}°C{% endset -%}
+            {{ s | truncate(255, True, '', 0) }}
+      - stop: "Super-expensive mode active"
   - choose:
       - conditions:
           - condition: template
@@ -341,21 +475,34 @@ actions:
             data:
               name: Sam HVAC
               message: >-
-                Cooling: mode={{ cool_mode }},
-                desired_effective={{ desired_effective | round(1) }}°C (base={{ desired_base | round(1) }}, bedroom_target={{ bedroom_target_raw }}),
-                living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
+                Cooling: {{ cool_action_label | trim }} (mode={{ cool_mode }}),
+                living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C,
+                very_hot={{ very_hot }}, precool={{ precool_now }}, hot_cheap={{ hot_cheap_cool }}, cooling_trend={{ outdoor_cooling_trend }} (base {{ cool_trend_baseline | round(1) }}°C),
+                cheap_now={{ cheap_now }}, bedroom={{ bedroom_temp | round(1) }}°C, fc_day_max={{ forecast_day_max | round(1) }}°C, fc_out_4h={{ forecast_out_4h | round(1) }}°C
           - action: input_text.set_value
             target:
               entity_id: input_text.sam_hvac_headline
             data:
-              value: "Too warm inside · {{ 'Fan cool' if cool_fan_only else 'Cooling' }}"
+              value: "Too warm inside · {{ cool_action_label | trim }}"
           - action: input_text.set_value
             target:
               entity_id: input_text.sam_hvac_status
             data:
               value: >-
-                {% set s %}Cooling: mode={{ cool_mode }}, effective={{ desired_effective | round(1) }}°C (base={{ desired_base | round(1) }}, bedroom_target={{ bedroom_target | round(1) if bedroom_target_raw is not none else 'none' }}), living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C{% endset -%}
+                {% set s %}Cool: {{ cool_action_label | trim }} (mode={{ cool_mode }}), living={{ living_room_temp | round(1) }}°C, bed={{ bedroom_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, very_hot={{ very_hot }}, hot_cheap={{ hot_cheap_cool }}, precool={{ precool_now }}, trend_cooler={{ outdoor_cooling_trend }}, rank={{ price_rank }}/{{ price_rank_4h }}, fc_max={{ forecast_day_max | round(0) }}°C{% endset -%}
                 {{ s | truncate(255, True, '', 0) }}
+          # Spread the cool air: run the circulation fan whenever Sam is cooling.
+          - if:
+              - condition: template
+                value_template: "{{ not circ_fan_on }}"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: switch.smart_plug_5_socket_1
+              - action: logbook.log
+                data:
+                  name: Sam HVAC
+                  message: "Circulation fan ON ({{ cool_action_label | trim }})."
       - conditions:
           - condition: template
             value_template: "{{ not cool_active }}"
@@ -376,7 +523,7 @@ actions:
               name: Sam HVAC
               message: >-
                 Heating: mode={{ heat_mode }},
-                control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C (bedroom_target={{ bedroom_target_raw }}),
+                control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C,
                 need={{ heat_need | round(1) }}°C, boost={{ heat_boost | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C,
                 remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source }},
                 living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, overheat_guard={{ living_above_all_targets }},
@@ -395,6 +542,20 @@ actions:
               # headline helper). Capped to 255 chars so input_text.set_value can
               # never be rejected — this was the cause of the "Initializing..." bug.
               value: >-
-                {% set s %}Heating: mode={{ heat_mode }}, control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C (bedroom_target={{ bedroom_target | round(1) if bedroom_target_raw is not none else 'none' }}), need={{ heat_need | round(1) }}°C, boost={{ heat_boost | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C, remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source | trim }}, living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, guard={{ living_above_all_targets }}, fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C{% endset -%}
+                {% set s %}Heating: mode={{ heat_mode }}, control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C, need={{ heat_need | round(1) }}°C, boost={{ heat_boost | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C, remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source | trim }}, living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, guard={{ living_above_all_targets }}, fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C{% endset -%}
                 {{ s | truncate(255, True, '', 0) }}
+          # Not cooling: in warm weather, stop the circulation fan (it is only run
+          # to spread Sam's cooling). In winter (outdoor < cool_outdoor_gate) leave
+          # it alone so any cross-room heating circulation is untouched.
+          - if:
+              - condition: template
+                value_template: "{{ circ_fan_on and cool_season }}"
+            then:
+              - action: switch.turn_off
+                target:
+                  entity_id: switch.smart_plug_5_socket_1
+              - action: logbook.log
+                data:
+                  name: Sam HVAC
+                  message: "Circulation fan OFF (not cooling; outdoor {{ outdoor | round(1) }}°C)."
     default: []

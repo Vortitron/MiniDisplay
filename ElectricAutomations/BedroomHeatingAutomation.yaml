@@ -1,3 +1,7 @@
+# RETIRED (summer 2026): writes to climate.mama_bedroom_thermostat, which no
+# longer exists (bedroom heater removed, smart socket repurposed). This
+# automation is OFF in Home Assistant and is a no-op. Kept for reference in
+# case the bedroom heater returns.
 alias: Mama Bedroom Smart Heating
 description: Dynamic heating based on time, occupancy (media player), and electricity prices
 triggers:

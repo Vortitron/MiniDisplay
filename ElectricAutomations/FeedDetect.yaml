@@ -1,0 +1,95 @@
+alias: Feed Detect (Hem vs Bio)
+description: >-
+  Detects which physical supply feed is carrying the house and sets
+  input_boolean.on_fixed_price_feed accordingly — so the 15-min spot-price
+  automations switch themselves off/on without any manual toggle.
+
+  Two P1 meters, only one of which carries the house load at a time:
+    - HEM (sensor.hem_p1ib_active_power_*)  = the MONTHLY / fixed-price feed
+    - BIO (sensor.bio_p1ib_active_power_*)  = the SPOT / 15-min feed
+
+  Logic (kW, absolute power so solar export still counts as "active"):
+    - Both meters available: whichever is higher by more than `deadband` wins;
+      within the deadband (e.g. both near idle overnight) the last decision is
+      held (latched) — this stops flapping when the house is genuinely idle.
+    - One meter unavailable (the P1 readers do drop out): use the available
+      meter — clearly carrying load (>= load_kw) => that feed is live; clearly
+      idle (< idle_kw) => the OTHER (unavailable) feed must be live; in between,
+      hold.
+    - Both unavailable: hold.
+
+  On a real change it flips the boolean, logs it and posts a single (deduped)
+  persistent notification.
+triggers:
+  - trigger: time_pattern
+    minutes: "/2"
+  - trigger: homeassistant
+    event: start
+conditions: []
+actions:
+  - variables:
+      hem_entity: sensor.hem_p1ib_active_power_a0b765527004
+      bio_entity: sensor.bio_p1ib_active_power_a0b7655105e0
+      # Tunables (kW)
+      deadband: 0.2
+      load_kw: 0.4
+      idle_kw: 0.2
+      hem_raw: "{{ states(hem_entity) }}"
+      bio_raw: "{{ states(bio_entity) }}"
+      hem_av: "{{ hem_raw not in ['unavailable', 'unknown', 'none', ''] }}"
+      bio_av: "{{ bio_raw not in ['unavailable', 'unknown', 'none', ''] }}"
+      hem_w: "{{ hem_raw | float(0) | abs }}"
+      bio_w: "{{ bio_raw | float(0) | abs }}"
+      determination: >-
+        {% if hem_av and bio_av %}{% if hem_w > bio_w + deadband %}fixed{% elif bio_w > hem_w + deadband %}spot{% else %}hold{% endif %}{% elif bio_av %}{% if bio_w >= load_kw %}spot{% elif bio_w < idle_kw %}fixed{% else %}hold{% endif %}{% elif hem_av %}{% if hem_w >= load_kw %}fixed{% elif hem_w < idle_kw %}spot{% else %}hold{% endif %}{% else %}hold{% endif %}
+      decided: "{{ determination | trim }}"
+      hem_disp: "{{ (hem_w | round(2) ~ ' kW') if hem_av else hem_raw }}"
+      bio_disp: "{{ (bio_w | round(2) ~ ' kW') if bio_av else bio_raw }}"
+      on_fixed_now: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
+      change_to_fixed: "{{ decided == 'fixed' and not on_fixed_now }}"
+      change_to_spot: "{{ decided == 'spot' and on_fixed_now }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ change_to_fixed }}"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.on_fixed_price_feed
+          - action: notify.persistent_notification
+            data:
+              title: "On FIXED feed (auto-detected)"
+              message: >-
+                House is now on the monthly/fixed feed (Hem {{ hem_disp }}
+                vs Bio {{ bio_disp }}). 15-min spot-price automations are
+                now disabled.
+              data:
+                notification_id: feed_detect
+          - action: logbook.log
+            data:
+              name: Feed Detect
+              message: >-
+                Switched to FIXED (Hem {{ hem_disp }} vs Bio {{ bio_disp }},
+                hem_av={{ hem_av }}, bio_av={{ bio_av }}).
+      - conditions:
+          - condition: template
+            value_template: "{{ change_to_spot }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.on_fixed_price_feed
+          - action: notify.persistent_notification
+            data:
+              title: "On SPOT feed (auto-detected)"
+              message: >-
+                House is back on the 15-min spot feed (Bio {{ bio_disp }}
+                vs Hem {{ hem_disp }}). Spot-price automations re-enabled.
+              data:
+                notification_id: feed_detect
+          - action: logbook.log
+            data:
+              name: Feed Detect
+              message: >-
+                Switched to SPOT (Bio {{ bio_disp }} vs Hem {{ hem_disp }},
+                hem_av={{ hem_av }}, bio_av={{ bio_av }}).
+mode: single

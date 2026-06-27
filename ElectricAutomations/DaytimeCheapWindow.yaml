@@ -3,6 +3,8 @@ description: Turn on helper during the cheapest 4 hours in daytime window (8am-8
 triggers:
   - trigger: state
     entity_id: input_number.electricity_price_rank_daytime
+  - trigger: state
+    entity_id: input_boolean.on_fixed_price_feed
   - trigger: time_pattern
     minutes: "/15"
 conditions: []
@@ -12,7 +14,8 @@ actions:
           - condition: template
             value_template: >-
               {% set rank = states('input_number.electricity_price_rank_daytime') | int(99) %}
-              {{ rank < 4 }}
+              {# On the fixed-price feed, ignore the 15-min spot ranking. #}
+              {{ rank < 4 and is_state('input_boolean.on_fixed_price_feed', 'off') }}
         sequence:
           - action: input_boolean.turn_on
             target:

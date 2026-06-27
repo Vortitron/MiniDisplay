@@ -1,0 +1,65 @@
+alias: Spot 30-day Average
+description: >-
+  Maintains input_number.spot_30d_avg = rolling mean of the last 30 daily-mean
+  spot prices (base, ex-VAT). This is the "monthly rörligt pris" proxy the
+  Fixed-Price Swap Advisor compares the upcoming 24h against.
+
+  Each night at 23:55 it appends today's mean (the spot sensor's `average`
+  attribute) to a 30-slot ring buffer (input_text.spot_daily_avg_history),
+  trims to 30 entries and recomputes the mean. On HA start it just recomputes
+  from the existing buffer (no append, so restarts never double-count a day).
+
+  Seeded from long-term statistics (day-level prices) so it is useful
+  immediately and converges to a true 30-day trailing mean over time.
+triggers:
+  - trigger: time
+    at: "23:55:00"
+    id: daily
+  - trigger: homeassistant
+    event: start
+    id: startup
+conditions: []
+actions:
+  - variables:
+      price_sensor: sensor.nordpool_kwh_se4_sek_3_10_0
+      avg_today: "{{ state_attr(price_sensor, 'average') | float(0) }}"
+      buf_raw: "{{ states('input_text.spot_daily_avg_history') }}"
+      buf: >-
+        {% set ns = namespace(items=[]) %}
+        {% for p in buf_raw.split(',') %}
+          {% set q = p | trim %}
+          {% if q not in ['', 'unknown', 'unavailable', 'none'] %}
+            {% set ns.items = ns.items + [q | float(0)] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.items }}
+      append_today: "{{ trigger.id == 'daily' and avg_today > 0 }}"
+      new_buf: >-
+        {% if append_today %}
+          {{ (buf + [avg_today | round(4)])[-30:] }}
+        {% else %}
+          {{ buf[-30:] }}
+        {% endif %}
+      new_avg: >-
+        {{ ((new_buf | sum) / (new_buf | length)) | round(4) if (new_buf | length) > 0 else 0 }}
+  - if:
+      - condition: template
+        value_template: "{{ append_today }}"
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.spot_daily_avg_history
+        data:
+          value: "{{ new_buf | join(',') }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.spot_30d_avg
+    data:
+      value: "{{ new_avg }}"
+  - action: logbook.log
+    data:
+      name: Spot 30d Avg
+      message: >-
+        30d avg={{ new_avg }} SEK/kWh over {{ new_buf | length }} days
+        (today_mean={{ avg_today | round(3) }}, trigger={{ trigger.id }}, appended={{ append_today }})
+mode: single

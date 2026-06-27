@@ -32,18 +32,25 @@ triggers:
   - trigger: state
     entity_id:
       - media_player.lgnano_55
+      - media_player.telia_tv
       - input_number.electricity_price_rank
       - input_number.electricity_price_rank_4h
       - input_boolean.daytime_cheap_7_21
       - input_number.sam_desired_temperature
       - input_boolean.holiday_mode
-      - input_number.hours_to_evening_target
-      - input_number.forecast_outside_4h
-      - input_number.house_heat_loss_k
-      - input_number.house_heat_rate
+      - input_boolean.on_fixed_price_feed
       - sensor.forecast_tonight_min
       - sensor.forecast_outside_at_23
+  # Living-room temp changes every minute or two; debounce like sam.yaml does.
+  - trigger: state
+    entity_id:
       - sensor.t_h_sensor_temperature
+    for:
+      seconds: 30
+  # NOTE: thermal-model outputs (house_heat_loss_k, house_heat_rate,
+  # forecast_outside_4h, hours_to_evening_target) are deliberately NOT state
+  # triggers — they churn every 10 minutes and were causing a trigger storm.
+  # The /15 time pattern below re-evaluates with fresh values often enough.
   - trigger: time_pattern
     minutes: "/15"
   - trigger: time
@@ -54,8 +61,13 @@ triggers:
 conditions: []
 actions:
   - variables:
+      # TV-on = occupancy / comfort signal (drives desired -> 20°C). lgnano_55
+      # is the living-room TV (reports "idle" while on); telia_tv is the
+      # set-top box — count it as "watching" when playing/paused/on (its
+      # "idle" state can mean standby, so it is deliberately excluded).
       tv_on: >-
-        {{ states('media_player.lgnano_55') in ['on', 'playing', 'idle', 'paused'] }}
+        {{ states('media_player.lgnano_55') in ['on', 'playing', 'idle', 'paused']
+           or states('media_player.telia_tv') in ['on', 'playing', 'paused'] }}
       outside_temp: "{{ states('sensor.sam_outside_temperature') | float(10) }}"
       living_temp_state: "{{ states('sensor.t_h_sensor_temperature') }}"
       living_ok: "{{ living_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
@@ -76,25 +88,52 @@ actions:
       current_hour: "{{ now().hour }}"
       evening_hours: "{{ current_hour | int >= 19 and current_hour | int < 23 }}"
       approaching_evening: "{{ current_hour | int >= 15 and current_hour | int < 19 }}"
-      electricity_cheap_now: "{{ price_rank < price_rank_4h }}"
-      # Relative "cheap" must not trigger afternoon-style boost during 19:00–23:00.
+      # ---- Summer: skip morning heating on a hot day ----
+      # If the day is forecast to be warm there's no point heating (or
+      # cheap-boosting) the house in the morning — it will warm up by itself.
+      # Exception ("unless really cold"): the room is genuinely cold now, or it
+      # is frosty outside, so a little morning warmth is still wanted.
+      hot_day_max_threshold: 25
+      morning_end_hour: 12
+      really_cold_living: 16
+      really_cold_outside: 5
+      forecast_day_max: "{{ states('sensor.forecast_today_max') | float(0) }}"
+      hot_day_ahead: "{{ forecast_day_max > hot_day_max_threshold }}"
+      is_morning: "{{ current_hour | int < morning_end_hour }}"
+      really_cold: >-
+        {{ (living_ok and living_temp < really_cold_living)
+           or outside_temp < really_cold_outside }}
+      suppress_morning_heat: "{{ hot_day_ahead and is_morning and not really_cold }}"
+      # On the fixed-price feed the 15-min spot price is irrelevant: no cheap-hour
+      # boost and no expensive-hour cut — just run normal occupancy/comfort heating.
+      on_fixed_price: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
+      electricity_cheap_now: "{{ price_rank < price_rank_4h and not on_fixed_price }}"
+      # Relative "cheap" must not trigger afternoon-style boost during 19:00–23:00,
+      # nor a wasteful morning warm-up when the day is going to be hot anyway.
       evening_hours_block_boost: "{{ evening_hours }}"
-      cheap_for_boost: "{{ electricity_cheap_now and not evening_hours_block_boost }}"
+      cheap_for_boost: >-
+        {{ electricity_cheap_now and not evening_hours_block_boost
+           and not suppress_morning_heat }}
       evening_comfort_target: 20
       evening_hold_floor: 19
       prewarm_max: 25
       prewarm_control_target: >-
-        {# Only heat as much as needed to hold >=19°C through evening — not always 25. #}
+        {# Only heat as much as needed to hold >=19°C through evening — not always 25.
+           Clamp needed to [evening_comfort_target, prewarm_max]. The old
+           "[a, b, c] | min | max" form raised TypeError ('int' object is not
+           iterable) whenever living < 19, killing the whole run. #}
         {% if living_ok and living_temp >= evening_hold_floor %}
           {{ evening_comfort_target }}
         {% else %}
           {% set deficit = evening_hold_floor - living_temp %}
           {% set needed = evening_hold_floor + 2 + (deficit * 2) %}
-          {{ [evening_comfort_target, needed, prewarm_max] | min | max }}
+          {{ [[needed, prewarm_max] | min, evening_comfort_target] | max }}
         {% endif %}
       hours_until_19: >-
+        {# NB: this HA's min/max filters take a list only — "x | max(0)"
+           raises TypeError ('int' object is not iterable). #}
         {% if current_hour | int < 19 %}
-          {{ (19 - current_hour | int) | max(0) }}
+          {{ [19 - current_hour | int, 0] | max }}
         {% else %}
           0
         {% endif %}
@@ -162,7 +201,7 @@ actions:
           {% endif %}
         {% elif cheap_for_boost and outside_temp < 10 %}
           {{ prewarm_max }}
-        {% elif use_prewarm_evening %}
+        {% elif use_prewarm_25_evening %}
           {{ prewarm_control_target }}
         {% elif cheap_for_boost %}
           {% set boosted = [d + 3, prewarm_max] | min %}
@@ -171,7 +210,7 @@ actions:
           {% else %}
             {{ boosted }}
           {% endif %}
-        {% elif price_rank > price_rank_4h and not tv_on %}
+        {% elif price_rank > price_rank_4h and not tv_on and not on_fixed_price %}
           16
         {% else %}
           {{ d }}
@@ -199,10 +238,12 @@ actions:
           {% else %}
             Evening comfort {{ d | round(0) }}°C
           {% endif %}
+        {% elif suppress_morning_heat and electricity_cheap_now %}
+          Hot day — no morning heat
         {% elif c > d + 0.5 %}
           {% if cheap_for_boost and outside_temp < 10 %}
             Pre-warm (cold + cheap)
-          {% elif cheap_for_boost and approaching_evening and use_prewarm_evening %}
+          {% elif cheap_for_boost and approaching_evening and use_prewarm_25_evening %}
             Pre-warm to {{ c | round(0) }}°C (hold 19)
           {% elif cheap_for_boost and approaching_evening %}
             No pre-warm (forecast/model)
@@ -211,7 +252,7 @@ actions:
           {% else %}
             Control above comfort
           {% endif %}
-        {% elif price_rank > price_rank_4h and not tv_on %}
+        {% elif price_rank > price_rank_4h and not tv_on and not on_fixed_price %}
           Electricity expensive
         {% elif tv_on %}
           Evening comfort {{ d | round(0) }}°C
@@ -299,6 +340,8 @@ actions:
         living={{ living_temp | round(1) if living_ok else 'n/a' }}°C,
         rank={{ price_rank }}, rank_4h={{ price_rank_4h }},
         cheap_now={{ electricity_cheap_now }},
+        hot_day={{ hot_day_ahead }} (fc_max={{ forecast_day_max | round(1) }}°C),
+        suppress_am_heat={{ suppress_morning_heat }},
         holiday={{ holiday_mode }},
         manual_override={{ manual_override }},
         lock_active={{ lock_active_now }},

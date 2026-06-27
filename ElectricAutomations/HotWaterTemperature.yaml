@@ -1,16 +1,23 @@
 alias: Hot water temperature
 description: >-
   Pipe-mounted temperature sensor monitoring. Sets
-  input_boolean.hot_water_notified when the pipe has been warm for at least 60
-  seconds (sustained hot draw = shower, not a brief rinse). Sends a separate
-  "Hot water, isn't" alarm if the pipe runs cold during use. The flag is cleared
-  by HotWaterReheatTracker after 2 cumulative hours of boiler heating, NOT by
-  the pipe cooling down.
+  input_boolean.hot_water_notified (which schedules a reheat) on either of two
+  signals:
+    1. Sustained hot draw — pipe >48°C for 3 minutes (a real shower/dishes,
+       not a brief hand-rinse).
+    2. Tank depleted — pipe runs cold (<22°C for 10 minutes). This catches a
+       cooler or shorter shower that empties the tank without ever pushing the
+       pipe past 48°C (e.g. a 16:30 shower that peaked at ~44°C yet left the
+       pipe sitting at ~19°C afterwards). A cold pipe = cold mains water in a
+       depleted tank; a full, idle tank holds the pipe around 33-37°C.
+  A separate (currently disabled) "Hot water, isn't" alarm fires if the pipe
+  runs cold during active use. The flag is cleared by HotWaterReheatTracker
+  after 2 cumulative hours of boiler heating, NOT by the pipe warming back up.
 triggers:
   - trigger: numeric_state
     entity_id:
       - sensor.manifoldtemperature_hot_water_boiler_temp
-    above: 40
+    above: 48
     for:
       hours: 0
       minutes: 3
@@ -26,6 +33,19 @@ triggers:
       seconds: 10
     id: cold_alarm
     enabled: false
+  # Tank-depleted detector: the pipe sits near cold-mains temperature (<22°C)
+  # for 10 minutes. A full idle tank holds the pipe ~33-37°C, so a sustained
+  # cold pipe means the hot water was drawn off without the >48°C detector
+  # firing (a cooler/shorter shower). above:5 ignores sensor dropouts to 0.
+  - trigger: numeric_state
+    entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
+    below: 22
+    above: 5
+    for:
+      hours: 0
+      minutes: 10
+      seconds: 0
+    id: tank_depleted
 conditions: []
 actions:
   - choose:
@@ -43,21 +63,49 @@ actions:
             data:
               name: Hot Water
               message: >-
-                Sustained warm pipe (>32°C for 60s) detected — tank likely
+                Sustained warm pipe (>48°C for 3 min) detected — tank likely
                 depleted. Reheat timer started (2h cumulative).
           - action: notify.persistent_notification
             data:
-              message: "Hot water used. Alarm: 1"
+              message: "Hot water used ×{{ (states('counter.hot_water_used') | int(0)) + 1 }}"
               data:
-                tag: hot_water
-                uri: /dashboard-dash/boiler
+                notification_id: hot_water
+          - action: counter.increment
+            target:
+              entity_id: counter.hot_water_used
+      - conditions:
+          - condition: trigger
+            id: tank_depleted
+          - condition: state
+            entity_id: input_boolean.hot_water_notified
+            state: "off"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.hot_water_notified
+          - action: logbook.log
+            data:
+              name: Hot Water
+              message: >-
+                Pipe ran cold (<22°C for 10 min) — tank depleted without a
+                >48°C draw being detected (a cooler/shorter shower). Reheat
+                scheduled (2h cumulative).
+          - action: notify.persistent_notification
+            data:
+              message: "Hot water tank depleted (cold pipe) — reheat scheduled ×{{ (states('counter.hot_water_used') | int(0)) + 1 }}"
+              data:
+                notification_id: hot_water
+          - action: counter.increment
+            target:
+              entity_id: counter.hot_water_used
       - conditions:
           - condition: trigger
             id: cold_alarm
-          - condition: switch.is_on
-            target:
-              entity_id: input_boolean.hot_water_notified
-            options: {}
+          # Was "condition: switch.is_on" — not a valid condition type; it
+          # would error at runtime if the cold_alarm trigger is re-enabled.
+          - condition: state
+            entity_id: input_boolean.hot_water_notified
+            state: "on"
         sequence:
           - device_id: 911ce9be1f83a09b179821cb2c9c0de6
             domain: mobile_app

@@ -1,0 +1,181 @@
+alias: Fixed-Price Swap Advisor
+description: >-
+  Suggests switching the house supply between the spot (rörligt timpris) feed
+  and the fixed-price feed by comparing the upcoming 24h spot average against the
+  recent 30-day average (input_number.spot_30d_avg — a proxy for the monthly
+  rörligt pris).
+
+    - On SPOT and the next-24h average (flat OR usage-weighted) is above the
+      30-day average by more than the margin (input_number.fixed_swap_margin_pct)
+      -> suggest swapping to the FIXED feed.
+    - On FIXED and the next-24h average drops back below the 30-day average by
+      the margin -> suggest swapping BACK to spot.
+
+  This only ADVISES (persistent notification, notification_id fixed_price_swap so
+  repeats don't stack), throttled to at most one per day
+  (input_datetime.fixed_swap_last_suggested). You physically swap the feed;
+  FeedDetect.yaml then auto-sets input_boolean.on_fixed_price_feed from the Hem/Bio
+  meters. The upcoming-24h averages are always published to
+  input_number.spot_next24h_avg(_weighted) for the dashboard.
+
+  "The way we use it" (usage weighting): weights derived from the BIO (spot) P1
+  meter's last-30-day hourly means — the real whole-house load while on spot. This
+  already reflects load-shifting to cheap hours; tune `usage_profile` if usage
+  patterns change.
+triggers:
+  - trigger: state
+    entity_id: sensor.nordpool_kwh_se4_sek_3_10_0
+    attribute: raw_tomorrow
+  - trigger: time
+    at:
+      - "13:30:00"
+      - "18:00:00"
+      - "06:45:00"
+  - trigger: time_pattern
+    minutes: "/30"
+  - trigger: state
+    entity_id:
+      - input_number.spot_30d_avg
+      - input_number.fixed_swap_margin_pct
+      - input_boolean.on_fixed_price_feed
+  - trigger: homeassistant
+    event: start
+conditions: []
+actions:
+  - variables:
+      price_sensor: sensor.nordpool_kwh_se4_sek_3_10_0
+      # Persistent notifications are fanned out to all devices; the
+      # notification_id keeps repeats from stacking.
+      notify_service: notify.persistent_notification
+      # Relative hourly consumption (index = hour of day, mean ~1). Only the SHAPE
+      # matters — the weighted average normalises by the sum of weights. Derived
+      # from the BIO (spot) P1 meter's last-30-day hourly means (the real
+      # whole-house load while on the spot feed); refresh from that meter if usage
+      # patterns change.
+      usage_profile:
+        [0.878, 1.262, 1.109, 0.905, 0.585, 0.591, 0.609, 0.697, 0.853, 0.959,
+         1.164, 1.218, 1.495, 1.411, 1.133, 1.074, 0.928, 1.009, 1.22, 1.138,
+         1.043, 0.998, 0.945, 0.775]
+      # Build the next-24h list IN ONE render (inline state_attr so the slot
+      # start/end stay as fresh datetime objects — round-tripping them through a
+      # cross-step variable corrupts the datetime compare). Emit only plain
+      # numbers (v=price, h=hour) so the list is safe to reuse across steps.
+      future_slots: >-
+        {% set slots = (state_attr(price_sensor, 'raw_today') or [])
+                     + (state_attr(price_sensor, 'raw_tomorrow') or []) %}
+        {% set ns = namespace(items=[]) %}
+        {% for s in slots %}
+          {% if s is mapping and 'value' in s and s.get('start') and s.get('end') %}
+            {% if s['end'] > now() and (ns.items | length) < 96 %}
+              {% set ns.items = ns.items + [{'v': s['value'] | float(0), 'h': s['start'].hour | int(0)}] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.items }}
+      slot_count: "{{ future_slots | length }}"
+      flat_avg: >-
+        {{ ((future_slots | map(attribute='v') | sum) / (future_slots | length)) | float(0)
+           if (future_slots | length) > 0 else 0 }}
+      weighted_avg: >-
+        {% set ns = namespace(wsum=0, wprice=0) %}
+        {% for it in future_slots %}
+          {% set w = usage_profile[it.h] | float(1) %}
+          {% set ns.wsum = ns.wsum + w %}
+          {% set ns.wprice = ns.wprice + (it.v * w) %}
+        {% endfor %}
+        {{ (ns.wprice / ns.wsum) | float(0) if ns.wsum > 0 else 0 }}
+      benchmark: "{{ states('input_number.spot_30d_avg') | float(0) }}"
+      margin: "{{ (states('input_number.fixed_swap_margin_pct') | float(10)) / 100 }}"
+      hi_threshold: "{{ (benchmark * (1 + margin)) | round(4) }}"
+      lo_threshold: "{{ (benchmark * (1 - margin)) | round(4) }}"
+      on_fixed: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
+      # Need a FULL 24h of upcoming prices (96 quarter-hour slots) plus a valid
+      # benchmark before comparing. Nordpool only publishes the next day at ~13:00,
+      # so before then there is less than 24h ahead — we wait rather than decide on
+      # a partial day. After ~13:00 there is today's remainder + all of tomorrow.
+      have_data: "{{ slot_count >= 96 and benchmark > 0 }}"
+      last_suggested: "{{ states('input_datetime.fixed_swap_last_suggested') }}"
+      suggested_today: >-
+        {% if last_suggested in ['unknown', 'unavailable', 'none', ''] %}
+          false
+        {% else %}
+          {{ (last_suggested | as_datetime | as_local).date() == now().date() }}
+        {% endif %}
+      worst_avg: "{{ [flat_avg, weighted_avg] | max }}"
+      best_avg: "{{ [flat_avg, weighted_avg] | min }}"
+      suggest_to_fixed: "{{ have_data and not on_fixed and worst_avg > hi_threshold }}"
+      suggest_to_spot: "{{ have_data and on_fixed and best_avg < lo_threshold }}"
+  - if:
+      - condition: template
+        # Only publish a genuine 24h average (full next-day prices loaded), so the
+        # dashboard "next 24h" figure is never a misleading partial day.
+        value_template: "{{ slot_count >= 96 }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.spot_next24h_avg
+        data:
+          value: "{{ flat_avg | round(4) }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.spot_next24h_avg_weighted
+        data:
+          value: "{{ weighted_avg | round(4) }}"
+  - choose:
+      # ---- On spot, prices spiking -> suggest FIXED ----
+      - conditions:
+          - condition: template
+            value_template: "{{ suggest_to_fixed and not suggested_today }}"
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              title: "Spot getting expensive — consider the FIXED feed"
+              message: >-
+                Next 24h ≈ {{ flat_avg | round(2) }} SEK/kWh (used-weighted
+                {{ weighted_avg | round(2) }}) vs 30-day average
+                {{ benchmark | round(2) }} SEK/kWh. The fixed feed looks cheaper —
+                consider swapping over. (Once you physically swap, the feed is
+                auto-detected and the spot automations switch off by themselves.)
+              data:
+                notification_id: fixed_price_swap
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.fixed_swap_last_suggested
+            data:
+              datetime: "{{ now().isoformat() }}"
+          - action: logbook.log
+            data:
+              name: Fixed-Price Swap
+              message: >-
+                Suggested SWAP TO FIXED: next24h flat={{ flat_avg | round(3) }},
+                weighted={{ weighted_avg | round(3) }}, 30d={{ benchmark | round(3) }},
+                hi={{ hi_threshold }}, slots={{ slot_count }}
+      # ---- On fixed, prices back down -> suggest SPOT ----
+      - conditions:
+          - condition: template
+            value_template: "{{ suggest_to_spot and not suggested_today }}"
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              title: "Spot cheap again — consider swapping back to SPOT"
+              message: >-
+                Next 24h ≈ {{ flat_avg | round(2) }} SEK/kWh (used-weighted
+                {{ weighted_avg | round(2) }}) vs 30-day average
+                {{ benchmark | round(2) }} SEK/kWh. Spot looks cheaper than your
+                fixed rate now — consider swapping back. (The feed is auto-detected,
+                so the spot automations re-enable themselves once you do.)
+              data:
+                notification_id: fixed_price_swap
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.fixed_swap_last_suggested
+            data:
+              datetime: "{{ now().isoformat() }}"
+          - action: logbook.log
+            data:
+              name: Fixed-Price Swap
+              message: >-
+                Suggested BACK TO SPOT: next24h flat={{ flat_avg | round(3) }},
+                weighted={{ weighted_avg | round(3) }}, 30d={{ benchmark | round(3) }},
+                lo={{ lo_threshold }}, slots={{ slot_count }}
+mode: single

@@ -15,61 +15,9 @@ conditions:
       {{ state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') is not none 
          and state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') | length > 0 }}
 actions:
-  - service: logbook.log
-    data:
-      name: Nordpool Rank Debug
-      message: >-
-        {% set current_price = states('sensor.nordpool_kwh_se4_sek_3_10_025') | float %}
-        {% set today = state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'raw_today') or [] %}
-        {% set ns = namespace(hours=[], accum=0.0, count=0, idx=0, quarters=[]) %}
-        {% for slot in today %}
-          {% if slot is mapping and 'value' in slot %}
-            {% set val = slot['value'] | float(0) %}
-            {% set ns.quarters = ns.quarters + [val] %}
-            {% set ns.accum = ns.accum + val %}
-            {% set ns.count = ns.count + 1 %}
-            {% if ns.count == 4 %}
-              {% set ns.hours = ns.hours + [{'hour': ns.idx, 'avg': ns.accum / ns.count}] %}
-              {% set ns.accum = 0 %}
-              {% set ns.count = 0 %}
-              {% set ns.idx = ns.idx + 1 %}
-            {% endif %}
-          {% endif %}
-        {% endfor %}
-        {% if ns.count > 0 %}
-          {% set ns.hours = ns.hours + [{'hour': ns.idx, 'avg': ns.accum / ns.count}] %}
-        {% endif %}
-        {% set hourly_values = ns.hours | map(attribute='avg') | list %}
-        {% set sorted_hourly = hourly_values | sort %}
-        {% set current_hour = now().hour %}
-        {% set current_entry = ns.hours | selectattr('hour', 'equalto', current_hour) | list %}
-        {% set current_hour_avg = current_entry[0]['avg'] if current_entry | length > 0 else current_price %}
-        {% set window_ns = namespace(values=[], window_size=16) %}
-        {% for start in range(0, (ns.quarters | length) - window_ns.window_size + 1) %}
-          {% set sum_ns = namespace(total=0.0) %}
-          {% for offset in range(0, window_ns.window_size) %}
-            {% set sum_ns.total = sum_ns.total + ns.quarters[start + offset] %}
-          {% endfor %}
-          {% set window_ns.values = window_ns.values + [sum_ns.total / window_ns.window_size] %}
-        {% endfor %}
-        {% set sorted_windows = window_ns.values | sort %}
-        {% set quarter_index = (now().hour * 4) + ((now().minute // 15) | int(0)) %}
-        {% set current_window_avg = window_ns.values[quarter_index] if quarter_index < window_ns.values | length else current_price %}
-        {% set daytime_hours = ns.hours | selectattr('hour', 'ge', 8) | selectattr('hour', 'lt', 20) | list %}
-        {% set daytime_prices = daytime_hours | map(attribute='avg') | list %}
-        Current Price (15 min): {{ current_price }},
-        Current Hour Avg: {{ current_hour_avg }},
-        Current 4h Avg: {{ current_window_avg }},
-        15-min Slots: {{ ns.quarters | length }},
-        Hour Buckets: {{ ns.hours | length }},
-        4h Windows: {{ window_ns.values | length }},
-        Daytime Hours (8-20): {{ daytime_hours | length }},
-        First Hourly Prices: {{ hourly_values[:5] }},
-        First 4h Avgs: {{ window_ns.values[:5] }},
-        Last 4h Avgs: {{ window_ns.values[-5:] }},
-        Sorted Hourly First: {{ sorted_hourly[:5] }},
-        Sorted 4h First: {{ sorted_windows[:5] }},
-        Daytime Prices: {{ daytime_prices }}
+  # NB: a large "Nordpool Rank Debug" logbook.log used to run here on every
+  # price tick — removed Jun 2026 (it spammed the logbook and the same maths
+  # is computed in the set_value steps below).
   - service: input_number.set_value
     target:
       entity_id: input_number.electricity_price_rank

@@ -1,0 +1,123 @@
+alias: Super Expensive Load Shedding
+description: >-
+  Demand-response "super expensive" mode. When the electricity BASE price
+  (ex-VAT Nordpool spot, sensor.nordpool_kwh_se4_sek_3_10_0) rises above
+  input_number.super_expensive_threshold (default 2.0 SEK/kWh) it switches off
+  non-essential loads, and releases them when the price drops back.
+
+  ## Single source of truth
+  input_boolean.super_expensive_active — set on/off by this automation (with
+  hysteresis). sam.yaml reads it, the dashboard shows it, and any other
+  automation can react to it.
+
+  ## What it sheds while active
+  Everything in `shed_entities` is switched off (re-asserted every /5 min in case
+  another automation switches it back on). Works across domains via
+  homeassistant.turn_off (climate -> off, lights/switches -> off):
+    - switch.t34_smart_plug_switch_1  Loft Wet humidifier
+    - switch.smart_plug_5_socket_1    circulation fan (Tuya plug; sam.yaml drives it)
+    - climate.bio_office_heat         Bio office heater (often unplugged)
+    - light.led_flood_light           LED flood light
+    - light.bio_floodlight            Bio flood light
+  Plus climate.sam — handled by sam.yaml's own guard (Sam off ONLY when it is
+  just idling, i.e. the living room is above 19 °C; otherwise it may be actively
+  heating and is left running).
+
+  ## On exit
+  Loads are simply RELEASED — we never force anything back on. Their own
+  automations/schedules (CirculationFan, BioOffice heating, Loft Wet on/off,
+  light schedules) bring them back when actually needed, so nothing is
+  spuriously energised.
+
+  ## Not shed
+  - Hot water (switch.smart_plug_2_socket_1): already price-gated by
+    HotWater.yaml (heats only in the cheapest hours), so effectively off when
+    expensive.
+  - The server: it is no longer on a switched plug, ESXi 6.5 SNMP is
+    intentionally disabled (security), and the iDRAC (192.168.1.223, Dell R620)
+    cannot selectively drop a single PSU's mains feed — so server shedding is not
+    possible at present. Revisit if it goes back on a switched outlet.
+variables:
+  price_sensor: sensor.nordpool_kwh_se4_sek_3_10_0
+  # Drop out of super-expensive only once price falls this far below the
+  # threshold (value hysteresis; stops flapping right at the boundary).
+  hysteresis_deadband: 0.15
+  shed_entities:
+    - switch.t34_smart_plug_switch_1   # Loft Wet humidifier
+    - switch.smart_plug_5_socket_1     # circulation fan (Tuya plug; sam.yaml drives it directly)
+    - climate.bio_office_heat          # Bio office heater (often unplugged)
+    - light.led_flood_light            # LED flood light
+    - light.bio_floodlight             # Bio flood light
+triggers:
+  - trigger: state
+    entity_id:
+      - sensor.nordpool_kwh_se4_sek_3_10_0
+      - input_number.super_expensive_threshold
+      - input_boolean.super_expensive_active
+      - input_boolean.on_fixed_price_feed
+  - trigger: time_pattern
+    minutes: "/5"
+  - trigger: homeassistant
+    event: start
+conditions: []
+actions:
+  - variables:
+      price_state: "{{ states(price_sensor) }}"
+      price_ok: "{{ price_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      price: "{{ price_state | float(0) }}"
+      threshold: "{{ states('input_number.super_expensive_threshold') | float(2.0) }}"
+      currently_active: "{{ is_state('input_boolean.super_expensive_active', 'on') }}"
+      # On the fixed-price feed, spot price is irrelevant — never shed.
+      on_fixed_price: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
+      on_level: "{{ threshold }}"
+      off_level: "{{ threshold - hysteresis_deadband }}"
+      # Hysteresis: latch on at/above threshold; only release below threshold-deadband.
+      should_be_active: >-
+        {{ price_ok and not on_fixed_price
+           and (price >= on_level or (currently_active and price >= off_level)) }}
+      # Of the sheddable loads, those currently on (skip already-off/unavailable).
+      to_turn_off: >-
+        {% set ns = namespace(items=[]) %}
+        {% for e in shed_entities %}
+          {% if states(e) not in ['off', 'unavailable', 'unknown', 'none', ''] %}
+            {% set ns.items = ns.items + [e] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.items }}
+
+  # ---- 1) Maintain the active flag (with logbook on each transition) -------
+  - choose:
+      - conditions: "{{ should_be_active and not currently_active }}"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.super_expensive_active
+          - action: logbook.log
+            data:
+              name: Super Expensive
+              message: >-
+                ENTER super-expensive: price {{ price | round(3) }} ≥ {{ threshold | round(2) }} SEK/kWh.
+                Shedding: {{ to_turn_off | join(', ') if to_turn_off else '(all already off)' }} (+ Sam if idle, via sam.yaml).
+      - conditions: "{{ not should_be_active and currently_active }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.super_expensive_active
+          - action: logbook.log
+            data:
+              name: Super Expensive
+              message: >-
+                EXIT super-expensive: price {{ price | round(3) }} < {{ off_level | round(2) }} SEK/kWh. Releasing loads to their own automations.
+
+  # ---- 2) While active: switch off any sheddable load still on -------------
+  - if:
+      - condition: template
+        value_template: "{{ should_be_active and (to_turn_off | count) > 0 }}"
+    then:
+      - repeat:
+          for_each: "{{ to_turn_off }}"
+          sequence:
+            - action: homeassistant.turn_off
+              target:
+                entity_id: "{{ repeat.item }}"
+mode: single

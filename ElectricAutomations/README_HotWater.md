@@ -25,15 +25,15 @@ Computes the heating schedule directly from today's Nordpool hourly prices, spli
 | **Saturday**, current hour ≥ 19 | **OFF** | Sunday's all-day rule kicks in at midnight |
 | **Weekday** — current hour is one of the **2 cheapest hours in 00:00–05:59** | **ON** | Guaranteed overnight reheat |
 | **Weekday** — current hour is one of the **4 cheapest hours in 06:00–23:59** | **ON** | Daytime top-up |
-| **Weekday** — `hot_water_notified` is on AND it's before 18:00 AND current hour is one of the **2 cheapest hours in [now, 18:00)** | **ON** | Ensure hot water in time for evening |
-| **Weekday deadline safety** — `hot_water_notified` is on and remaining reheat minutes are now greater than/equal to minutes left before 18:00 | **ON** | Prevents waiting too long for cheap slots and missing evening hot water |
+| **Weekday** — `hot_water_notified` is on AND it's before `evening_ready_hour` (20:00) AND current hour is one of the **2 cheapest hours in [now, 20:00)** | **ON** | Ensure hot water in time for an evening shower |
+| **Weekday deadline safety** — `hot_water_notified` is on and remaining reheat minutes are now ≥ minutes left before `evening_ready_hour` (20:00) | **ON** | Prevents waiting too long for cheap slots and missing evening hot water |
 | Otherwise | **OFF** | Save money |
 
 Weekday base schedule: **6 hours of heating per day**, always at the cheapest prices within each window, **always at least 2 overnight**.
 
 Saturday: ~15 hours of heating (00:00–18:59 minus the 4 most expensive). Weekend usage is heavier and less predictable, so the boiler stays warm except during the worst peaks.
 
-When a shower has emptied the tank (`hot_water_notified` on), the weekday pre-evening rule adds up to 2 more hours of heating before 18:00, picked from the cheapest hours still ahead in the day. A deadline safety override forces heating once there is no longer enough time left to delay.
+When a shower has emptied the tank (`hot_water_notified` on), the weekday evening rule adds up to 2 more hours of heating before `evening_ready_hour` (20:00), picked from the cheapest hours still ahead in the day. A deadline safety override forces heating once there is no longer enough time left to delay. The ready hour was raised from 18:00 → 20:00 in Jun 2026 (see the diagnosis note below) so a late-afternoon shower still gets a reheat in time for an evening one.
 
 #### Why split into two windows?
 
@@ -75,14 +75,22 @@ The previous version used `context.user_id is not none` to detect manual clicks,
 
 After turning the plug on, the automation waits 1 minute then checks if it actually switched on. If it's still off, a persistent notification is raised ("Hot Water Not Reacting — Alarm: 2").
 
-### `HotWaterTemperature.yaml` — shower detection
+### `HotWaterTemperature.yaml` — use & depletion detection
 
-Monitors `sensor.manifoldtemperature_hot_water_boiler_temp` (pipe-mounted sensor on the closed boiler):
+Monitors `sensor.manifoldtemperature_hot_water_boiler_temp` (pipe-mounted sensor on the closed boiler). It sets `input_boolean.hot_water_notified` (which schedules a reheat) on **either** of two signals:
 
-- **Stays above 40°C for 3 minutes** → sets `input_boolean.hot_water_notified` on (sustained hot draw = real shower / dishes / extended use, not a brief hand-rinse)
-- **Drops below 20°C for 10s** alarm trigger exists but is currently disabled in YAML
+1. **Hot draw** — pipe **stays above 48°C for 3 minutes** (sustained hot draw = real shower / dishes / extended use, not a brief hand-rinse). The threshold was tuned live from 40°C to 48°C.
+2. **Tank depleted** — pipe **stays below 22°C for 10 minutes** (`tank_depleted` trigger, added Jun 2026). A full, idle tank holds the pipe around 33–37°C, so a sustained cold pipe = cold mains water in a depleted tank. This catches a cooler/shorter shower that empties the tank without ever pushing the pipe past 48°C. The branch is guarded so it only fires when the flag is currently off (it won't re-arm the timer mid-reheat).
 
-The pipe sensor reliably detects sustained hot-water flow (pipe stays warm only while water is moving through). A brief hand-rinse will not usually keep the pipe above 40°C for 3 minutes, so it distinguishes heavier usage from incidental flow.
+Why two signals? The pipe getting hot is a reliable *hot-draw* signal, but the peak height varies — a shorter or cooler shower can top out around 44°C and slip under the 48°C threshold. The cold baseline **after** the draw is the unambiguous *depletion* signal.
+
+Both branches post the **"Hot water used ×N"** persistent notification with a stable `notification_id: hot_water` (so it replaces rather than stacks) and bump `counter.hot_water_used`. See **`README_NotificationCounters.md`**.
+
+There is also a **disabled** `cold_alarm` (`<20°C for 10s`) which, if enabled, pings a phone with "Hot water, isn't" during a cold draw — a different purpose from `tank_depleted`.
+
+> Note (Jun 2026): the disabled `cold_alarm` branch previously used an invalid
+> `condition: switch.is_on`; it is now a proper `state` condition on
+> `input_boolean.hot_water_notified`.
 
 ### `HotWaterReheatTracker.yaml` — flag clearing after reheat
 
@@ -101,6 +109,21 @@ This means:
 `input_boolean.hot_water_notified` drives the **pre-evening reheat rule** in `HotWater.yaml`: while the flag is on and current time is before 18:00, the automation finds the 2 cheapest hours remaining in [now, 18:00) and heats during those. The flag clears automatically once 2 cumulative hours of heating have happened, so the rule disengages exactly when the tank should be full again.
 
 For unscheduled urgent hot water, use the manual override (2h boost via button/switch).
+
+### Jun 2026 — why a 16:30 shower left no hot water at 19:00 (and the fix)
+
+Diagnosed from sensor history on 2026-06-15:
+
+- The morning shower pushed the pipe to ~50–53°C → detected, tank reheated 07:15–09:15. Worked correctly.
+- The ~16:30 shower only peaked at **~44.5°C** — *under* the 48°C threshold — so it was **never detected**. No flag, no reheat scheduled.
+- Afterwards the pipe **collapsed to ~19°C and held there from 16:54 to 18:18+** (cold mains in a depleted tank), but the boiler never came back on, so the 19:00 shower got very little hot water.
+
+Two fixes were made:
+
+1. **Depletion detection** (`tank_depleted` trigger in `HotWaterTemperature.yaml`): a sustained cold pipe (<22°C for 10 min) now sets the reheat flag, catching exactly this missed-shower case.
+2. **Evening deadline** (`evening_ready_hour` in `HotWater.yaml`): the pre-evening reheat window and deadline-safety were hard-coded to 18:00, which disengaged the reheat rule before a 19:00 shower. Raised to **20:00** (a tunable named constant). Because the evening rule only runs while the flag is on (i.e. after a detected draw/depletion), this adds **no** evening-peak heating on normal days.
+
+Both are covered by `tests/test_hot_water_deadline.py`.
 
 ## Holiday mode
 

@@ -6,9 +6,13 @@ description: >-
     - 2 cheapest hours within 00:00-05:59 (guaranteed overnight reheat —
       fixes the rank-rollover bug at midnight)
     - 4 cheapest hours within 06:00-23:59 (daytime top-up)
-    - Pre-evening reheat: if hot_water_notified is on and it's before
-      18:00, additionally heats during the 2 cheapest hours in
-      [now, 18:00) so the tank is hot in time for an evening shower.
+    - Evening reheat: if hot_water_notified is on and it's before the
+      evening_ready_hour (20:00), additionally heats during the 2 cheapest
+      hours in [now, evening_ready_hour) so the tank is hot in time for an
+      evening shower. A deadline-safety rule forces heating once there is only
+      just enough time left to finish the reheat before the ready hour.
+      (Raised from 18:00 in Jun 2026 — an 18:00 deadline was too early and
+      left no hot water for a 19:00 shower.)
 
   Saturday:
     - ON 00:00-19:00 EXCEPT the 4 most expensive hours within that window
@@ -44,6 +48,11 @@ triggers:
 conditions: []
 actions:
   - variables:
+      # Hour by which the tank should be hot for evening showers. Drives both
+      # the pre-evening reheat window and the deadline-safety rule. Raised from
+      # 18 -> 20 (Jun 2026): a 16:30 shower left no hot water for a 19:00
+      # shower because 18:00 was too early a reheat deadline.
+      evening_ready_hour: 20
       is_saturday: "{{ now().weekday() == 5 }}"
       is_sunday: "{{ now().weekday() == 6 }}"
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
@@ -104,10 +113,10 @@ actions:
         {{ sorted_d[:4] | map(attribute='hour') | list }}
       cheapest_2_pre_evening: >-
         {% set ch = now().hour %}
-        {% if shower_detected and ch < 18 %}
+        {% if shower_detected and ch < evening_ready_hour %}
           {% set window = hourly_prices
               | selectattr('hour', 'ge', ch)
-              | selectattr('hour', 'lt', 18) | list %}
+              | selectattr('hour', 'lt', evening_ready_hour) | list %}
           {% set sorted_w = window | sort(attribute='avg') %}
           {{ sorted_w[:2] | map(attribute='hour') | list }}
         {% else %}
@@ -120,15 +129,15 @@ actions:
       in_cheap_overnight: "{{ now().hour in cheapest_2_overnight }}"
       in_cheap_daytime: "{{ now().hour in cheapest_4_daytime }}"
       in_cheap_pre_evening: "{{ now().hour in cheapest_2_pre_evening }}"
-      minutes_until_18: >-
-        {% if now().hour >= 18 %}
+      minutes_until_ready: >-
+        {% if now().hour >= evening_ready_hour %}
           0
         {% else %}
-          {{ (((18 - now().hour) * 60) - now().minute) | int(0) }}
+          {{ (((evening_ready_hour - now().hour) * 60) - now().minute) | int(0) }}
         {% endif %}
       must_heat_now_for_deadline: >-
-        {% set mins_left = 0 if now().hour >= 18 else (((18 - now().hour) * 60) - now().minute) %}
-        {{ shower_detected and now().hour < 18
+        {% set mins_left = 0 if now().hour >= evening_ready_hour else (((evening_ready_hour - now().hour) * 60) - now().minute) %}
+        {{ shower_detected and now().hour < evening_ready_hour
            and reheat_minutes_remaining > 0
            and mins_left <= reheat_minutes_remaining }}
       saturday_heating_hour: >-
@@ -138,7 +147,7 @@ actions:
         {% if has_today_data | int(0) == 1 %}
           {{ in_cheap_overnight or in_cheap_daytime or in_cheap_pre_evening or must_heat_now_for_deadline }}
         {% else %}
-          {% if shower_detected and now().hour < 18 and reheat_minutes_remaining > 0 %}
+          {% if shower_detected and now().hour < evening_ready_hour and reheat_minutes_remaining > 0 %}
             true
           {% else %}
             {{ now().hour >= 1 and now().hour < 4 }}
@@ -217,7 +226,7 @@ actions:
         expensive_sat={{ expensive_4_saturday }},
         in_overnight={{ in_cheap_overnight }}, in_daytime={{ in_cheap_daytime }},
         in_pre_evening={{ in_cheap_pre_evening }},
-        mins_to_18={{ minutes_until_18 }},
+        mins_to_ready={{ minutes_until_ready }},
         reheat_remaining={{ reheat_minutes_remaining }},
         force_deadline={{ must_heat_now_for_deadline }},
         sat_heating={{ saturday_heating_hour }},
