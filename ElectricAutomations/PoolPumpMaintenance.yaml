@@ -1,0 +1,79 @@
+id: pool_pump_daily_maintenance
+alias: Pool Pump — Daily Maintenance
+description: >-
+  Ensures at least 3 h/day pool circulation during cheap electricity.
+
+  Resets the daily ON counter at midnight. Whenever today's ON time is below
+  the maintenance target and no user plan is active, arms **maintenance** mode
+  so `PoolPump.yaml` accumulates cheap ON time until the target is met.
+
+  User plans (cheap windows, extended, 1 h) take priority; maintenance resumes
+  after they complete if the daily target is still unmet.
+variables:
+  pool_mode_entity: select.pool_pump_pool_pump_plan
+  pool_mins_entity: number.pool_pump_minutes_remaining
+  pool_daily_on_entity: number.pool_pump_daily_on_minutes
+  pool_maintenance_target_entity: number.pool_pump_maintenance_daily_target
+  pool_cheap_cutoff_entity: number.pool_pump_cheap_cutoff_hour
+triggers:
+  - trigger: time
+    at: "00:05:00"
+    id: midnight_reset
+  - trigger: time_pattern
+    minutes: "/15"
+    id: quarter
+  - trigger: homeassistant
+    event: start
+    id: start
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: midnight_reset
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: "{{ pool_daily_on_entity }}"
+            data:
+              value: 0
+          - action: logbook.log
+            data:
+              name: Pool Pump
+              message: Daily ON-time counter reset — maintenance target for new day.
+    default: []
+  - variables:
+      mode: "{{ states(pool_mode_entity) }}"
+      daily_on: "{{ states(pool_daily_on_entity) | int(0) }}"
+      maintenance_target: "{{ states(pool_maintenance_target_entity) | int(180) }}"
+      maintenance_needed: "{{ daily_on < maintenance_target }}"
+      user_plan_active: "{{ mode in ['cheap', 'extended', 'one_hour'] }}"
+      arm_maintenance: >-
+        {{ maintenance_needed and not user_plan_active
+           and (mode == 'off' or mode == 'maintenance') }}
+      maintenance_budget: "{{ [maintenance_target - daily_on, 0] | max }}"
+  - if:
+      - condition: template
+        value_template: "{{ arm_maintenance and maintenance_budget > 0 }}"
+    then:
+      - action: number.set_value
+        target:
+          entity_id: "{{ pool_cheap_cutoff_entity }}"
+        data:
+          value: 0
+      - action: number.set_value
+        target:
+          entity_id: "{{ pool_mins_entity }}"
+        data:
+          value: "{{ maintenance_budget }}"
+      - action: select.select_option
+        target:
+          entity_id: "{{ pool_mode_entity }}"
+        data:
+          option: "maintenance"
+      - action: automation.trigger
+        target:
+          entity_id: automation.pool_pump_price_scheduler
+        data:
+          skip_condition: true
+mode: single

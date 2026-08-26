@@ -136,15 +136,16 @@ Sam is primarily a heating optimiser; cooling is deliberately conservative so th
 |---|---|
 | Living **< 25 °C**, or it's **< 22 °C** outside | No active cooling — the heating branch idles it in `fan_only` |
 | Living **≥ 25 °C** and **≥ 22 °C** outside, but not 27/27 | **Fan only** — circulate air, no compressor |
-| Living **≥ 27 °C** *and* outside **≥ 27 °C** | **Compressor `cool`** (setpoint ≈ internal − 1 °C) |
+| Living **≥ 27 °C** *and* outside **≥ 27 °C** | **Compressor `cool`** (setpoint ≈ internal − 1 °C — gentle) |
 | **Scorcher override**: outside **> 30 °C** *and* **either** room (living *or* bedroom) **> 27 °C** *and* **power cheap** | **Compressor `cool`** outright — no trend / cheaper-later guessing. Falls back to **fan only** when power is expensive |
+| **Superchill** (`input_button.sam_superchill_2h`) | **Blast cool for 2 h**: `powerful` preset, setpoint ≈ unit min (16 °C), circulation fan on. Ignores price/outdoor gates. Cancel with `input_button.sam_superchill_stop` |
 | **Power cheap now** + hot day (`forecast_today_max` ≥ 27 °C) + not about to cool outside + room > 23 °C | **Pre-cool** — run the compressor early down to ~23 °C, before the expensive afternoon peak |
 | Forecast to get **cooler outside** (next-4h avg ≥ 1 °C below the baseline) | Pre-cool suppressed; Sam coasts on the fan. Baseline is capped at `forecast_today_max` so a **sun-baked outdoor sensor can't fake a cooling trend** |
 | **Sam is cooling** (compressor *or* fan-only) | **Circulation fan ON** — the Tuya plug `switch.smart_plug_5_socket_1` is switched on to spread the cool air; switched off when cooling stops in warm weather |
 
 **"Power cheap now"** (for pre-cool) = `input_boolean.cheap_leccy` on (price ≤ 50 % of the daily average — catches a cheap morning even when it's cheaper still later) **or** the current price rank is below the 4-hour-ahead rank. Suppressed on the fixed-price feed.
 
-Constants in `sam.yaml`: `cool_compressor_in`/`cool_compressor_out` (27/27), `cool_fan_target` (25), `cool_outdoor_gate` (22), `cool_precool_day_max` (27), `cool_precool_floor` (23), `cool_trend_margin` (1.0), `cool_hot_outdoor` (30), `cool_hot_room` (27). Inputs: `input_boolean.cheap_leccy` / `input_number.electricity_price_rank` vs `…_4h` (cheap-now), `sensor.forecast_today_max` (hot day **and** the cooling-trend baseline cap), `input_number.forecast_outside_4h` (cooling trend), living + bedroom temperature sensors (scorcher override).
+Constants in `sam.yaml`: `cool_compressor_in`/`cool_compressor_out` (27/27), `cool_fan_target` (25), `cool_outdoor_gate` (22), `cool_precool_day_max` (27), `cool_precool_floor` (23), `cool_trend_margin` (1.0), `cool_hot_outdoor` (30), `cool_hot_room` (27), `cool_blast_offset` (−10 for Superchill). Inputs: `input_boolean.cheap_leccy` / `input_number.electricity_price_rank` vs `…_4h` (cheap-now), `sensor.forecast_today_max` (hot day **and** the cooling-trend baseline cap), `input_number.forecast_outside_4h` (cooling trend), living + bedroom temperature sensors (scorcher override), `input_datetime.sam_superchill_until` (manual blast).
 
 The circulation fan is a Tuya smart plug fed by the `climate.circulation_fan` generic_thermostat. Sam drives the underlying `switch.smart_plug_5_socket_1` directly (the thermostat stays `off`) — verified ~45 W, so it is a fan, not a heater. It is only managed while it's warm out (`outdoor ≥ cool_outdoor_gate`); in winter it's left alone.
 
@@ -152,7 +153,7 @@ Outside the scorcher override the compressor needs **27 °C outside** and pre-co
 
 ### Jun 2026 — cooling was running far too eagerly (and the fix)
 
-The old rule cooled whenever `living > 26 °C` **or** (`outdoor ≥ 25 °C` **and** `living > 20 °C`). With the fan idling the room at ~20 °C while it was 25 °C outside, the second clause was permanently true, so Sam sat in **compressor `cool`** (made worse by a stray `powerful` preset) actively chilling a 20 °C living room. Rewritten so the compressor only runs at a genuine **27 °C inside *and* 27 °C outside**, fan-only below that, plus the cheap-power pre-cool and "don't cool if it's cooling outside anyway" smarts above. Regression tests: `tests/test_sam_hvac_templates.py` (9 cooling scenarios). If a stray `powerful`/`quiet` preset is ever left on `climate.sam`, clear it to `none` — `sam.yaml` does not manage comfort presets (only `heat_8_15` for holiday frost).
+The old rule cooled whenever `living > 26 °C` **or** (`outdoor ≥ 25 °C` **and** `living > 20 °C`). With the fan idling the room at ~20 °C while it was 25 °C outside, the second clause was permanently true, so Sam sat in **compressor `cool`** (made worse by a stray `powerful` preset) actively chilling a 20 °C living room. Rewritten so the compressor only runs at a genuine **27 °C inside *and* 27 °C outside**, fan-only below that, plus the cheap-power pre-cool and "don't cool if it's cooling outside anyway" smarts above. Regression tests: `tests/test_sam_hvac_templates.py`. `sam.yaml` manages `heat_8_15` (holiday frost) and `powerful` (Superchill only); clear a stray `quiet` preset to `none` if one is left on.
 
 ### Jun 2026 (hot-day update) — pre-cool fires on a cheap morning + circulation fan
 
@@ -189,6 +190,36 @@ New constants `cool_hot_outdoor` (30) and `cool_hot_room` (27). The cooling stat
 line now also reports `hot_cheap`, the trend `base` and the bedroom temperature.
 Regression: `tests/test_sam_hvac_templates.py` (`scorcher_bedroom_hot_live`,
 `scorcher_but_expensive_fan`, `sunbaked_sensor_still_precools`).
+
+### Jul 2026 — Superchill (blast cool)
+
+Normal cooling only asks for **internal − 1 °C**, so on a 30 °C day the compressor
+barely works. **Superchill** is a manual 2-hour blast:
+
+1. Press **`input_button.sam_superchill_2h`** (Sam & Energy dashboard, or any
+   button card / voice).
+2. `SamSuperchill.yaml` turns on **`input_boolean.sam_superchill_active`**, sets
+   `input_datetime.sam_superchill_until = now + 2h` (**full date + time**), and
+   re-triggers `sam.yaml`.
+3. While the boolean is on, Sam runs **`cool` + `powerful`**, setpoint
+   **internal − 10 °C** (clamped to the unit min, usually **16 °C**), and turns the
+   circulation fan on.
+4. Press **`input_button.sam_superchill_stop`** (or wait for the 5-minute / HA-start
+   expiry check against the full datetime) to clear the flag and return to normal
+   logic / clear `powerful`.
+
+**False-trigger guard (Jul 2026):** a bare `input_button` state trigger also fires
+when HA restarts or automations reload (entity restores from `unavailable`). Start
+and stop now require the button timestamp to be within the last **30 seconds**, and
+ignore transitions from `unknown`/`unavailable`. Expiry compares
+`as_timestamp(now())` vs `as_timestamp(sam_superchill_until)` (date+time, not
+clock-of-day).
+
+Holiday frost still wins. Explicit Superchill **overrides** the super-expensive
+shed (you asked for it). Helpers: `input_button.sam_superchill_2h`,
+`input_button.sam_superchill_stop`, `input_boolean.sam_superchill_active`,
+`input_datetime.sam_superchill_until`.
+Regression: `superchill_blast_expensive`, `superchill_even_if_cool_out`.
 
 ## Overheat guard (living room cap)
 
@@ -298,9 +329,17 @@ live HA list-only `min`/`max` filter semantics).
 - `input_number.sam_control_temperature`
 - `input_boolean.holiday_mode`
 - `input_boolean.super_expensive_active` (super-expensive guard — Sam off above the price threshold)
+- `input_boolean.sam_superchill_active` (manual blast-cool flag)
+- `input_datetime.sam_superchill_until` (UI countdown for Superchill)
 - `sensor.t_h_sensor_temperature` (living room)
 - `sensor.bedroomlights_bedroomlights_temperature` (bedroom)
 - `climate.circulation_fan` (on/off state, read) and `switch.smart_plug_5_socket_1` (the fan's Tuya plug — driven on/off during cooling)
+
+### SamSuperchill.yaml
+- `input_button.sam_superchill_2h` / `input_button.sam_superchill_stop`
+- `input_boolean.sam_superchill_active` (source of truth for sam.yaml)
+- `input_datetime.sam_superchill_until` (countdown / expiry)
+- `automation.sync_sam_hvac_with_desired_temperature` (re-triggered on arm/cancel/expiry)
 - `input_boolean.cheap_leccy` and `input_number.electricity_price_rank` / `…_4h` (smart cooling: cheap-now pre-cool)
 - `input_boolean.on_fixed_price_feed` (suppresses price-driven pre-cool)
 - `sensor.forecast_today_max` (smart cooling: hot-day pre-cool)

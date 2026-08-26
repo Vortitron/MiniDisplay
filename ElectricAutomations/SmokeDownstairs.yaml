@@ -1,0 +1,27 @@
+alias: Smoke downstairs
+description: >-
+  Alert on MQ2 alarm from the ManifoldTemperature node. Mobile push is handled by
+  Persistent Notification Relay to Pixel 8.
+id: smoke_downstairs
+mode: single
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.manifoldtemperature_mq2_smoke_gas_alarm
+    to: "on"
+    for:
+      seconds: 3
+actions:
+  - action: light.turn_on
+    target:
+      device_id: 7f51da87046c6d813105b14229bee921
+    data:
+      brightness_pct: 100
+      rgb_color: [255, 0, 0]
+  - action: notify.persistent_notification
+    data:
+      message: "Smoke* Downstairs (*or other bad air)- Alarm: 3"
+      data:
+        Alarm: 3
+        notification_id: smoke_downstairs
+  - delay:
+      minutes: 5

@@ -1,0 +1,24 @@
+alias: Persistent Notification Relay to Pixel 8
+description: >-
+  Mirror every new Home Assistant persistent notification to Andy's Pixel 8 so
+  automations only need notify.persistent_notification (ESP devices, MiniDisplay,
+  etc.) without also listing mobile_app targets in each automation.
+id: persistent_notification_relay_pixel8
+mode: parallel
+max: 20
+triggers:
+  - trigger: persistent_notification
+    update_type: added
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.notification.message | default('', true) | trim != ''
+         or trigger.notification.title | default('', true) | trim != '' }}
+actions:
+  - action: notify.mobile_app_pixel_8
+    data:
+      title: "{{ trigger.notification.title | default('Home Assistant', true) }}"
+      message: "{{ trigger.notification.message | default('', true) }}"
+      data:
+        tag: "{{ trigger.notification.notification_id | default('ha_persistent', true) }}"
+        channel: persistent_notification

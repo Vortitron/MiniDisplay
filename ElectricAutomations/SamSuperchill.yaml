@@ -1,0 +1,115 @@
+alias: Sam Superchill (2h)
+description: >-
+  Press input_button.sam_superchill_2h to blast-cool climate.sam for 2 hours.
+  Sets input_boolean.sam_superchill_active (sam.yaml's source of truth) and
+  input_datetime.sam_superchill_until (full date+time countdown). sam.yaml then
+  runs cool + powerful at a hard-low setpoint.
+
+  Press input_button.sam_superchill_stop to cancel early. A time pattern also
+  clears the flag when the until datetime has passed.
+
+  IMPORTANT: start only arms when the button was pressed in the last 30 seconds.
+  A bare state trigger on input_button also fires on HA restart / automation
+  reload (entity restores from unavailable), which previously re-armed
+  Superchill by accident.
+triggers:
+  - trigger: state
+    entity_id: input_button.sam_superchill_2h
+    id: start
+    not_from:
+      - unavailable
+      - unknown
+  - trigger: state
+    entity_id: input_button.sam_superchill_stop
+    id: stop
+    not_from:
+      - unavailable
+      - unknown
+  - trigger: time_pattern
+    minutes: "/5"
+    id: expire
+  - trigger: homeassistant
+    event: start
+    id: expire
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: start
+          # Full date+time: button state is an ISO timestamp. Require a fresh
+          # press so restore/reload cannot re-arm Superchill.
+          - condition: template
+            value_template: >-
+              {{ (as_timestamp(now()) - as_timestamp(trigger.to_state.state, 0))
+                 | abs < 30 }}
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.sam_superchill_until
+            data:
+              datetime: "{{ (now() + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.sam_superchill_active
+          - action: logbook.log
+            data:
+              name: Sam HVAC
+              message: >-
+                Superchill armed for 2 hours
+                (until {{ (now() + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M') }}).
+          - action: automation.trigger
+            target:
+              entity_id: automation.sync_sam_hvac_with_desired_temperature
+            data:
+              skip_condition: true
+      - conditions:
+          - condition: trigger
+            id: stop
+          - condition: template
+            value_template: >-
+              {{ (as_timestamp(now()) - as_timestamp(trigger.to_state.state, 0))
+                 | abs < 30 }}
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.sam_superchill_active
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.sam_superchill_until
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: logbook.log
+            data:
+              name: Sam HVAC
+              message: Superchill cancelled.
+          - action: automation.trigger
+            target:
+              entity_id: automation.sync_sam_hvac_with_desired_temperature
+            data:
+              skip_condition: true
+      - conditions:
+          - condition: trigger
+            id: expire
+          - condition: state
+            entity_id: input_boolean.sam_superchill_active
+            state: "on"
+          - condition: template
+            # Compare full timestamps (date + time), not clock-of-day.
+            value_template: >-
+              {{ as_timestamp(now(), 0) | float(0)
+                 >= as_timestamp(states('input_datetime.sam_superchill_until'), 0) | float(0) }}
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.sam_superchill_active
+          - action: logbook.log
+            data:
+              name: Sam HVAC
+              message: Superchill window expired — back to normal cooling.
+          - action: automation.trigger
+            target:
+              entity_id: automation.sync_sam_hvac_with_desired_temperature
+            data:
+              skip_condition: true
+mode: single

@@ -195,25 +195,68 @@ actions:
       - condition: template
         value_template: "{{ should_heat }}"
     then:
+      # Fail fast when the plug entity is gone (Tuya / Tuya Local not loaded).
+      # The post-on "still off" check never matched unavailable/unknown, so a
+      # missing device used to look like a silent no-op.
+      - if:
+          - condition: template
+            value_template: >-
+              {{ states('switch.smart_plug_2_socket_1')
+                 in ['unavailable', 'unknown', 'none', ''] }}
+        then:
+          - action: notify.persistent_notification
+            data:
+              message: >-
+                Hot Water plug missing/unavailable
+                ({{ states('switch.smart_plug_2_socket_1') }}) — Alarm: 2
+              data:
+                notification_id: hot_water_unavailable
+          - action: logbook.log
+            data:
+              name: Hot Water
+              message: >-
+                should_heat but switch.smart_plug_2_socket_1 is
+                {{ states('switch.smart_plug_2_socket_1') }} — skipping turn_on.
+          - stop: "Hot water plug entity missing — cannot heat"
       - action: switch.turn_on
         target:
           entity_id: switch.smart_plug_2_socket_1
       - delay:
           minutes: 1
-      - if:
-          - condition: state
-            entity_id: switch.smart_plug_2_socket_1
-            state: "off"
-            for:
-              seconds: 10
-        then:
-          - action: notify.persistent_notification
-            data:
-              message: "Hot Water Not Reacting — Alarm: 2"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: >-
+                  {{ states('switch.smart_plug_2_socket_1')
+                     in ['unavailable', 'unknown', 'none', ''] }}
+            sequence:
+              - action: notify.persistent_notification
+                data:
+                  message: >-
+                    Hot Water plug missing/unavailable
+                    ({{ states('switch.smart_plug_2_socket_1') }}) — Alarm: 2
+                  data:
+                    notification_id: hot_water_unavailable
+          - conditions:
+              - condition: state
+                entity_id: switch.smart_plug_2_socket_1
+                state: "off"
+            sequence:
+              - action: notify.persistent_notification
+                data:
+                  message: "Hot Water Not Reacting — Alarm: 2"
+                  data:
+                    notification_id: hot_water_not_reacting
     else:
-      - action: switch.turn_off
-        target:
-          entity_id: switch.smart_plug_2_socket_1
+      - if:
+          - condition: template
+            value_template: >-
+              {{ states('switch.smart_plug_2_socket_1')
+                 not in ['unavailable', 'unknown', 'none', ''] }}
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id: switch.smart_plug_2_socket_1
   - action: logbook.log
     data:
       name: Hot Water

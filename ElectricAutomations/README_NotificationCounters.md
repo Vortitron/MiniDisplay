@@ -28,16 +28,19 @@ same `notification_id` means the single notification just updates its count
 rather than stacking. (`notify.persistent_notification` is configured to fan out
 to all devices; only `message`/`title`/`notification_id` are used.)
 
+`PersistentNotificationRelay.yaml` mirrors each new persistent notification to
+`notify.mobile_app_pixel_8` so automations do not need separate mobile targets.
+
 ## The three notifications
 
 | Notification | `notification_id` | Counter | Defined in |
 | --- | --- | --- | --- |
 | Hot water used / tank depleted | `hot_water` | `counter.hot_water_used` | `HotWaterTemperature.yaml` (repo) |
-| Movement downstairs (check for the cat) | `movement_downstairs` | `counter.movement_downstairs` | **HA UI** automation *Movement Downstairs* (`id 1762513683407`) |
+| Movement downstairs (check for the cat) | `movement_downstairs` | `counter.movement_downstairs` | `MovementDownstairs.yaml` — moving_energy >25, no hold time, burst-corroborated (3 edges within 20 s, no amplitude shortcut); 18:00–10:00; 30 min cooldown |
 | Refill loft wet | `loft_wet_refill` | `counter.loft_wet_refill` | **HA UI** automation *Loft Wet On* (`id 1776061413956`) |
 
-Two of these live as Home-Assistant UI automations (not YAML packages in this
-repo); they were edited in place via the config API.
+*Movement Downstairs* is versioned in `MovementDownstairs.yaml` and deployed via
+the HA config API. *Loft Wet On* remains a HA UI automation.
 
 ## Daily reset
 

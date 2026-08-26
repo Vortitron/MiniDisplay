@@ -1,0 +1,41 @@
+alias: Hot Water plug unavailable
+description: >-
+  Alert when switch.smart_plug_2_socket_1 is unavailable/unknown for 10 minutes,
+  or is still missing on a 15-minute poll. Covers the case where the Tuya (or
+  later Tuya Local) integration fails to load so the entity disappears entirely:
+  HotWater.yaml's old "not reacting" check only matched an explicit off state
+  and stayed silent when the device no longer existed.
+id: hot_water_plug_unavailable
+mode: single
+triggers:
+  - trigger: state
+    entity_id: switch.smart_plug_2_socket_1
+    to:
+      - unavailable
+      - unknown
+    for:
+      minutes: 10
+    id: sustained
+  - trigger: time_pattern
+    minutes: "/15"
+    id: poll
+conditions:
+  - condition: template
+    value_template: >-
+      {{ states('switch.smart_plug_2_socket_1')
+         in ['unavailable', 'unknown', 'none', ''] }}
+actions:
+  - action: notify.persistent_notification
+    data:
+      message: >-
+        Hot Water plug missing/unavailable
+        ({{ states('switch.smart_plug_2_socket_1') }}) — Alarm: 2
+      data:
+        notification_id: hot_water_unavailable
+  - action: logbook.log
+    data:
+      name: Hot Water
+      message: >-
+        Plug entity switch.smart_plug_2_socket_1 is
+        {{ states('switch.smart_plug_2_socket_1') }}
+        (trigger={{ trigger.id }}) — integration may not have loaded.

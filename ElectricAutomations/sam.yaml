@@ -59,6 +59,11 @@ description: >-
     (switch.smart_plug_5_socket_1) is run whenever Sam is cooling (compressor OR
     fan_only) to spread the cool air, and switched off when cooling stops in warm
     weather. Untouched when it's cold out (outdoor < cool_outdoor_gate).
+  - Superchill (manual): press input_button.sam_superchill_2h to blast-cool for
+    2 hours regardless of price/outdoor gates. Uses the powerful preset and a
+    hard-low cool setpoint (unit min, normally 16°C). Cancel with
+    input_button.sam_superchill_stop. Holiday mode still wins; Superchill beats
+    the super-expensive shed.
 
   ## Holiday mode
 
@@ -90,6 +95,10 @@ variables:
   cool_hot_room: 27
   heat_offset: 1
   cool_offset: -1
+  # Superchill: how far below Sam's internal sensor to request (clamped to min).
+  # Normal cooling only nudges internal-1 so the compressor barely works; blast
+  # mode asks for the unit floor so it actually runs hard.
+  cool_blast_offset: -10
   base_stop_heat_offset: -2
   max_stop_heat_offset: -5
   temp_tolerance: 0.5
@@ -104,6 +113,7 @@ variables:
   # SuperExpensive.yaml via input_boolean.super_expensive_active). At/below it Sam
   # may be actively heating, so leave it running. If the living temperature is
   # unknown, Sam is also left running (never shed blind).
+  # Explicit Superchill overrides this shed (user asked to blast-cool).
   super_expensive_off_above: 19
 triggers:
   - trigger: state
@@ -121,6 +131,7 @@ triggers:
       - input_boolean.holiday_mode
       - input_boolean.super_expensive_active
       - input_boolean.on_fixed_price_feed
+      - input_boolean.sam_superchill_active
   - trigger: state
     entity_id:
       - input_text.sam_hvac_reason
@@ -131,6 +142,10 @@ actions:
   - variables:
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
       super_expensive: "{{ is_state('input_boolean.super_expensive_active', 'on') }}"
+      # Manual blast-cool flag (armed by SamSuperchill.yaml). Boolean — not a
+      # datetime compare — so alphabetically-reordered cool_* variables can
+      # safely use is_state(...) inline without depending on this key's order.
+      superchill_active: "{{ is_state('input_boolean.sam_superchill_active', 'on') }}"
       sam_preset: "{{ state_attr('climate.sam', 'preset_mode') | default('none', true) }}"
       living_room_temp_state: "{{ states('sensor.t_h_sensor_temperature') }}"
       bedroom_temp_state: "{{ states('sensor.bedroomlights_bedroomlights_temperature') }}"
@@ -301,23 +316,27 @@ actions:
            and not outdoor_cooling_trend
            and remote_cool > cool_precool_floor
            and outdoor >= cool_outdoor_gate }}
-      # Enter the cooling branch when the room is too warm in summer, when
-      # pre-cooling, or on the scorcher override.
-      cool_active: "{{ (cool_season and room_too_warm) or precool_now or hot_cheap_cool }}"
-      # Run the compressor when very hot (27/27), pre-cooling, or on the scorcher
-      # override (>30 out + >27 in either room + cheap). Otherwise just circulate
-      # air with the fan (no energy-hungry cooling).
-      cool_use_compressor: "{{ very_hot or precool_now or hot_cheap_cool }}"
+      # Enter the cooling branch when Superchill is armed, the room is too warm
+      # in summer, when pre-cooling, or on the scorcher override.
+      # Superchill uses is_state inline (see superchill_active note above).
+      cool_active: "{{ is_state('input_boolean.sam_superchill_active', 'on') or (cool_season and room_too_warm) or precool_now or hot_cheap_cool }}"
+      # Run the compressor when Superchill is armed, very hot (27/27),
+      # pre-cooling, or on the scorcher override (>30 out + >27 in either room +
+      # cheap). Otherwise just circulate air with the fan (no energy-hungry cooling).
+      cool_use_compressor: "{{ is_state('input_boolean.sam_superchill_active', 'on') or very_hot or precool_now or hot_cheap_cool }}"
       cool_mode: "{{ 'cool' if cool_use_compressor else 'fan_only' }}"
       cool_setpoint: >-
-        {% if cool_use_compressor %}
+        {% if is_state('input_boolean.sam_superchill_active', 'on') %}
+          {% set unclamped = internal + cool_blast_offset %}
+        {% elif cool_use_compressor %}
           {% set unclamped = internal + cool_offset %}
         {% else %}
           {% set unclamped = internal %}
         {% endif %}
         {{ [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max }}
       cool_action_label: >-
-        {% if cool_use_compressor and precool_now and not very_hot and not hot_cheap_cool %}Pre-cool (cheap)
+        {% if is_state('input_boolean.sam_superchill_active', 'on') %}Superchill
+        {% elif cool_use_compressor and precool_now and not very_hot and not hot_cheap_cool %}Pre-cool (cheap)
         {% elif cool_use_compressor %}Cooling
         {% else %}Fan only{% endif %}
 
@@ -429,7 +448,9 @@ actions:
   - if:
       - condition: template
         value_template: >-
-          {{ super_expensive and living_room_temp_ok and living_room_temp > super_expensive_off_above }}
+          {{ super_expensive
+             and not is_state('input_boolean.sam_superchill_active', 'on')
+             and living_room_temp_ok and living_room_temp > super_expensive_off_above }}
     then:
       - action: climate.set_hvac_mode
         target:
@@ -460,6 +481,26 @@ actions:
           - condition: template
             value_template: "{{ cool_active }}"
         sequence:
+          # Superchill needs the unit's powerful preset; clear it when that window
+          # ends (holiday heat_8_15 is handled separately above).
+          - if:
+              - condition: template
+                value_template: "{{ is_state('input_boolean.sam_superchill_active', 'on') and sam_preset != 'powerful' }}"
+            then:
+              - action: climate.set_preset_mode
+                target:
+                  entity_id: climate.sam
+                data:
+                  preset_mode: powerful
+          - if:
+              - condition: template
+                value_template: "{{ is_state('input_boolean.sam_superchill_active', 'off') and sam_preset == 'powerful' }}"
+            then:
+              - action: climate.set_preset_mode
+                target:
+                  entity_id: climate.sam
+                data:
+                  preset_mode: none
           - action: climate.set_hvac_mode
             target:
               entity_id: climate.sam
@@ -469,13 +510,13 @@ actions:
             target:
               entity_id: climate.sam
             data:
-              temperature: "{{ cool_setpoint }}"
+              temperature: "{{ cool_setpoint | float }}"
               hvac_mode: "{{ cool_mode }}"
           - action: logbook.log
             data:
               name: Sam HVAC
               message: >-
-                Cooling: {{ cool_action_label | trim }} (mode={{ cool_mode }}),
+                Cooling: {{ cool_action_label | trim }} (mode={{ cool_mode }}, setpoint={{ cool_setpoint | round(1) }}°C, preset={{ sam_preset }}),
                 living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C,
                 very_hot={{ very_hot }}, precool={{ precool_now }}, hot_cheap={{ hot_cheap_cool }}, cooling_trend={{ outdoor_cooling_trend }} (base {{ cool_trend_baseline | round(1) }}°C),
                 cheap_now={{ cheap_now }}, bedroom={{ bedroom_temp | round(1) }}°C, fc_day_max={{ forecast_day_max | round(1) }}°C, fc_out_4h={{ forecast_out_4h | round(1) }}°C
@@ -483,13 +524,13 @@ actions:
             target:
               entity_id: input_text.sam_hvac_headline
             data:
-              value: "Too warm inside · {{ cool_action_label | trim }}"
+              value: "{{ 'Superchill · Cooling' if is_state('input_boolean.sam_superchill_active', 'on') else ('Too warm inside · ' ~ (cool_action_label | trim)) }}"
           - action: input_text.set_value
             target:
               entity_id: input_text.sam_hvac_status
             data:
               value: >-
-                {% set s %}Cool: {{ cool_action_label | trim }} (mode={{ cool_mode }}), living={{ living_room_temp | round(1) }}°C, bed={{ bedroom_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, very_hot={{ very_hot }}, hot_cheap={{ hot_cheap_cool }}, precool={{ precool_now }}, trend_cooler={{ outdoor_cooling_trend }}, rank={{ price_rank }}/{{ price_rank_4h }}, fc_max={{ forecast_day_max | round(0) }}°C{% endset -%}
+                {% set s %}Cool: {{ cool_action_label | trim }} (mode={{ cool_mode }}, set={{ cool_setpoint | round(1) }}°C), living={{ living_room_temp | round(1) }}°C, bed={{ bedroom_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, very_hot={{ very_hot }}, hot_cheap={{ hot_cheap_cool }}, precool={{ precool_now }}, trend_cooler={{ outdoor_cooling_trend }}, rank={{ price_rank }}/{{ price_rank_4h }}, fc_max={{ forecast_day_max | round(0) }}°C{% endset -%}
                 {{ s | truncate(255, True, '', 0) }}
           # Spread the cool air: run the circulation fan whenever Sam is cooling.
           - if:
@@ -507,6 +548,16 @@ actions:
           - condition: template
             value_template: "{{ not cool_active }}"
         sequence:
+          # Leaving cooling: drop a leftover powerful preset from Superchill.
+          - if:
+              - condition: template
+                value_template: "{{ sam_preset == 'powerful' }}"
+            then:
+              - action: climate.set_preset_mode
+                target:
+                  entity_id: climate.sam
+                data:
+                  preset_mode: none
           - action: climate.set_hvac_mode
             target:
               entity_id: climate.sam

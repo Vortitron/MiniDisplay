@@ -8,7 +8,14 @@ substitutions:
   # Set `ld2410_ha_watchdog_enabled: "true"` and `ld2410_ha_watchdog_entity_id` to your LD2410 entity
   # (e.g. the "Allrum Motion Motion" entity_id).
   ld2410_ha_watchdog_enabled: "true"
-  ld2410_ha_watchdog_entity_id: "binary_sensor.hlk_ld2410_5f83_motion"
+  ld2410_ha_watchdog_entity_id: "binary_sensor.allrum_motion_motion"
+
+  # MQ2 spike alarm: track a slow baseline so dusty rooms (~35-40%) stay quiet
+  # unless the level jumps sharply (smoke/gas) or hits an absolute ceiling.
+  mq2_spike_rise_pct: "15.0"
+  mq2_spike_clear_pct: "8.0"
+  mq2_absolute_alarm_pct: "70.0"
+  mq2_absolute_clear_pct: "60.0"
 
   # Optional: Home Assistant config entry_id for the LD2410 BLE integration.
   # If set (non-empty), ESPHome will auto-call `homeassistant.reload_config_entry`
@@ -94,6 +101,11 @@ globals:
     restore_value: no
     initial_value: '0'
 
+  - id: mq2_baseline
+    type: float
+    restore_value: yes
+    initial_value: '35.0'
+
 esp32_ble_tracker:
   scan_parameters:
     continuous: false
@@ -163,26 +175,47 @@ binary_sensor:
       uint32_t elapsed = millis() - last_seen;
       return elapsed < 180000;  // Connected if seen in last 3 minutes
 
-  # MQ2 Gas Sensor - Software Alarm (based on analog percentage)
-  # Uses hysteresis to prevent oscillation: triggers at 25%, clears at 20%
+  # MQ2 Gas Sensor - spike alarm above a slow-moving baseline (dust-tolerant)
   - platform: template
     id: mq2_digital
     name: "MQ2 Smoke/Gas Alarm"
     device_class: smoke
     lambda: |-
       static bool alarm_state = false;
-      if (id(mq2_analog).state != NAN) {
-        if (id(mq2_analog).state >= 25.0) {
-          alarm_state = true;   // Trigger at 25%
-        } else if (id(mq2_analog).state <= 20.0) {
-          alarm_state = false;  // Clear at 20%
-        }
-        // Between 20-25% it maintains previous state (hysteresis)
+      if (!id(mq2_analog).has_state() || isnan(id(mq2_analog).state)) {
+        return alarm_state;
       }
+
+      const float SPIKE_RISE = ${mq2_spike_rise_pct};
+      const float SPIKE_CLEAR = ${mq2_spike_clear_pct};
+      const float ABS_ALARM = ${mq2_absolute_alarm_pct};
+      const float ABS_CLEAR = ${mq2_absolute_clear_pct};
+      const float BASELINE_RISE_ALPHA = 0.002f;
+      const float BASELINE_FALL_ALPHA = 0.01f;
+      const float BASELINE_CHASE_BAND = 5.0f;
+
+      float current = id(mq2_analog).state;
+      float baseline = id(mq2_baseline);
+
+      if (current <= baseline) {
+        baseline = baseline * (1.0f - BASELINE_FALL_ALPHA) + current * BASELINE_FALL_ALPHA;
+      } else if ((current - baseline) < BASELINE_CHASE_BAND) {
+        baseline = baseline * (1.0f - BASELINE_RISE_ALPHA) + current * BASELINE_RISE_ALPHA;
+      }
+
+      id(mq2_baseline) = baseline;
+      float spike = current - baseline;
+
+      if (current >= ABS_ALARM || spike >= SPIKE_RISE) {
+        alarm_state = true;
+      } else if (current <= ABS_CLEAR && spike <= SPIKE_CLEAR) {
+        alarm_state = false;
+      }
+
       return alarm_state;
     filters:
-      - delayed_on: 2s  # Must be high for 2s to trigger (prevents spikes)
-      - delayed_off: 10s  # Stays on for 10s after clearing (latching)
+      - delayed_on: 2s
+      - delayed_off: 10s
 
 script:
   - id: ld2410_recover
@@ -267,6 +300,31 @@ sensor:
           window_size: 15
           send_every: 5
   
+  - platform: template
+    name: "MQ2 Baseline"
+    id: mq2_baseline_sensor
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 5s
+    lambda: |-
+      return id(mq2_baseline);
+
+  - platform: template
+    name: "MQ2 Spike Margin"
+    id: mq2_spike_margin
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 5s
+    lambda: |-
+      if (!id(mq2_analog).has_state() || isnan(id(mq2_analog).state)) {
+        return NAN;
+      }
+      float margin = id(mq2_analog).state - id(mq2_baseline);
+      if (margin < 0.0f) {
+        margin = 0.0f;
+      }
+      return roundf(margin * 10.0f) / 10.0f;
+
   # MQ2 Gas Sensor - Percentage (template sensor to avoid device_class conflict)
   - platform: template
     name: "MQ2 Gas/Smoke Level"

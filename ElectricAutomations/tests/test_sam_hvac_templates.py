@@ -46,6 +46,7 @@ CONSTANTS = {
 	"cool_hot_room": 27,
 	"heat_offset": 1,
 	"cool_offset": -1,
+	"cool_blast_offset": -10,
 	"base_stop_heat_offset": -2,
 	"max_stop_heat_offset": -5,
 	"temp_tolerance": 0.5,
@@ -151,11 +152,21 @@ COOL_VARS = {
 		"and remote_cool > cool_precool_floor "
 		"and outdoor >= cool_outdoor_gate }}"
 	),
-	"cool_active": "{{ (cool_season and room_too_warm) or precool_now or hot_cheap_cool }}",
-	"cool_use_compressor": "{{ very_hot or precool_now or hot_cheap_cool }}",
+	# Production sam.yaml inlines is_state('input_boolean.sam_superchill_active')
+	# in these templates (HA alphabetises automation variables). Tests inject the
+	# equivalent boolean as superchill_active.
+	"cool_active": (
+		"{{ superchill_active or (cool_season and room_too_warm) "
+		"or precool_now or hot_cheap_cool }}"
+	),
+	"cool_use_compressor": (
+		"{{ superchill_active or very_hot or precool_now or hot_cheap_cool }}"
+	),
 	"cool_mode": "{{ 'cool' if cool_use_compressor else 'fan_only' }}",
 	"cool_setpoint": (
-		"{% if cool_use_compressor %}"
+		"{% if superchill_active %}"
+		"  {% set unclamped = internal + cool_blast_offset %}"
+		"{% elif cool_use_compressor %}"
 		"  {% set unclamped = internal + cool_offset %}"
 		"{% else %}"
 		"  {% set unclamped = internal %}"
@@ -163,7 +174,8 @@ COOL_VARS = {
 		"{{ [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max }}"
 	),
 	"cool_action_label": (
-		"{% if cool_use_compressor and precool_now and not very_hot and not hot_cheap_cool %}Pre-cool (cheap)"
+		"{% if superchill_active %}Superchill"
+		"{% elif cool_use_compressor and precool_now and not very_hot and not hot_cheap_cool %}Pre-cool (cheap)"
 		"{% elif cool_use_compressor %}Cooling"
 		"{% else %}Fan only{% endif %}"
 	),
@@ -213,6 +225,7 @@ def build_context(scenario: dict) -> dict:
 			"cheap_now": bool(scenario.get("cheap_now", False)),
 			"forecast_day_max": float(scenario.get("forecast_day_max", 0)),
 			"forecast_out_4h": float(scenario.get("forecast_out_4h", outdoor)),
+			"superchill_active": bool(scenario.get("superchill_active", False)),
 		}
 	)
 	return ctx
@@ -291,6 +304,15 @@ COOL_SCENARIOS = [
 	# max keeps the trend False, so cheap pre-cool still runs.
 	("sunbaked_sensor_still_precools", dict(living=25, bedroom=25, outdoor=38, internal=26, cheap_now=True, forecast_day_max=33, forecast_out_4h=32.5),
 		True, "cool", 25.0, "Pre-cool (cheap)"),
+	# Superchill: manual blast — compressor + hard-low setpoint (internal-10
+	# clamped to sam_min_temp=16), even when power is expensive and rooms are
+	# only mildly warm. This is the "30°C outside, blast the house" button.
+	("superchill_blast_expensive", dict(living=26, bedroom=26, outdoor=30, internal=27, cheap_now=False, forecast_day_max=32, forecast_out_4h=30, superchill_active=True),
+		True, "cool", 17.0, "Superchill"),
+	# Superchill wins over a cool outdoor gate that would otherwise block cooling.
+	# internal-10 clamps to sam_min_temp (16).
+	("superchill_even_if_cool_out", dict(living=24, bedroom=24, outdoor=18, internal=24, cheap_now=False, forecast_day_max=20, forecast_out_4h=18, superchill_active=True),
+		True, "cool", 16.0, "Superchill"),
 ]
 
 
@@ -334,11 +356,13 @@ def _check_cool_scenario(entry):
 	assert abs(new_set - exp_set) < 1e-9, f"{name}: cool_setpoint {new_set} != expected {exp_set}"
 	assert new_label == exp_label, f"{name}: cool_action_label {new_label!r} != expected {exp_label!r}"
 
-	# Compressor must never run unless very hot (27/27), pre-cooling, or the
-	# scorcher override (hot_cheap_cool).
+	# Compressor must never run unless Superchill, very hot (27/27), pre-cooling,
+	# or the scorcher override (hot_cheap_cool).
 	if new_mode == "cool":
-		assert nv["very_hot"] or nv["precool_now"] or nv["hot_cheap_cool"], \
-			f"{name}: compressor engaged without very_hot, precool or hot_cheap_cool"
+		assert (
+			nv["superchill_active"] or nv["very_hot"]
+			or nv["precool_now"] or nv["hot_cheap_cool"]
+		), f"{name}: compressor engaged without superchill/very_hot/precool/hot_cheap_cool"
 
 	# Setpoint must always honour the clamps.
 	assert CONSTANTS["sam_min_temp"] <= new_set <= min(CONSTANTS["sam_max_temp"], CONSTANTS["sam_setpoint_cap"]), \

@@ -73,7 +73,29 @@ The previous version used `context.user_id is not none` to detect manual clicks,
 
 #### Reliability check
 
-After turning the plug on, the automation waits 1 minute then checks if it actually switched on. If it's still off, a persistent notification is raised ("Hot Water Not Reacting — Alarm: 2").
+After turning the plug on, the automation waits 1 minute then checks the plug state:
+
+| Plug state after 1 minute | Alert |
+|---|---|
+| still `off` | **"Hot Water Not Reacting — Alarm: 2"** (`notification_id: hot_water_not_reacting`) |
+| `unavailable` / `unknown` / empty | **"Hot Water plug missing/unavailable — Alarm: 2"** (`notification_id: hot_water_unavailable`) |
+
+If the entity is already missing when a heat window starts, it skips `switch.turn_on` and raises the missing-plug alert immediately (no 1-minute wait). Scheduled `turn_off` is also skipped while the entity is absent, to avoid log noise.
+
+### `HotWaterUnavailable.yaml` — missing-device watchdog
+
+Separate from the schedule. Alerts when `switch.smart_plug_2_socket_1` stays `unavailable`/`unknown` for **10 minutes**, and also polls every **15 minutes** in case the entity never appears at all after a failed Tuya / Tuya Local load. There is no HA-start trigger, so a slow integration load after reboot does not false-alarm.
+
+This closes the gap where the old reliability check only matched an explicit `off` state: if the integration never loaded the device, there was no "not reacting" alert even though heating could not run.
+
+Persistent notifications are relayed to the phone by `PersistentNotificationRelay.yaml`.
+
+Deploy (all hot-water automations, or one file):
+
+```bash
+python3 ElectricAutomations/deploy_hot_water.py
+python3 ElectricAutomations/deploy_hot_water.py HotWaterUnavailable.yaml
+```
 
 ### `HotWaterTemperature.yaml` — use & depletion detection
 
@@ -146,7 +168,7 @@ If you'll be away for more than 2 weeks, consider a manual boost before returnin
 
 ## Dependencies
 
-- `switch.smart_plug_2_socket_1` (boiler smart plug)
+- `switch.smart_plug_2_socket_1` (boiler smart plug — Tuya today; same entity id expected under Tuya Local)
 - `sensor.manifoldtemperature_hot_water_boiler_temp`
 - `sensor.nordpool_kwh_se4_sek_3_10_025` (hourly price data via `raw_today`)
 - `input_boolean.hot_water_notified`
@@ -154,6 +176,16 @@ If you'll be away for more than 2 weeks, consider a manual boost before returnin
 - `input_button.hot_water_boost_2h`
 - `input_number.hot_water_reheat_minutes_remaining`
 - `input_datetime.hot_water_manual_override_until`
+
+## Automations (HA ids)
+
+| File | HA id | Purpose |
+|---|---|---|
+| `HotWater.yaml` | `1764750330659` | Price schedule + reliability / missing-plug check |
+| `HotWaterTemperature.yaml` | `1762527503683` | Draw / depletion detection |
+| `HotWaterReheatTracker.yaml` | `1777915315860` | Clear reheat flag after 2 h heat |
+| `HotWaterBoost.yaml` | `1777983905344` | 2 h manual boost button |
+| `HotWaterUnavailable.yaml` | `hot_water_plug_unavailable` | Missing-device watchdog |
 
 ## Expected daily pattern (example)
 

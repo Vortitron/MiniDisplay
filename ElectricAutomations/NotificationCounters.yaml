@@ -4,7 +4,7 @@ description: >-
   persistent notifications show a fresh per-day count:
 
     - counter.hot_water_used       -> "Hot water used ×N"      (HotWaterTemperature.yaml)
-    - counter.movement_downstairs  -> "Movement downstairs ×N" (HA: Movement Downstairs)
+    - counter.movement_downstairs  -> "Movement downstairs ×N" (MovementDownstairs.yaml)
     - counter.loft_wet_refill      -> "Refill loft wet ×N"     (HA: Loft Wet On)
 
   Each of those notifications carries a notification_id so it REPLACES in place

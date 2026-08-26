@@ -45,6 +45,7 @@ across domains (climate → off, lights/switches → off):
 | --- | --- |
 | `switch.t34_smart_plug_switch_1` | Loft Wet humidifier |
 | `switch.smart_plug_5_socket_1` | circulation fan (Tuya plug; `sam.yaml` drives it directly during cooling, so we shed the switch, not the `climate.circulation_fan` thermostat) |
+| `switch.smart_plug_4_socket_1` | pool pump + heater (`PoolPump.yaml`) |
 | `climate.bio_office_heat` | Bio office heater (often unplugged) |
 | `light.led_flood_light` | LED flood light |
 | `light.bio_floodlight` | Bio flood light |

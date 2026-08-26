@@ -30,3 +30,11 @@ Home Assistant coverage near the downstairs allrum area.
 
 This provides visibility into LD2410 connectivity issues and adds lightweight auto-recovery to avoid manual HA reloads in common failure cases.
 
+## MQ2 spike alarm
+
+The MQ2 binary alarm uses adaptive baseline spike detection (not a fixed 25%
+threshold) so dusty rooms (~35–40%) stay quiet until a sharp rise. See
+`ElectricAutomations/README_Downstairs.md` for thresholds and flash instructions.
+
+- **LD2410 HA watchdog entity:** `binary_sensor.allrum_motion_motion`
+

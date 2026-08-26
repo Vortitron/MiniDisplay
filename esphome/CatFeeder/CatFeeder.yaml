@@ -1,0 +1,116 @@
+# Cat feeder RFID door — ESP32-32E dual MOS board + RDM6300 + electromagnetic lock
+#
+# See README.md for wiring, flyback diode, and GPIO verification.
+
+substitutions:
+  device_name: catfeeder
+  friendly_name: CatFeeder
+  # Learn your cat's tag ID from the "Last RFID Tag" sensor / logs, then set here.
+  cat1_uid: "0"
+  # Onboard MOS outputs (verify on your board — see README).
+  lock_gpio: GPIO25
+  rfid_rx_gpio: GPIO16
+  unlock_pulse_ms: "600ms"
+  unlock_cooldown: "3000"
+
+esphome:
+  name: catfeeder
+  friendly_name: CatFeeder
+  min_version: 2025.9.0
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  baud_rate: 0  # Free UART0; logs over Wi-Fi API only
+
+api:
+  encryption:
+    key: !secret catfeeder_encryptionkey
+ota:
+  - platform: esphome
+    password: !secret catfeeder__ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: NONE
+
+# RDM6300 TX -> ESP32 RX (rfid_rx_gpio). 9600 8N1.
+uart:
+  id: rfid_uart
+  rx_pin: ${rfid_rx_gpio}
+  baud_rate: 9600
+  rx_buffer_size: 256
+
+globals:
+  - id: last_unlock_ms
+    type: unsigned long
+    initial_value: "0"
+
+script:
+  - id: unlock_door
+    mode: restart
+    then:
+      - switch.turn_on: feeder_lock
+      - delay: ${unlock_pulse_ms}
+      - switch.turn_off: feeder_lock
+
+rdm6300:
+  uart_id: rfid_uart
+  on_tag:
+    then:
+      - lambda: |-
+          ESP_LOGI("catfeeder", "RFID tag %u", x);
+      - text_sensor.template.publish:
+          id: last_tag_id
+          state: !lambda 'return to_string(x);'
+      - homeassistant.tag_scanned: !lambda 'return to_string(x);'
+      - if:
+          condition:
+            lambda: |-
+              const uint32_t authorised = strtoul("${cat1_uid}", nullptr, 10);
+              return authorised != 0 && x == authorised;
+          then:
+            - if:
+                condition:
+                  lambda: |-
+                    return (millis() - id(last_unlock_ms)) >= ${unlock_cooldown};
+                then:
+                  - lambda: 'id(last_unlock_ms) = millis();'
+                  - script.execute: unlock_door
+
+# Electromagnetic lock — pulse only; never leave energised.
+switch:
+  - platform: gpio
+    name: "Cat Feeder Lock"
+    id: feeder_lock
+    pin: ${lock_gpio}
+    restore_mode: ALWAYS_OFF
+    internal: false
+
+text_sensor:
+  - platform: template
+    name: "Last RFID Tag"
+    id: last_tag_id
+    icon: mdi:cat
+
+binary_sensor:
+  - platform: rdm6300
+    uid: ${cat1_uid}
+    name: "Authorised Cat Present"
+    id: cat1_present
+    filters:
+      - delayed_off: 2s
+
+# Manual test switch — same short pulse as an authorised scan.
+button:
+  - platform: template
+    name: "Unlock Feeder Door"
+    icon: mdi:door-open
+    on_press:
+      then:
+        - script.execute: unlock_door

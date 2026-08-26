@@ -1,9 +1,9 @@
-# Sam & Energy dashboard (Lovelace, "sections" view).
+# Sam & Energy dashboard (Lovelace, multi-tab "sections" views).
 #
 # Deployed to Home Assistant as a storage-mode dashboard at /sam-energy via the
-# WebSocket API (see the chat that created it). This file is the version-control
-# copy / source of truth. To re-deploy after editing, run the deploy step again
-# or paste it into Settings -> Dashboards -> (new) -> raw config editor.
+# WebSocket API. This file is the version-control copy. Re-deploy:
+#   python3 ElectricAutomations/deploy_sam_energy_dashboard.py
+# (needs HA_URL + HA_TOKEN in the environment), or paste into Settings → Dashboards.
 #
 # Uses only built-in cards (thermostat, entities, glance, gauge, history-graph,
 # markdown, heading) so it needs no HACS/custom cards.
@@ -44,6 +44,22 @@ views:
                 name: Manual lock until
               - entity: input_boolean.holiday_mode
                 name: Holiday mode
+          - type: entities
+            title: Superchill (blast cool)
+            show_header_toggle: false
+            entities:
+              - entity: input_button.sam_superchill_2h
+                name: Superchill 2 hours
+                icon: mdi:snowflake-alert
+              - entity: input_button.sam_superchill_stop
+                name: Stop Superchill
+                icon: mdi:snowflake-off
+              - entity: input_boolean.sam_superchill_active
+                name: Superchill active
+                icon: mdi:snowflake-variant
+              - entity: input_datetime.sam_superchill_until
+                name: Superchill until
+                icon: mdi:timer-snow
           - type: entities
             title: TVs (comfort signal)
             show_header_toggle: false
@@ -272,3 +288,55 @@ views:
               {{ states('input_text.house_thermal_status') }}
 
               _{{ states('input_text.sam_preheat_calc') }}_
+  - title: Back Garden
+    path: back-garden
+    icon: mdi:pool
+    type: sections
+    max_columns: 2
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Pool pump
+            icon: mdi:pool
+          - type: markdown
+            content: >
+              **{{ states('text.pool_pump_pool_pump_status') }}**
+
+              _15 000 L pool · 5000 L/h pump · **3 h/day** maintenance (auto) · cheap windows up to **6 h** until 16:00_
+          - type: entities
+            show_header_toggle: false
+            entities:
+              - entity: switch.smart_plug_4_socket_1
+                name: Pump + heater
+                icon: mdi:pool-pump
+              - entity: select.pool_pump_pool_pump_plan
+                name: Plan
+              - entity: number.pool_pump_minutes_remaining
+                name: Budget remaining
+              - entity: number.pool_pump_daily_on_minutes
+                name: ON time today
+              - entity: number.pool_pump_maintenance_daily_target
+                name: Daily maintenance target
+              - entity: datetime.pool_pump_pool_pump_plan_until
+                name: Timed until
+          - type: entities
+            title: Controls
+            show_header_toggle: false
+            entities:
+              - entity: button.pool_cheap_windows
+                name: Cheap windows (6 h, until 16:00)
+              - entity: button.pool_extended_run
+                name: Extended run (6 h)
+              - entity: button.pool_pump_run_1_hour
+                name: Run 1 hour
+              - entity: button.pool_stop
+                name: Stop
+          - type: history-graph
+            title: Pump (24 h)
+            hours_to_show: 24
+            entities:
+              - entity: switch.smart_plug_4_socket_1
+                name: Pump
+              - entity: number.pool_pump_daily_on_minutes
+                name: Daily ON min

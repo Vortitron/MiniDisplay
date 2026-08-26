@@ -1,0 +1,81 @@
+alias: Movement Downstairs
+description: >-
+  Alert when the cat is shut in the Allrum. The room is out of use, so there is
+  no human movement between 18:00 and 10:00 (workpeople have gone home) — any
+  real moving target in that window is the cat, and she is trapped until someone
+  goes down.
+
+  Detection is by burst shape, not amplitude. Measured 2026-08-08/09 (pre a
+  device reboot): the LD2410 reported moving_energy as sub-second spikes off a
+  ~13 floor, with noise topping out at 48 and the cat producing dense repeated
+  edges over tens of seconds.
+
+  Fixed 2026-08-11: after a `button.allrum_motion_reboot_device` press on
+  2026-08-10, the sensor's whole noise character changed — floor dropped to 0,
+  reporting became event-only (silent for hours, not continuous), and isolated
+  single-frame noise spikes started reaching the sensor's max value of 100. The
+  first burst rule had two holes this exposed: a "peak >=50 skips corroboration"
+  shortcut let one lone ~100 ms spike through untested, and "3 crossings within
+  90 s each" let two isolated blips 8.9 s apart through by chance (90 s per-step
+  budget stacks to a much longer effective window). Both produced false "check
+  for the cat" alerts overnight 2026-08-10/11 with the room confirmed empty.
+  Fixed by removing the instant-skip and bounding all 3 crossings to within 20 s
+  of the *first* one, not 90 s of the *previous* one.
+
+  Known residual gap: two isolated blips within 20 s of each other still pass
+  (this is what happened at 00:44 that night — 8.9 s apart). If that pattern of
+  false alert recurs, tighten further (shorter window and/or require more than
+  3 edges) — see README_Downstairs.md.
+id: movement_downstairs
+mode: single
+triggers:
+  # No `for:` — the spikes are sub-second, so any hold time makes this unfireable.
+  - trigger: numeric_state
+    entity_id: sensor.allrum_motion_moving_energy
+    above: 25
+conditions:
+  # Unoccupied window, spans midnight. Extended to 10:00 on 2026-08-09 after the
+  # cat was found shut in at ~09:00 with the old window closing at 08:00.
+  - condition: or
+    conditions:
+      - condition: time
+        after: "18:00:00"
+      - condition: time
+        before: "10:00:00"
+actions:
+  # Corroboration — always required, no amplitude shortcut (removed 2026-08-11;
+  # a lone ~100ms spike hit 64 and fired straight through the old >=50 skip).
+  # All 3 crossings must land within 20s of the *first* one (bounded from
+  # window_start, not "up to 90s after the previous edge" as before — that
+  # let two isolated blips 8.9s apart slip through as if they were a burst).
+  - variables:
+      window_start: "{{ now() }}"
+  - wait_for_trigger:
+      - trigger: numeric_state
+        entity_id: sensor.allrum_motion_moving_energy
+        above: 25
+    timeout: "{{ [20 - (now() - window_start).total_seconds(), 0] | max }}"
+    continue_on_timeout: false
+  - wait_for_trigger:
+      - trigger: numeric_state
+        entity_id: sensor.allrum_motion_moving_energy
+        above: 25
+    timeout: "{{ [20 - (now() - window_start).total_seconds(), 0] | max }}"
+    continue_on_timeout: false
+  - action: notify.persistent_notification
+    continue_on_error: true
+    data:
+      message: >-
+        Movement downstairs ×{{ (states('counter.movement_downstairs') | int(0)) + 1 }}
+        — check for the cat! (energy {{ trigger.to_state.state }})
+      data:
+        notification_id: movement_downstairs
+  - action: counter.increment
+    continue_on_error: true
+    target:
+      entity_id: counter.movement_downstairs
+  # 30 min cooldown. This is also what produces the "keep nagging" behaviour:
+  # while she is still moving a fresh burst re-fires the automation every 30 min,
+  # and once the room goes quiet there is no trigger, so it stops on its own.
+  - delay:
+      minutes: 30

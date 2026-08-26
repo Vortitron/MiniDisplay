@@ -47,6 +47,10 @@ This ESPHome config moves **all detection logic and rolling averages** to the ES
 - No template sensors with complex math
 - No statistics integration entities
 - Just light control based on person presence/position
+- **Light Smoother** (`Front Path - Light Smoother`) only runs when targets
+  meaningfully change, then fades until converged — it does **not** poll every
+  second (that used to flood the activity log). Brightness deadband ≈2%, RGB ≈8;
+  warm-white colour while walking is quantised to ~8-step buckets.
 
 ## Installation
 

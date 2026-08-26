@@ -1,0 +1,51 @@
+id: pool_pump_manual_on
+alias: Pool Pump — Manual Switch-On (1 h)
+description: >-
+  If the pool pump switch is turned on while no plan is active (dashboard,
+  physical plug button, voice, etc.), arm a 1-hour continuous run — same as
+  `button.pool_pump_run_1_hour`.
+
+  Automations in `PoolPump.yaml` turn the switch on with a plan already set, so
+  this only fires for genuine manual turn-ons.
+variables:
+  pool_mode_entity: select.pool_pump_pool_pump_plan
+  pool_plan_until_entity: datetime.pool_pump_pool_pump_plan_until
+  pool_cheap_cutoff_entity: number.pool_pump_cheap_cutoff_hour
+  one_hour_minutes: 60
+triggers:
+  - trigger: state
+    entity_id: switch.smart_plug_4_socket_1
+    to: "on"
+conditions:
+  - condition: template
+    value_template: "{{ states(pool_mode_entity) == 'off' }}"
+actions:
+  - variables:
+      until: "{{ (now() + timedelta(minutes=one_hour_minutes)).strftime('%Y-%m-%dT%H:%M:%S') }}"
+  - action: datetime.set_value
+    target:
+      entity_id: "{{ pool_plan_until_entity }}"
+    data:
+      datetime: "{{ until }}"
+  - action: number.set_value
+    target:
+      entity_id: "{{ pool_cheap_cutoff_entity }}"
+    data:
+      value: 0
+  - action: select.select_option
+    target:
+      entity_id: "{{ pool_mode_entity }}"
+    data:
+      option: "one_hour"
+  - action: logbook.log
+    data:
+      name: Pool Pump
+      message: >-
+        Manual turn-on detected — 1 h run until
+        {{ (now() + timedelta(minutes=one_hour_minutes)).strftime('%H:%M') }}.
+  - action: automation.trigger
+    target:
+      entity_id: automation.pool_pump_price_scheduler
+    data:
+      skip_condition: true
+mode: single

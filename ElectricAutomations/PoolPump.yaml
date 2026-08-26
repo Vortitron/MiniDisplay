@@ -1,0 +1,205 @@
+id: pool_pump_price_scheduler
+alias: Pool Pump — Price Scheduler
+description: >-
+  Price-aware pool pump control for `switch.smart_plug_4_socket_1` (5000 L/h pump
+  + heater on a 15 000 L pool).
+
+  Plans (`PoolPumpButtons.yaml`, `PoolPumpMaintenance.yaml`):
+    - **maintenance** — auto daily: at least 3 h ON during cheap slots.
+    - **cheap** — user cheap windows: up to 6 h ON during cheap slots, cancel at 16:00.
+    - **extended** — continuous until `datetime.pool_pump_plan_until` (default +6 h).
+    - **one_hour** — continuous for 1 h (button or manual switch-on).
+
+  MQTT helpers — see `deploy_pool_pump.py`.
+
+  Super-expensive always forces off. `SuperExpensive.yaml` also sheds this switch.
+variables:
+  pool_switch: switch.smart_plug_4_socket_1
+  tick_minutes: 15
+  pool_mode_entity: select.pool_pump_pool_pump_plan
+  pool_mins_entity: number.pool_pump_minutes_remaining
+  pool_cheap_rank_entity: number.pool_pump_pool_cheap_rank_max
+  pool_plan_until_entity: datetime.pool_pump_pool_pump_plan_until
+  pool_status_entity: text.pool_pump_pool_pump_status
+  pool_daily_on_entity: number.pool_pump_daily_on_minutes
+  pool_cheap_cutoff_entity: number.pool_pump_cheap_cutoff_hour
+  pool_maintenance_target_entity: number.pool_pump_maintenance_daily_target
+triggers:
+  - trigger: time_pattern
+    minutes: "/15"
+  - trigger: state
+    entity_id:
+      - select.pool_pump_pool_pump_plan
+      - number.pool_pump_minutes_remaining
+      - datetime.pool_pump_pool_pump_plan_until
+      - number.pool_pump_daily_on_minutes
+      - input_boolean.cheap_leccy
+      - input_boolean.super_expensive_active
+      - input_boolean.on_fixed_price_feed
+      - input_number.electricity_price_rank
+  - trigger: homeassistant
+    event: start
+conditions: []
+actions:
+  - variables:
+      mode: "{{ states(pool_mode_entity) }}"
+      mode_cheap: "{{ mode == 'cheap' }}"
+      mode_maintenance: "{{ mode == 'maintenance' }}"
+      mode_extended: "{{ mode == 'extended' }}"
+      mode_one_hour: "{{ mode == 'one_hour' }}"
+      mode_off: "{{ mode not in ['cheap', 'maintenance', 'extended', 'one_hour'] }}"
+      minutes_remaining: "{{ states(pool_mins_entity) | int(0) }}"
+      daily_on: "{{ states(pool_daily_on_entity) | int(0) }}"
+      maintenance_target: "{{ states(pool_maintenance_target_entity) | int(180) }}"
+      cheap_cutoff_hour: "{{ states(pool_cheap_cutoff_entity) | int(0) }}"
+      price_rank: "{{ states('input_number.electricity_price_rank') | int(12) }}"
+      cheap_rank_max: "{{ states(pool_cheap_rank_entity) | int(5) }}"
+      on_fixed_price: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
+      super_expensive: "{{ is_state('input_boolean.super_expensive_active', 'on') }}"
+      electricity_cheap_now: >-
+        {% if on_fixed_price %}
+          {{ now().hour >= 7 and now().hour < 22 }}
+        {% else %}
+          {{ is_state('input_boolean.cheap_leccy', 'on') or price_rank <= cheap_rank_max }}
+        {% endif %}
+      plan_until_raw: "{{ states(pool_plan_until_entity) }}"
+      plan_until_ok: >-
+        {{ plan_until_raw not in ['unknown', 'unavailable', 'none', '']
+           and not plan_until_raw.startswith('1970') }}
+      plan_until_ts: >-
+        {{ (plan_until_raw | as_datetime | as_local).timestamp()
+           if plan_until_ok else 0 }}
+      timed_window_active: >-
+        {{ (mode_extended or mode_one_hour) and plan_until_ok
+           and now().timestamp() < plan_until_ts }}
+      cheap_budget_active: >-
+        {{ (mode_cheap and minutes_remaining > 0)
+           or (mode_maintenance and minutes_remaining > 0
+               and daily_on < maintenance_target) }}
+      should_run_cheap: >-
+        {{ cheap_budget_active and electricity_cheap_now and not super_expensive }}
+      should_run_timed: "{{ timed_window_active and not super_expensive }}"
+      should_run: "{{ should_run_cheap or should_run_timed }}"
+      new_minutes_remaining: >-
+        {% if should_run_cheap %}
+          {{ [minutes_remaining - tick_minutes, 0] | max }}
+        {% else %}
+          {{ minutes_remaining }}
+        {% endif %}
+      new_daily_on: >-
+        {% if should_run %}
+          {{ [daily_on + tick_minutes, 999] | min }}
+        {% else %}
+          {{ daily_on }}
+        {% endif %}
+      cheap_cutoff_reached: >-
+        {{ mode_cheap and cheap_cutoff_hour > 0 and now().hour >= cheap_cutoff_hour }}
+      cheap_budget_done: "{{ mode_cheap and minutes_remaining <= 0 }}"
+      maintenance_daily_done: "{{ mode_maintenance and daily_on >= maintenance_target }}"
+      timed_session_done: >-
+        {{ (mode_extended or mode_one_hour) and plan_until_ok
+           and now().timestamp() >= plan_until_ts }}
+      session_done: >-
+        {{ cheap_budget_done or maintenance_daily_done or timed_session_done
+           or cheap_cutoff_reached }}
+      status_line: >-
+        {% if mode_off %}
+          Idle
+        {% elif super_expensive %}
+          Paused (super-expensive) — {{ mode }}, {{ minutes_remaining }} min left
+        {% elif should_run %}
+          Running ({{ mode }}) — {{ new_minutes_remaining }} min budget left
+          {% if timed_window_active %}until {{ (plan_until_raw | as_datetime | as_local).strftime('%H:%M') }}{% endif %}
+          · today {{ new_daily_on }}/{{ maintenance_target }} min
+        {% elif mode_maintenance and minutes_remaining > 0 %}
+          Maintenance waiting for cheap — {{ minutes_remaining }} min budget · today {{ daily_on }}/{{ maintenance_target }} min
+        {% elif mode_cheap and minutes_remaining > 0 %}
+          Waiting for cheap power — {{ minutes_remaining }} min left (cutoff {{ '%02d' | format(cheap_cutoff_hour) }}:00)
+        {% elif timed_window_active %}
+          Paused (expensive) — until {{ (plan_until_raw | as_datetime | as_local).strftime('%H:%M') }}
+        {% else %}
+          Plan complete / idle
+        {% endif %}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ should_run }}"
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: "{{ pool_switch }}"
+      - conditions:
+          - condition: template
+            value_template: "{{ not should_run }}"
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: "{{ pool_switch }}"
+
+  - if:
+      - condition: template
+        value_template: "{{ should_run_cheap and new_minutes_remaining != minutes_remaining }}"
+    then:
+      - action: number.set_value
+        target:
+          entity_id: "{{ pool_mins_entity }}"
+        data:
+          value: "{{ new_minutes_remaining }}"
+
+  - if:
+      - condition: template
+        value_template: "{{ should_run and new_daily_on != daily_on }}"
+    then:
+      - action: number.set_value
+        target:
+          entity_id: "{{ pool_daily_on_entity }}"
+        data:
+          value: "{{ new_daily_on }}"
+
+  - if:
+      - condition: template
+        value_template: "{{ session_done }}"
+    then:
+      - action: switch.turn_off
+        target:
+          entity_id: "{{ pool_switch }}"
+      - action: select.select_option
+        target:
+          entity_id: "{{ pool_mode_entity }}"
+        data:
+          option: "off"
+      - action: number.set_value
+        target:
+          entity_id: "{{ pool_mins_entity }}"
+        data:
+          value: 0
+      - action: number.set_value
+        target:
+          entity_id: "{{ pool_cheap_cutoff_entity }}"
+        data:
+          value: 0
+      - action: logbook.log
+        data:
+          name: Pool Pump
+          message: >-
+            Plan complete ({{ mode }}) — pump off.
+            {% if cheap_cutoff_reached %}Cheap-windows 16:00 cutoff.{% endif %}
+            Today {{ daily_on }}/{{ maintenance_target }} min ON.
+
+  - action: text.set_value
+    target:
+      entity_id: "{{ pool_status_entity }}"
+    data:
+      value: >-
+        {% set s %}{{ status_line | trim }} | cheap_now={{ electricity_cheap_now }}, rank={{ price_rank }}/{{ cheap_rank_max }}, super_exp={{ super_expensive }}, fixed={{ on_fixed_price }}, daily={{ daily_on }}/{{ maintenance_target }}{% endset -%}
+        {{ s | truncate(255, True, '', 0) }}
+
+  - action: logbook.log
+    data:
+      name: Pool Pump
+      message: >-
+        mode={{ mode }}, should_run={{ should_run }}, cheap_now={{ electricity_cheap_now }},
+        rank={{ price_rank }}, super_exp={{ super_expensive }}, mins_left={{ minutes_remaining }},
+        daily_on={{ daily_on }}/{{ maintenance_target }}, done={{ session_done }}
+mode: single

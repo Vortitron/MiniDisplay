@@ -1,0 +1,24 @@
+alias: Downstairs motion unavailable
+description: >-
+  Alert when the Allrum LD2410 motion entity goes unavailable for 10 minutes and
+  press the HA reload button to recover the integration.
+id: downstairs_motion_unavailable
+mode: single
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.allrum_motion_motion
+    to: unavailable
+    for:
+      minutes: 10
+actions:
+  - action: notify.persistent_notification
+    data:
+      message: Downstairs motion unavailable
+      data:
+        notification_id: downstairs_motion_unavailable
+  - action: button.press
+    target:
+      entity_id: button.allrum_motion_reboot_device
+  - action: button.press
+    target:
+      entity_id: button.downstairs_allrum_downstairs_allrum_restart

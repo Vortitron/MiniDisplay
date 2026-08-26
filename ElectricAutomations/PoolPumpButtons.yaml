@@ -1,0 +1,154 @@
+id: pool_pump_arm_plan
+alias: Pool Pump — Arm Plan
+description: >-
+  Arms the pool pump (`switch.smart_plug_4_socket_1`) from dashboard buttons.
+  The main scheduler is `PoolPump.yaml`.
+
+  **Cheap windows** (`button.pool_cheap_windows`):
+    Accumulate up to 6 h ON time during cheap slots; cancels at 16:00 if not done.
+
+  **Extended run** (`button.pool_extended_run`):
+    Run continuously for 6 h (configurable), pausing only during super-expensive.
+
+  **1 hour** (`button.pool_pump_run_1_hour`):
+    Run continuously for 1 h regardless of price (except super-expensive).
+
+  **Stop** (`button.pool_stop`):
+    Cancel any plan and switch the pump off.
+variables:
+  pool_mode_entity: select.pool_pump_pool_pump_plan
+  pool_mins_entity: number.pool_pump_minutes_remaining
+  pool_plan_until_entity: datetime.pool_pump_pool_pump_plan_until
+  pool_cheap_cutoff_entity: number.pool_pump_cheap_cutoff_hour
+  cheap_windows_max: 360
+  cheap_cutoff_hour: 16
+  one_hour_minutes: 60
+triggers:
+  - trigger: state
+    entity_id: button.pool_cheap_windows
+    id: cheap
+  - trigger: state
+    entity_id: button.pool_extended_run
+    id: extended
+  - trigger: state
+    entity_id: button.pool_pump_run_1_hour
+    id: one_hour
+  - trigger: state
+    entity_id: button.pool_stop
+    id: stop
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: cheap
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: "{{ pool_cheap_cutoff_entity }}"
+            data:
+              value: "{{ cheap_cutoff_hour }}"
+          - action: number.set_value
+            target:
+              entity_id: "{{ pool_mins_entity }}"
+            data:
+              value: "{{ cheap_windows_max }}"
+          - action: select.select_option
+            target:
+              entity_id: "{{ pool_mode_entity }}"
+            data:
+              option: "cheap"
+          - action: logbook.log
+            data:
+              name: Pool Pump
+              message: >-
+                Cheap-windows armed — up to {{ cheap_windows_max }} min ON time
+                during cheap slots; cancels at {{ '%02d' | format(cheap_cutoff_hour) }}:00.
+      - conditions:
+          - condition: trigger
+            id: extended
+        sequence:
+          - variables:
+              hours: "{{ states('number.pool_pump_pool_pump_extended_hours') | int(6) }}"
+              until: "{{ (now() + timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S') }}"
+          - action: datetime.set_value
+            target:
+              entity_id: "{{ pool_plan_until_entity }}"
+            data:
+              datetime: "{{ until }}"
+          - action: number.set_value
+            target:
+              entity_id: "{{ pool_cheap_cutoff_entity }}"
+            data:
+              value: 0
+          - action: select.select_option
+            target:
+              entity_id: "{{ pool_mode_entity }}"
+            data:
+              option: "extended"
+          - action: logbook.log
+            data:
+              name: Pool Pump
+              message: >-
+                Extended run armed — {{ hours }} h (until
+                {{ (now() + timedelta(hours=hours)).strftime('%H:%M') }}),
+                pausing only during super-expensive.
+      - conditions:
+          - condition: trigger
+            id: one_hour
+        sequence:
+          - variables:
+              until: "{{ (now() + timedelta(minutes=one_hour_minutes)).strftime('%Y-%m-%dT%H:%M:%S') }}"
+          - action: datetime.set_value
+            target:
+              entity_id: "{{ pool_plan_until_entity }}"
+            data:
+              datetime: "{{ until }}"
+          - action: number.set_value
+            target:
+              entity_id: "{{ pool_cheap_cutoff_entity }}"
+            data:
+              value: 0
+          - action: select.select_option
+            target:
+              entity_id: "{{ pool_mode_entity }}"
+            data:
+              option: "one_hour"
+          - action: logbook.log
+            data:
+              name: Pool Pump
+              message: >-
+                1-hour run armed — until
+                {{ (now() + timedelta(minutes=one_hour_minutes)).strftime('%H:%M') }}.
+      - conditions:
+          - condition: trigger
+            id: stop
+        sequence:
+          - action: select.select_option
+            target:
+              entity_id: "{{ pool_mode_entity }}"
+            data:
+              option: "off"
+          - action: number.set_value
+            target:
+              entity_id: "{{ pool_mins_entity }}"
+            data:
+              value: 0
+          - action: number.set_value
+            target:
+              entity_id: "{{ pool_cheap_cutoff_entity }}"
+            data:
+              value: 0
+          - action: switch.turn_off
+            target:
+              entity_id: switch.smart_plug_4_socket_1
+          - action: logbook.log
+            data:
+              name: Pool Pump
+              message: Pool plan cancelled — pump off.
+  - action: automation.trigger
+    target:
+      entity_id: automation.pool_pump_price_scheduler
+    data:
+      skip_condition: true
+mode: single

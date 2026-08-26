@@ -1,0 +1,28 @@
+alias: Smoke Downstairs Allrum
+description: >-
+  Alert on MQ2 spike alarm from the Downstairs Allrum ESPHome node. The binary
+  sensor uses adaptive baseline spike detection (not a fixed 25% threshold) so
+  dusty building-work rooms stay quiet until a real jump.
+id: smoke_downstairs_allrum
+mode: single
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.downstairs_allrum_mq2_smoke_gas_alarm
+    to: "on"
+    for:
+      seconds: 3
+actions:
+  - action: light.turn_on
+    target:
+      device_id: 7f51da87046c6d813105b14229bee921
+    data:
+      brightness_pct: 100
+      rgb_color: [255, 0, 0]
+  - action: notify.persistent_notification
+    data:
+      message: "Smoke* Downstairs Allrum (*or other bad air) - Alarm: 3"
+      data:
+        Alarm: 3
+        notification_id: smoke_downstairs_allrum
+  - delay:
+      minutes: 5

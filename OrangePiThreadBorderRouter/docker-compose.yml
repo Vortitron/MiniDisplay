@@ -1,0 +1,61 @@
+services:
+  otbr:
+    container_name: otbr
+    image: ghcr.io/ownbee/hass-otbr-docker:arm64-v0.3.0
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    # IPv6 forwarding is a *host* sysctl (see 99-openthread-border-router.conf).
+    # Docker ignores sysctls: when network_mode is host, so do not try to set
+    # net.ipv6.conf.all.forwarding here — it will not apply.
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    environment:
+      DEVICE: "/dev/ttyUSB0"
+      BACKBONE_IF: end0
+      FLOW_CONTROL: 0
+      FIREWALL: 1
+      NAT64: 1
+      BAUDRATE: 460800
+      OTBR_REST_PORT: 8081
+      OTBR_WEB_PORT: 7586
+      OTBR_WEB_INTERFACE: "0.0.0.0"
+      AUTOFLASH_FIRMWARE: 0
+      OTBR_LOG_LEVEL: info
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - /root/otbr/otbr_data:/data/thread
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: "1m"
+
+  matter-server:
+    # Leftover from the abandoned on-Pi Matter Server path (SETUP_LOG section 11-12).
+    # HA uses the Supervisor Matter Server add-on instead. Leaving this running
+    # advertised a second Matter fabric and shared UDP/5353 with otbr mdnsd.
+    profiles: ["unused"]
+    container_name: matter-server
+    image: ghcr.io/home-assistant-libs/python-matter-server:stable
+    restart: "no"
+    privileged: true
+    network_mode: host
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - /root/otbr/matter_data:/data
+      - /run/dbus:/run/dbus:ro
+    command: >
+      --storage-path /data
+      --paa-root-cert-dir /data/credentials
+      --bluetooth-adapter 0
+      --primary-interface end0
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: "1m"

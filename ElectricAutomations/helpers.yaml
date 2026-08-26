@@ -1,6 +1,6 @@
 # Home Assistant helper entities for the Sam HVAC, Hot Water, and Thermal Model automations.
 #
-# Paste each top-level section (input_number:, input_datetime:, input_text:, input_boolean:)
+# Paste each top-level section (input_number:, input_datetime:, input_text:, input_boolean:, input_button:, input_select:)
 # into your configuration.yaml. If you already have one of these top-level keys defined,
 # merge the child entries into it rather than duplicating the key.
 #
@@ -97,6 +97,42 @@ input_number:
     unit_of_measurement: "min"
     icon: mdi:timer-sand
 
+  # ---- Pool pump (15 000 L pool, ~5000 L/h pump) -------------------------
+  pool_pump_turnover_minutes:
+    name: Pool Pump Turnover Minutes
+    min: 60
+    max: 360
+    step: 15
+    unit_of_measurement: "min"
+    icon: mdi:pool
+    initial: 180
+
+  pool_pump_minutes_remaining:
+    name: Pool Pump Minutes Remaining
+    min: 0
+    max: 360
+    step: 15
+    unit_of_measurement: "min"
+    icon: mdi:timer-sand
+    initial: 0
+
+  pool_cheap_rank_max:
+    name: Pool Cheap Rank Max
+    min: 0
+    max: 23
+    step: 1
+    icon: mdi:cash-clock
+    initial: 5
+
+  pool_pump_extended_hours:
+    name: Pool Pump Extended Hours
+    min: 1
+    max: 12
+    step: 1
+    unit_of_measurement: "h"
+    icon: mdi:clock-outline
+    initial: 6
+
   # ---- Lily cat feed counter (KitchenDetectorer Button 7) -----------------
   # NB: was wrongly declared under input_boolean: (with min/max/step, which
   # booleans do not support) — it is a counter, so it lives here instead.
@@ -115,6 +151,12 @@ input_datetime:
     has_date: true
     has_time: true
 
+  # ---- Pool pump ----------------------------------------------------------
+  pool_pump_plan_until:
+    name: Pool Pump Plan Until
+    has_date: true
+    has_time: true
+
   # ---- House thermal model ------------------------------------------------
   thermal_last_sample:
     name: Thermal Model Last Sample
@@ -127,6 +169,13 @@ input_datetime:
     has_date: true
     has_time: true
     icon: mdi:cat
+
+  # ---- Sam Superchill (blast cool) ----------------------------------------
+  sam_superchill_until:
+    name: Sam Superchill Until
+    has_date: true
+    has_time: true
+    icon: mdi:timer-snow
 
 input_text:
   sam_hvac_status:
@@ -153,6 +202,11 @@ input_text:
     name: House Thermal Model Status
     max: 255
 
+  pool_pump_status:
+    name: Pool Pump Status
+    max: 255
+    initial: Idle
+
 input_boolean:
   holiday_mode:
     name: Holiday Mode
@@ -166,11 +220,46 @@ input_boolean:
     name: Daytime Cheap 7-21
     icon: mdi:cash-clock
 
+  sam_superchill_active:
+    name: Sam Superchill Active
+    icon: mdi:snowflake-variant
+
 input_button:
   # ---- Hot water ----------------------------------------------------------
   hot_water_boost_2h:
     name: Hot Water Boost (2h)
     icon: mdi:water-boiler-auto
+
+  # ---- Sam Superchill (blast cool for 2h) ---------------------------------
+  sam_superchill_2h:
+    name: Sam Superchill (2h)
+    icon: mdi:snowflake-alert
+
+  sam_superchill_stop:
+    name: Sam Superchill Stop
+    icon: mdi:snowflake-off
+
+  # ---- Pool pump (smart_plug_4 — heater + 5000 L/h pump) ------------------
+  pool_pump_schedule_cheap:
+    name: Pool — Cheap Windows
+    icon: mdi:cash-clock
+
+  pool_pump_run_extended:
+    name: Pool — Extended Run
+    icon: mdi:pool
+
+  pool_pump_stop:
+    name: Pool — Stop
+    icon: mdi:stop-circle
+
+input_select:
+  pool_pump_mode:
+    name: Pool Pump Plan
+    options:
+      - off
+      - cheap
+      - extended
+    icon: mdi:pool
 
 template:
   - sensor:
