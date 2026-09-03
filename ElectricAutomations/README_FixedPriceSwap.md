@@ -73,7 +73,9 @@ Two ways of measuring "the next 24 h" are computed and **either** can trigger:
   (the spot sensor's `average` attribute) to the ring buffer, trims to 30 and
   recomputes `spot_30d_avg`. On HA start it just recomputes (never double-counts).
   Seeded from long-term statistics, so it is useful immediately and converges to a
-  true 30-day trailing mean of daily means.
+  true 30-day trailing mean of daily means. The comma-separated history string is
+  parsed *inside* the `buf` template — assigning it to its own automation
+  variable makes HA wrap it as a TupleWrapper, and `.split()` then fails.
 - **`FixedPriceSwapAdvisor.yaml`** (`fixed_price_swap_advisor`) — computes the
   next-24 h figures, publishes them, and sends a notification when a swap looks
   worthwhile (throttled once/day). Runs on tomorrow's prices publishing, a few

@@ -1,0 +1,113 @@
+# LoftC3 button → loft lights.
+#
+# LoftC3 cannot call Home Assistant actions until "Allow the device to
+# perform Home Assistant actions" is ticked on the ESPHome device.
+# The firmware publishes sensor.loft_loftc3_light_command:
+#   leds_on / all_on / leds_only / room_off / stairs_night  (plus a millis nonce)
+alias: LoftC3 light command
+id: loftc3_light_command
+description: >-
+  Run loft lights from the LoftC3 button command sensor.
+  leds_only turns extras off so only the three LED sets remain.
+  room_off leaves the stairs light on. stairs_night (night extra hold)
+  turns stairs off and lights loft spot south for 30 seconds.
+mode: parallel
+max: 6
+triggers:
+  - trigger: state
+    entity_id:
+      - sensor.loft_loftc3_light_command
+      - text_sensor.loftc3_light_command
+      - text_sensor.loft_loftc3_light_command
+      - text_sensor.loftc3_loftc3_light_command
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.to_state.state not in ['unknown', 'unavailable', ''] }}
+actions:
+  - variables:
+      cmd: "{{ trigger.to_state.state.split(' ')[0] }}"
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ cmd == 'leds_on' }}"
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: light.loft_lights
+          - delay:
+              milliseconds: 500
+          - action: light.turn_on
+            target:
+              entity_id: light.isp_1a3c38_3c38
+          - delay:
+              milliseconds: 500
+          - action: light.turn_on
+            target:
+              entity_id: light.isp_0db21e_b21e
+      - conditions:
+          - condition: template
+            value_template: "{{ cmd == 'leds_only' }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id:
+                - light.loft_desk_kajplats
+                - light.kajplats_e14_ws_globe_806lm
+                - light.gu10_b505z2_2
+                - light.loft_display_backlight
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id:
+                - light.loft_lights
+                - light.isp_1a3c38_3c38
+                - light.isp_0db21e_b21e
+      - conditions:
+          - condition: template
+            value_template: "{{ cmd == 'all_on' }}"
+        sequence:
+          - action: light.turn_on
+            target:
+              area_id: loft
+      - conditions:
+          - condition: template
+            value_template: "{{ cmd in ['room_off', 'all_off'] }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id:
+                - light.loft_desk_kajplats
+                - light.kajplats_e14_ws_globe_806lm
+                - light.gu10_b505z2_2
+                - light.loft_display_backlight
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: light.loft_lights
+          - delay:
+              milliseconds: 500
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: light.isp_1a3c38_3c38
+      - conditions:
+          - condition: template
+            value_template: "{{ cmd == 'stairs_night' }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: light.isp_0db21e_b21e
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: light.gu10_b505z2_2
+          - delay:
+              seconds: 30
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: light.gu10_b505z2_2

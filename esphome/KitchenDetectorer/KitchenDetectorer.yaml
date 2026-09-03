@@ -425,58 +425,11 @@ sensor:
               if (v < 0.0f) v = 0.0f;
               id(lily_pouch_count) = v;
             }
-  - platform: homeassistant
-    id: lily_last_feed_ha
-    entity_id: input_datetime.lily_last_feed
-    internal: true
-    on_value:
-      then:
-        - lambda: |-
-            if (!id(lily_last_feed_ha).has_state()) {
-              return;
-            }
-            const std::string raw = id(lily_last_feed_ha).state;
-            if (raw.empty() || raw == "unknown" || raw == "unavailable" ||
-                raw.find("1970") == 0) {
-              id(lily_last_feed_ms) = 0;
-              return;
-            }
-            std::string s = raw;
-            for (auto &c : s) {
-              if (c == 'T') {
-                c = ' ';
-              }
-            }
-            int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
-            if (sscanf(s.c_str(), "%d-%d-%d %d:%d:%d",
-                       &year, &month, &day, &hour, &minute, &second) < 3) {
-              return;
-            }
-            auto now_time = id(homeassistant_time).now();
-            if (!now_time.is_valid()) {
-              return;
-            }
-            ESPTime feed_time = now_time;
-            feed_time.year = year;
-            feed_time.month = month;
-            feed_time.day_of_month = day;
-            feed_time.hour = hour;
-            feed_time.minute = minute;
-            feed_time.second = second;
-            if (!feed_time.is_valid()) {
-              return;
-            }
-            const time_t feed_ts = feed_time.timestamp;
-            const time_t now_ts = now_time.timestamp;
-            if (feed_ts > now_ts) {
-              return;
-            }
-            const uint32_t ago_ms = (uint32_t) ((now_ts - feed_ts) * 1000LL);
-            if (ago_ms <= millis()) {
-              id(lily_last_feed_ms) = millis() - ago_ms;
-            } else {
-              id(lily_last_feed_ms) = millis();
-            }
+  # `lily_last_feed_ha` lives in the text_sensor: section below because
+  # `input_datetime.lily_last_feed` is a datetime helper (returns an
+  # ISO-8601 string), not a number - using `sensor:` here would force
+  # ESPHome to parse the state as a float and the build would fail with
+  # `conversion from 'float' to non-scalar type 'const std::string'`.
   # Optional HA helper to live-tune the airfryer beep peak threshold without
   # reflashing. Recommended HA config (Configuration > Helpers > Number):
   #   input_number.airfryer_beep_threshold  min 100, max 32000, step 100
@@ -531,6 +484,17 @@ text_sensor:
   - platform: homeassistant
     id: openweathermap_condition
     entity_id: sensor.openweathermap_condition
+    internal: true
+  # BEDA waste collection (Närab). State is typically
+  # "on Mon, 07.09.2026" or a days-until integer. Shown from 18:00 the
+  # evening before collection day so we remember to empty indoor bins.
+  - platform: homeassistant
+    id: waste_c1_next
+    entity_id: sensor.waste_collection_schedule_beda_container_1_packaging_of_paper_plastic_metal_and_clear_glass
+    internal: true
+  - platform: homeassistant
+    id: waste_c2_next
+    entity_id: sensor.waste_collection_schedule_beda_container_2_food_waste_residual_waste_newspapers_and_colored_glass
     internal: true
   # Notifications: comma-separated IDs maintained by the MiniDisplay alarm
   # system. The on_value handler parses the CSV into the `notification_ids`
@@ -654,6 +618,61 @@ text_sensor:
     id: led_flood_light_state
     entity_id: light.led_flood_light
     internal: true
+  # Lily's last-feed timestamp. `input_datetime.lily_last_feed` is a
+  # string-shaped helper (ISO-8601), so we read it as a text_sensor and
+  # convert it to milliseconds-since-boot for the "X mins ago" display.
+  - platform: homeassistant
+    id: lily_last_feed_ha
+    entity_id: input_datetime.lily_last_feed
+    internal: true
+    on_value:
+      then:
+        - lambda: |-
+            if (!id(lily_last_feed_ha).has_state()) {
+              return;
+            }
+            const std::string raw = id(lily_last_feed_ha).state;
+            if (raw.empty() || raw == "unknown" || raw == "unavailable" ||
+                raw.find("1970") == 0) {
+              id(lily_last_feed_ms) = 0;
+              return;
+            }
+            std::string s = raw;
+            for (auto &c : s) {
+              if (c == 'T') {
+                c = ' ';
+              }
+            }
+            int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+            if (sscanf(s.c_str(), "%d-%d-%d %d:%d:%d",
+                       &year, &month, &day, &hour, &minute, &second) < 3) {
+              return;
+            }
+            auto now_time = id(homeassistant_time).now();
+            if (!now_time.is_valid()) {
+              return;
+            }
+            ESPTime feed_time = now_time;
+            feed_time.year = year;
+            feed_time.month = month;
+            feed_time.day_of_month = day;
+            feed_time.hour = hour;
+            feed_time.minute = minute;
+            feed_time.second = second;
+            if (!feed_time.is_valid()) {
+              return;
+            }
+            const time_t feed_ts = feed_time.timestamp;
+            const time_t now_ts = now_time.timestamp;
+            if (feed_ts > now_ts) {
+              return;
+            }
+            const uint32_t ago_ms = (uint32_t) ((now_ts - feed_ts) * 1000LL);
+            if (ago_ms <= millis()) {
+              id(lily_last_feed_ms) = millis() - ago_ms;
+            } else {
+              id(lily_last_feed_ms) = millis();
+            }
   # Calendar 1 - kids' school (subscription f0d28bc2)
   - platform: homeassistant
     id: school_cal_1_message
@@ -776,9 +795,21 @@ globals:
     type: float
     restore_value: yes
     initial_value: "0"
+  # `lily_last_feed_ms` is a millis()-based timestamp (uint32 counter that
+  # resets to 0 every reboot), NOT a wall-clock value, so it has no
+  # meaning across reboots. Restoring it produced the "99.XX" garbage on
+  # the display in the window after boot but before the HA on_value
+  # handler had a chance to push the real `input_datetime.lily_last_feed`
+  # value back in: the display code does `now - lily_last_feed_ms`, and
+  # with `now` small after boot and the restored timestamp large, the
+  # unsigned subtraction underflows to ~4 billion ms = ~1190 hours
+  # (capped to 99 on screen). Setting restore_value: no makes the value
+  # start at 0 ("no feed yet") after every boot, which makes the display
+  # show "--.--" until the HA text_sensor lambda runs and writes the
+  # correct millis-relative timestamp.
   - id: lily_last_feed_ms
     type: unsigned long
-    restore_value: yes
+    restore_value: no
     initial_value: "0"
   - id: lily_display_until
     type: unsigned long
@@ -1036,12 +1067,12 @@ globals:
     # AND beeps must be 2..4 s apart, 3 in a row) - see the
     # binary_sensor.airfryer_beep on_release handler for details.
     initial_value: "35.0"
-  # Master enable for airfryer detection. Defaults ON; turn OFF in HA if
-  # device sitting idle in the kitchen never fires false positives - the
-  # user flips the switch ON in HA when they actually start cooking, and
-  # we go back to OFF after the alert (or manually). When this is false
-  # the airfryer_beep binary sensor refuses to go true even if the
-  # acoustic conditions match, so the entire pipeline stays dormant.
+  # Master enable for airfryer detection. Defaults ON; can be flipped
+  # OFF in HA to silence the detector during noisy events (party,
+  # cleaning, etc.) without having to physically power down the device.
+  # When this is false the airfryer_beep binary sensor refuses to go
+  # true even if the acoustic conditions match, so the entire pipeline
+  # stays dormant. Persisted across reboots.
   - id: airfryer_detect_enabled
     type: bool
     restore_value: yes
@@ -1050,16 +1081,27 @@ globals:
   # measured the airfryer beep at ~4000 Hz with a sound-frequency app
   # (Aug 2026), which at 16 kHz sample rate is ~0.50 ZC/sample. Voice,
   # drawer slams, footsteps, fridge hum all sit well under 0.10. The
-  # default 0.22 - use together with airfryer_tone_4k_threshold (either
-  # can pass). Tunable via input_number.airfryer_zc_threshold from HA.
+  # default 0.22 - used together with airfryer_tone_4k_threshold via
+  # an AND gate (both must clear). Tunable via input_number.airfryer_zc_threshold.
   - id: airfryer_zc_threshold
     type: float
     restore_value: yes
     initial_value: "0.22"
+  # Lag-4 autocorrelation (4 kHz tonal strength) threshold. Empirical
+  # background ceiling for the airfryer's running motor noise is
+  # ~0.27 (no beep, just fan), so 0.30 cleanly excludes ambient while
+  # leaving substantial headroom below a clean 4 kHz beep (expected
+  # ~0.5 of peak^2 normalisation). Gated with airfryer_zc_threshold
+  # via AND - both must pass.
+  #
+  # restore_value: no because there is no HA helper for this global -
+  # if we persisted a bad value (e.g. the old 0.06 default) there
+  # would be no way to override it from Home Assistant, so we always
+  # boot with the YAML-defined initial.
   - id: airfryer_tone_4k_threshold
     type: float
-    restore_value: yes
-    initial_value: "0.06"
+    restore_value: no
+    initial_value: "0.30"
   # Live zero-crossing ratio (per-chunk). Updated every audio chunk by
   # the on_boot mic data callback alongside mic_peak_value, and read by
   # binary_sensor.airfryer_beep so a candidate beep has to be both LOUD
@@ -1156,6 +1198,19 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
+  # Cooldown: timestamp (millis) of the last real-detection firing.
+  # The on_release handler suppresses a subsequent fire if the previous
+  # one was less than AIRFRYER_TRIGGER_COOLDOWN_MS ago, so kitchen
+  # ambient noise that the pattern matcher mis-categorises as a fryer
+  # cadence (microwave triple-beep, dishwasher cycle-done, etc.) can't
+  # spam the green-flash + on-device overlay every ~10 s. The HA "Test
+  # Airfryer Beep" button and the snake-timer "all eggs eaten" path
+  # both deliberately bypass this cooldown - they are intentional one-
+  # shot user actions, not noisy ambient detections.
+  - id: airfryer_last_trigger_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
   # When the user presses Button 5 we want the calendar screen to actually
   # appear (even with no events), instead of being immediately rewritten to
   # the manifold by the auto-skip rule. force_calendar_until is the millis()
@@ -1164,16 +1219,43 @@ globals:
     type: unsigned long
     restore_value: no
     initial_value: "0"
+  # BEDA indoor-bin reminder. Rebuilt every display frame from the HA
+  # waste sensors. Visible from 18:00 the evening before collection
+  # until the end of collection day. waste_show_index picks C1 vs C2
+  # when both are due in the same window (rare).
+  - id: waste_due_c1
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: waste_due_c2
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: waste_show_index
+    type: int
+    restore_value: no
+    initial_value: "0"
 
 # Shared script for the air-fryer beep action so both the (auto) binary_sensor
 # trigger and the HA "Test Airfryer Beep" button run identical logic.
 script:
   - id: trigger_airfryer_beep_action
+    # The on-display overlay text is supplied by the caller so the user
+    # can tell *why* the floodlight just flashed green:
+    #   * "AFry tSt" - HA test button pressed (manual confirmation)
+    #   * "Airfry! " - live mic detected the fryer cadence
+    #   * "Eggs Don" - snake-timer reached "all eggs eaten"
+    # An empty string falls back to "Airfry! " so any future caller that
+    # forgets the parameter still gets a sensible label instead of a
+    # blank slot.
+    parameters:
+      overlay_text: string
     then:
       # Show an on-device feedback overlay for the duration of the test
       # so the "Test Airfryer Beep" HA button has visible confirmation -
-      # the display shows "AFry tSt" while the floodlight pulses green
-      # and then the overlay clears as the floodlight is restored.
+      # the display shows the caller-supplied text while the floodlight
+      # pulses green and then the overlay clears as the floodlight is
+      # restored.
       #
       # Snapshotting:
       #  * scene.create captures the floodlight's CURRENT colour and
@@ -1195,12 +1277,13 @@ script:
       #    also set `brightness_pct: '100'` so the green is unambiguous
       #    and bright regardless of whatever level the light was at.
       - lambda: |-
-          id(feedback_text) = std::string("AFry tSt");
+          id(feedback_text) = overlay_text.empty() ? std::string("Airfry! ") : overlay_text;
           id(feedback_until) = millis() + 2500;
           id(floodlight_was_on) = (id(led_flood_light_state).has_state() &&
                                    id(led_flood_light_state).state == "on");
           ESP_LOGI("airfryer",
-                   "Beep action firing - flashing floodlight green for 5 s (was_on=%d, last_state=%s)",
+                   "Beep action firing - flashing floodlight green for 5 s (overlay='%s', was_on=%d, last_state=%s)",
+                   id(feedback_text).c_str(),
                    id(floodlight_was_on),
                    id(led_flood_light_state).has_state() ? id(led_flood_light_state).state.c_str() : "<unknown>");
       - homeassistant.service:
@@ -1628,32 +1711,43 @@ binary_sensor:
   - platform: template
     name: "Airfryer Beep"
     id: airfryer_beep
-    # The airfryer detector is gated on FOUR independent conditions:
+    # The airfryer detector is gated on FIVE independent conditions:
     #
-    #   1. Master switch (airfryer_detect_enabled). Defaults OFF, user
-    #      flips ON in HA when actually using the air fryer. With this
-    #      OFF the binary stays false no matter what.
+    #   1. Master switch (airfryer_detect_enabled). Defaults ON
+    #      (restore_value: yes), can be flipped OFF in HA to silence
+    #      the detector completely. With this OFF the binary stays
+    #      false no matter what.
     #   2. Mic running. Belt-and-braces - we shouldn't be polling the
     #      switch with the mic stopped, but ESPHome polls this lambda
     #      regardless.
     #   3. Peak amplitude > airfryer_beep_threshold (loud enough).
-    #   4. Zero-crossing ratio > airfryer_zc_threshold (high-pitched
+    #   4. Zero-crossing ratio >= airfryer_zc_threshold (high-pitched
     #      enough). This rejects voice, footsteps, drawer slams, and
     #      fridge hum which all sit at 0..0.1 ZC/sample - the airfryer
     #      beep sits at 0.4..0.5.
+    #   5. Lag-4 autocorrelation >= airfryer_tone_4k_threshold
+    #      (tonal at ~4 kHz). Background airfryer-running fan noise
+    #      passes the ZC gate occasionally but rarely the tone4k gate
+    #      simultaneously, so the AND of (4) and (5) cleanly rejects
+    #      motor hum while letting real beeps through.
     #
-    # All four MUST be simultaneously true for the binary to go on.
+    # All five MUST be simultaneously true for the binary to go on.
     # Length and cadence filtering live in on_release as before.
     lambda: |-
       if (!id(mic).is_running()) return false;
       if (!id(airfryer_detect_enabled)) return false;
       if (id(mic_peak_value) <= id(airfryer_beep_threshold)) return false;
-      // Pass if EITHER high zero-crossing rate OR strong 4 kHz lag-4
-      // correlation - real fryer beeps usually satisfy both, but a
-      // distant mic may only show one strongly.
+      // Require BOTH a high zero-crossing rate AND strong 4 kHz lag-4
+      // correlation. Empirically, the airfryer's running fan noise on
+      // its own produces tone4k ~ 0.10..0.27 (passes a low-threshold
+      // OR-gate via the tone branch) while keeping zc well under 0.20,
+      // so an OR-gate floods us with "candidates" purely from ambient
+      // motor noise. A genuine 4 kHz beep satisfies both metrics
+      // strongly (zc ~ 0.45..0.50, tone4k ~ 0.5+), so demanding both
+      // costs us nothing on real beeps and cleanly rejects fan hum.
       const bool zc_ok = id(mic_zc_value) >= id(airfryer_zc_threshold);
       const bool tone_ok = id(mic_tone_4k_value) >= id(airfryer_tone_4k_threshold);
-      if (!zc_ok && !tone_ok) return false;
+      if (!zc_ok || !tone_ok) return false;
       return true;
     filters:
       # Tight debouncing so we can MEASURE the beep's actual length on
@@ -1702,7 +1796,19 @@ binary_sensor:
           static const uint32_t AIRFRYER_PATTERN_WINDOW_MS   =  16000;
           static const uint32_t AIRFRYER_MIN_GAP_MS          =   1500;
           static const uint32_t AIRFRYER_MAX_GAP_MS          =   5500;
-          static const int      AIRFRYER_REQUIRED_BEEPS      =      2;
+          // Required beep count bumped from 2 to 3. The user's airfryer
+          // emits ~3 short beeps per "done" notification, so demanding 3
+          // (not 2) matches the actual cadence and rejects most 2-beep
+          // false positives (microwave "ding ding", dishwasher "doot
+          // doot", a cup tap-tap on the worktop, etc.). A real fryer
+          // alert still fires comfortably.
+          static const int      AIRFRYER_REQUIRED_BEEPS      =      3;
+          // Cooldown: once a pattern fires, suppress further fires for
+          // this many ms. Real airfryer beep cycles run 3 short bursts
+          // then go silent for tens of seconds, so 2 minutes safely
+          // covers a single "alarm window" without missing a brand-new
+          // user-actionable beep cycle later in the cook.
+          static const uint32_t AIRFRYER_TRIGGER_COOLDOWN_MS = 120000UL;
           const uint32_t now_ms = millis();
           const uint32_t duration_ms = now_ms - id(beep_rise_ms);
           // mic_zc_window_max has been tracking the MAX ZC ratio across
@@ -1723,12 +1829,17 @@ binary_sensor:
             id(should_fire_airfryer) = false;
             return;
           }
-          // ---- Stage 2: pitch filter (ZC OR 4 kHz tone metric) -------
+          // ---- Stage 2: pitch filter (ZC AND 4 kHz tone metric) -----
+          // BOTH peak metrics must clear their thresholds. See the live
+          // gate above for the rationale - background airfryer motor
+          // noise reliably passes either gate on its own but cannot
+          // pass both simultaneously, whereas a real 4 kHz beep flies
+          // through both with margin.
           const bool zc_ok = zc_peak >= id(airfryer_zc_threshold);
           const bool tone_ok = tone_peak >= id(airfryer_tone_4k_threshold);
-          if (!zc_ok && !tone_ok) {
+          if (!zc_ok || !tone_ok) {
             ESP_LOGI("airfryer",
-                     "Beep rejected: zc_peak=%.2f tone4k=%.3f (need zc>=%.2f or tone>=%.3f) len=%lu ms",
+                     "Beep rejected: zc_peak=%.2f tone4k=%.3f (need zc>=%.2f AND tone>=%.3f) len=%lu ms",
                      zc_peak, tone_peak,
                      id(airfryer_zc_threshold), id(airfryer_tone_4k_threshold),
                      (unsigned long) duration_ms);
@@ -1762,8 +1873,24 @@ binary_sensor:
                    reason);
           if (id(beep_pattern_count) >= AIRFRYER_REQUIRED_BEEPS) {
             id(beep_pattern_count) = 0;
-            id(should_fire_airfryer) = true;
-            ESP_LOGI("airfryer", "Pattern matched - firing trigger");
+            // Cooldown gate - suppress re-firing within the cooldown
+            // window. Only applies to live-detection firings; the HA
+            // "Test Airfryer Beep" button and snake-timer's "eggs all"
+            // path call the action directly without going through this
+            // path, so they remain unaffected.
+            const uint32_t since_last_ms = now_ms - id(airfryer_last_trigger_ms);
+            if (id(airfryer_last_trigger_ms) != 0 &&
+                since_last_ms < AIRFRYER_TRIGGER_COOLDOWN_MS) {
+              ESP_LOGI("airfryer",
+                       "Pattern matched but in cooldown (%lu s since last fire, need %lu s) - suppressed",
+                       (unsigned long)(since_last_ms / 1000UL),
+                       (unsigned long)(AIRFRYER_TRIGGER_COOLDOWN_MS / 1000UL));
+              id(should_fire_airfryer) = false;
+            } else {
+              id(should_fire_airfryer) = true;
+              id(airfryer_last_trigger_ms) = now_ms;
+              ESP_LOGI("airfryer", "Pattern matched - firing trigger");
+            }
           } else {
             id(should_fire_airfryer) = false;
           }
@@ -1771,7 +1898,9 @@ binary_sensor:
           condition:
             lambda: 'return id(should_fire_airfryer);'
           then:
-            - script.execute: trigger_airfryer_beep_action
+            - script.execute:
+                id: trigger_airfryer_beep_action
+                overlay_text: "Airfry! "
 
   # Home Assistant binary sensors/switches
   - platform: homeassistant
@@ -2298,7 +2427,7 @@ binary_sensor:
                           auto t = id(homeassistant_time).now();
                           char buf[32];
                           snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-                                   (int) t.year, (int) t.month, (int) t.day,
+                                   (int) t.year, (int) t.month, (int) t.day_of_month,
                                    (int) t.hour, (int) t.minute, (int) t.second);
                           return std::string(buf);
           else:
@@ -2372,7 +2501,9 @@ button:
     name: "Test Airfryer Beep"
     id: test_airfryer_beep
     on_press:
-      - script.execute: trigger_airfryer_beep_action
+      - script.execute:
+          id: trigger_airfryer_beep_action
+          overlay_text: "AFry tSt"
 
   - platform: template
     name: "Sample Airfryer Beep"
@@ -2537,6 +2668,77 @@ interval:
             return cal_prefix + " " + body;
           };
 
+          // UTF-8 -> ASCII transliterator. The TM1638 driver only knows
+          // its 7-seg glyphs and emits a "Encountered character '\xc3'
+          // with no TM1638 representation" warning for every single
+          // multibyte UTF-8 byte it sees - rendering "Laslaxan klar."
+          // worth of warnings every display refresh. We collapse the
+          // common Latin diacritics (Swedish a/A/o/O umlauts, German
+          // umlauts, accented vowels, n with tilde, sharp s) down to
+          // their unaccented ASCII equivalents so calendar titles like
+          // "Laslaxan klar." render cleanly and any other 2/3/4-byte
+          // codepoint is replaced with '?' rather than spamming the log.
+          auto sanitize_utf8 = [](const std::string &in) -> std::string {
+            std::string out;
+            out.reserve(in.size());
+            for (size_t i = 0; i < in.size(); ) {
+              unsigned char c = (unsigned char) in[i];
+              if (c < 0x80) {
+                out.push_back((char) c);
+                i++;
+                continue;
+              }
+              if ((c & 0xE0) == 0xC0 && i + 1 < in.size()) {
+                unsigned char c2 = (unsigned char) in[i + 1];
+                uint32_t cp = ((c & 0x1F) << 6) | (c2 & 0x3F);
+                i += 2;
+                switch (cp) {
+                  case 0xC4: case 0xC5: out.push_back('A'); break;
+                  case 0xD6: out.push_back('O'); break;
+                  case 0xE4: case 0xE5: out.push_back('a'); break;
+                  case 0xF6: out.push_back('o'); break;
+                  case 0xC9: case 0xC8: case 0xCA: out.push_back('E'); break;
+                  case 0xE9: case 0xE8: case 0xEA: out.push_back('e'); break;
+                  case 0xDC: out.push_back('U'); break;
+                  case 0xFC: out.push_back('u'); break;
+                  case 0xD1: out.push_back('N'); break;
+                  case 0xF1: out.push_back('n'); break;
+                  case 0xDF: out.push_back('s'); out.push_back('s'); break;
+                  default: out.push_back('?'); break;
+                }
+                continue;
+              }
+              if ((c & 0xF0) == 0xE0 && i + 2 < in.size()) {
+                i += 3;
+                out.push_back('?');
+                continue;
+              }
+              if ((c & 0xF8) == 0xF0 && i + 3 < in.size()) {
+                i += 4;
+                out.push_back('?');
+                continue;
+              }
+              out.push_back('?');
+              i++;
+            }
+            return out;
+          };
+
+          // Resolve "today" and "tomorrow" in local time once, so each
+          // event can be classified relative to "now" inside try_add_event.
+          // Used to (a) drop today's all-day events after the 18:00 cutoff
+          // and (b) tag tomorrow's events with a ">" prefix on the
+          // scrolling title.
+          struct tm now_local;
+          localtime_r(&now_ts, &now_local);
+          const int now_secs_into_day =
+              now_local.tm_hour * 3600 +
+              now_local.tm_min * 60 +
+              now_local.tm_sec;
+          const time_t today_local_midnight = now_ts - now_secs_into_day;
+          const time_t tomorrow_local_midnight = today_local_midnight + 86400;
+          const bool after_evening_cutoff = (now_local.tm_hour >= 18);
+
           auto try_add_event = [&](const std::string &title_in,
                                    const std::string &start_in,
                                    const std::string &end_in,
@@ -2587,6 +2789,23 @@ interval:
             if (now_ts < show_from_ts) return;
             if (now_ts >= end_ts) return;
 
+            // Classify the event relative to today. All-day events
+            // start at local midnight (00:00); a "today all-day" event
+            // is one whose local midnight matches today's local midnight.
+            const bool is_midnight = (start_local.tm_hour == 0 && start_local.tm_min == 0);
+            const bool is_8am      = (start_local.tm_hour == 8 && start_local.tm_min == 0);
+            const bool event_is_today    = (local_midnight == today_local_midnight);
+            const bool event_is_tomorrow = (local_midnight == tomorrow_local_midnight);
+
+            // After 18:00 we stop showing today's all-day events - the
+            // day is effectively over and the user wants the cycler to
+            // surface tomorrow's events (and any genuine evening event
+            // still active tonight) instead of being cluttered by
+            // "today's school day off" banners that no longer matter.
+            if (event_is_today && is_midnight && after_evening_cutoff) {
+              return;
+            }
+
             std::string body = shorten_title(title_in);
             // Time classification:
             //   * tm_hour == 0 && tm_min == 0  -> "all-day" / midnight event.
@@ -2601,8 +2820,6 @@ interval:
             //                                     8 digits.
             //   * everything else              -> static HHMM in slots 0..3 with the
             //                                     title scrolling over the top.
-            const bool is_midnight = (start_local.tm_hour == 0 && start_local.tm_min == 0);
-            const bool is_8am      = (start_local.tm_hour == 8 && start_local.tm_min == 0);
 
             std::string time_buf;
             std::string disp_title;
@@ -2627,7 +2844,24 @@ interval:
               time_buf = tb;
               disp_title = compose_title(body, cal_prefix);
             }
-            id(cal_event_titles).push_back(disp_title);
+
+            // Tag tomorrow's events with a leading ">" on the scrolling
+            // title so the user can tell "starts tomorrow" apart from
+            // "starts/active today" at a glance. The static prefix slot
+            // (time or calendar owner) is left alone so the HHMM / "F."
+            // formatting stays consistent.
+            if (event_is_tomorrow) {
+              disp_title = std::string(">") + disp_title;
+            }
+
+            // sanitize_utf8 transliterates Swedish/Latin diacritics to
+            // ASCII before the title reaches the TM1638 print path -
+            // titles like "Laslaxan klar." come in as UTF-8 with
+            // multibyte 'a' codepoints, and without this every display
+            // refresh fires a "no TM1638 representation" warning per
+            // multibyte byte. The static prefix slot (time / cal owner)
+            // is already pure ASCII so it doesn't need transliteration.
+            id(cal_event_titles).push_back(sanitize_utf8(disp_title));
             id(cal_event_times).push_back(time_buf);
             id(cal_event_show_time).push_back(!time_buf.empty());
           };
@@ -2684,10 +2918,12 @@ display:
     update_interval: 100ms
     intensity: 7
     lambda: |-
-      // 13 screens (0..12). Air-fryer and hours-to-target screens were
+      // 14 screens (0..13). Air-fryer and hours-to-target screens were
       // removed because the device sits next to the air-fryer (visible
       // power use already obvious) and hours-to-target was rarely useful.
-      static const int NUM_SCREENS = 13;
+      // Screen 13 is the BEDA indoor-bin reminder (skipped unless a
+      // collection is today or from 18:00 the evening before).
+      static const int NUM_SCREENS = 14;
       static const uint32_t SCREEN_HOLD_MS = 3500; // Standard auto-cycle dwell
       static const uint32_t SCROLL_DURATION_MS = 3000; // Subtitle-style left-shift over the screen dwell
       // Per-cell scroll rate for the notification title overlay. Keep in
@@ -2786,6 +3022,7 @@ display:
       static const int SCREEN_FORECAST   = 10;
       static const int SCREEN_DESIRED    = 11;
       static const int SCREEN_NOTIFY     = 12;
+      static const int SCREEN_BINS       = 13;
 
       // ----- Sync alarm LED mode from Home Assistant (every 1s) -----
       static unsigned long last_alarm_check = 0;
@@ -3176,7 +3413,11 @@ display:
                    total_minutes,
                    (unsigned long)(snake_elapsed / 1000),
                    (unsigned long) SNAKE_END_MS);
-          id(trigger_airfryer_beep_action).execute();
+          // Snake-timer end deliberately bypasses the airfryer
+          // cooldown so the "bake done" alert always fires; its
+          // overlay text labels it clearly so the user knows this
+          // is the timer finishing, not a fryer-cadence false hit.
+          id(trigger_airfryer_beep_action).execute(std::string("Eggs Don"));
         }
         const uint32_t end_phase = now - id(snake_done_at_ms);
         if (end_phase < SNAKE_END_MS) {
@@ -3197,8 +3438,86 @@ display:
         // Fall through to normal screen rotation below.
       }
 
+      // ----- BEDA indoor-bin reminder (18:00 evening before -> collection day) -----
+      // Parses the waste_collection_schedule sensor state: either a
+      // days-until integer or a date string such as "on Mon, 07.09.2026".
+      {
+        auto civil_days = [](int y, unsigned m, unsigned d) -> long {
+          y -= (m <= 2);
+          const int era = (y >= 0 ? y : y - 399) / 400;
+          const unsigned yoe = (unsigned) (y - era * 400);
+          const unsigned doy =
+              (153u * (m > 2 ? m - 3 : m + 9) + 2u) / 5u + d - 1u;
+          const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+          return (long) era * 146097L + (long) doe - 719468L;
+        };
+        auto days_until_from_state = [&](const std::string &raw) -> int {
+          if (raw.empty() || raw == "unknown" || raw == "unavailable" ||
+              raw == "none") {
+            return -999;
+          }
+          bool all_num = true;
+          for (char c : raw) {
+            if (!(c == ' ' || c == '-' || (c >= '0' && c <= '9'))) {
+              all_num = false;
+              break;
+            }
+          }
+          if (all_num) {
+            int v = 0;
+            if (sscanf(raw.c_str(), "%d", &v) == 1) {
+              return v;
+            }
+          }
+          int yy = 0;
+          int mm = 0;
+          int dd = 0;
+          if (sscanf(raw.c_str(), "%*[^,], %d.%d.%d", &dd, &mm, &yy) != 3) {
+            if (raw.find('-') != std::string::npos) {
+              if (sscanf(raw.c_str(), "%d-%d-%d", &yy, &mm, &dd) != 3) {
+                return -999;
+              }
+            } else if (sscanf(raw.c_str(), "%d.%d.%d", &dd, &mm, &yy) != 3) {
+              return -999;
+            }
+          }
+          if (yy < 2020 || mm < 1 || mm > 12 || dd < 1 || dd > 31) {
+            return -999;
+          }
+          auto t = id(homeassistant_time).now();
+          if (!t.is_valid()) {
+            return -999;
+          }
+          return (int) (civil_days(yy, (unsigned) mm, (unsigned) dd) -
+                        civil_days((int) t.year, (unsigned) t.month,
+                                   (unsigned) t.day_of_month));
+        };
+        auto due_soon = [&](int days) -> bool {
+          if (days == 0) {
+            return true;
+          }
+          if (days == 1 && id(homeassistant_time).now().is_valid() &&
+              id(homeassistant_time).now().hour >= 18) {
+            return true;
+          }
+          return false;
+        };
+        int d1 = -999;
+        int d2 = -999;
+        if (id(waste_c1_next).has_state()) {
+          d1 = days_until_from_state(id(waste_c1_next).state);
+        }
+        if (id(waste_c2_next).has_state()) {
+          d2 = days_until_from_state(id(waste_c2_next).state);
+        }
+        id(waste_due_c1) = due_soon(d1);
+        id(waste_due_c2) = due_soon(d2);
+      }
+
       // ----- Auto-cycling logic (with calendar event sub-cycle) -----
       const int num_cal_events = (int) id(cal_event_titles).size();
+      const int num_waste_due =
+          (id(waste_due_c1) ? 1 : 0) + (id(waste_due_c2) ? 1 : 0);
       // SCREEN_NOTIFY observes a per-press extended hold so a manual cycle
       // (B8 short press) can let a long title fully scroll past + a few
       // seconds of dwell before the auto-rotation kicks in again.
@@ -3223,8 +3542,19 @@ display:
             now < id(force_calendar_until)) {
           advance_outer = false;
         }
+        if (id(current_screen) == SCREEN_BINS && num_waste_due > 1) {
+          if (id(waste_show_index) < num_waste_due - 1) {
+            id(waste_show_index) += 1;
+            advance_outer = false;
+          } else {
+            id(waste_show_index) = 0;
+          }
+        }
         if (advance_outer) {
           id(current_screen) = (id(current_screen) + 1) % NUM_SCREENS;
+          if (id(current_screen) == SCREEN_BINS) {
+            id(waste_show_index) = 0;
+          }
         }
 
         // Skip-rules for screens that need data to be meaningful.
@@ -3262,8 +3592,12 @@ display:
           bool has_notes = id(notification_ids_csv).has_state() &&
                            !id(notification_ids_csv).state.empty();
           if (!has_alarm && !has_notes) {
-            id(current_screen) = SCREEN_BIO;
+            id(current_screen) = SCREEN_BINS;
+            id(waste_show_index) = 0;
           }
+        }
+        if (id(current_screen) == SCREEN_BINS && num_waste_due == 0) {
+          id(current_screen) = SCREEN_BIO;
         }
         id(last_screen_change) = millis();
       }
@@ -3287,21 +3621,37 @@ display:
       }
 
       // ----- Lily feed display (Button 7 - overrides screens) -----
+      // Layout (8 digits): "HH.MM 0.5"
+      //   slots 0..3 = hours.minutes since last feed (HH.MM via the
+      //                second digit's decimal point - segment 'dp' on
+      //                the TM1638 so we use a real "." in the format
+      //                string, not ":" which doesn't exist on 7-seg)
+      //   slot 4     = blank
+      //   slots 5..7 = pouch count as a single decimal (e.g. "1.5",
+      //                using slot 5's dp)
+      // Underflow guard: lily_last_feed_ms is set by either Button 7
+      // (=millis() right now) or the HA on_value handler (=millis()
+      // back-dated so "now - lily_last_feed_ms" matches HA's ago_ms).
+      // If for any reason it lands AFTER now (sentinel future write,
+      // clock weirdness), the unsigned subtraction would underflow to
+      // billions of ms and the display would lock to "99.59". Treat
+      // any future-or-equal value as "no feed yet" and show "--.--".
       if (id(lily_display_until) > now) {
         for (int i = 0; i < 8; i++) {
           it.set_led(i, false);
         }
         it.print("        ");
-        if (id(lily_last_feed_ms) == 0) {
-          it.print("  --:--");
+        const uint32_t feed_ms = id(lily_last_feed_ms);
+        if (feed_ms == 0 || feed_ms > now) {
+          it.print("  --.--");
         } else {
-          const uint32_t ago_s = (now - id(lily_last_feed_ms)) / 1000u;
+          const uint32_t ago_s = (now - feed_ms) / 1000u;
           unsigned hrs = (unsigned) (ago_s / 3600u);
           unsigned mins = (unsigned) ((ago_s % 3600u) / 60u);
           if (hrs > 99u) {
             hrs = 99u;
           }
-          it.printf(0, "%02u:%02u", hrs, mins);
+          it.printf(0, "%02u.%02u", hrs, mins);
         }
         it.printf(5, "%3.1f", id(lily_pouch_count));
         if (alarm_led_on) {
@@ -3741,6 +4091,24 @@ display:
           scroll_with_static_prefix(hhmm, compact, since_show,
                                     scroll_duration_ms, buf);
           it.print(buf);
+        }
+      } else if (id(current_screen) == SCREEN_BINS) {
+        // Indoor-bin reminder. C1 = packaging (paper/plastic/metal/
+        // clear glass). C2 = food / residual / newspapers / coloured
+        // glass. 7-seg-safe 8-char labels; skipped unless a collection
+        // is today or from 18:00 the evening before.
+        bool show_c2 = id(waste_due_c2);
+        if (id(waste_due_c1) && id(waste_due_c2)) {
+          show_c2 = (id(waste_show_index) != 0);
+        } else if (id(waste_due_c1)) {
+          show_c2 = false;
+        }
+        if (show_c2) {
+          it.print("C2 FOOD ");
+        } else if (id(waste_due_c1)) {
+          it.print("C1 PACK ");
+        } else {
+          it.print("BINS    ");
         }
       }
 

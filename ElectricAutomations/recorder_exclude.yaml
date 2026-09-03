@@ -1,0 +1,25 @@
+# Recorder filter snippet for Home Assistant configuration.yaml
+#
+# Why: sensor.adjusted_nordpool_se4 is produced by energy_sensor_generator and
+# copies Nordpool's raw_today / raw_tomorrow / today / tomorrow arrays. Those
+# exceed HA's 16 KiB attribute limit, so the recorder logs a warning every
+# quarter-hour and refuses to store the attributes. The official Nordpool
+# sensors already mark those keys unrecorded; the generator copy does not.
+#
+# Pixel/Seeker "active notification count" sensors dump every Android
+# notification extra into attributes and hit the same limit.
+#
+# Merge under the existing `recorder:` key (do not add a second top-level
+# recorder: block). Then Developer Tools → YAML → Check configuration and
+# restart Recorder or HA.
+#
+# Live state is unchanged — only history of these entities is skipped. Price
+# graphs should use sensor.nordpool_kwh_se4_sek_3_10_025 (or _0), which the
+# Nordpool integration already keeps slim in the database.
+
+recorder:
+  exclude:
+    entities:
+      - sensor.adjusted_nordpool_se4
+      - sensor.pixel_8_active_notification_count
+      - sensor.seeker_active_notification_count

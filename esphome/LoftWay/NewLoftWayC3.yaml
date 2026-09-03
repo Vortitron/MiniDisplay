@@ -13,6 +13,27 @@ substitutions:
   pir_pulldown: "false"
   # Set to "true" if your AM312 PIR is active-low (text "true"/"false").
   pir_inverted: "false"
+  # NPN/N-MOSFET base/gate for LCD backlight PWM. GPIO4 is LEDC-capable,
+  # not a strapping pin, and sits next to the existing GPIO0-3 wiring.
+  backlight_pwm_pin: "GPIO4"
+  # Momentary push button to GND (internal pull-up). GPIO5's pad is
+  # physically damaged, so this is GPIO10 (other column, not BOOT/LED).
+  lights_button_pin: "GPIO10"
+  # HA area for "all loft lights" and hold-to-off.
+  loft_lights_area_id: "loft"
+  loft_led_main_entity: "light.loft_lights"
+  loft_led_left_entity: "light.isp_1a3c38_3c38"
+  loft_led_stairs_entity: "light.isp_0db21e_b21e"
+  loft_path_entity: "light.gu10_b505z2_2"
+  button_hold_ms: "600"
+  # Extra hold after the first off, before night-only stairs-off.
+  button_hold_stairs_extra_ms: "1000"
+  button_backlight_seconds: "60"
+  led_stagger_ms: "500"
+  led_retry_wait_ms: "1500"
+  lcd_status_success_seconds: "2"
+  lcd_status_pending_seconds: "3"
+  path_light_seconds: "30"
   weather_temperature_entity: "sensor.sam_outside_temperature"
   weather_condition_entity: "sensor.openweathermap_condition"
   forecast_today_max_entity: "sensor.forecast_today_max"
@@ -28,24 +49,31 @@ substitutions:
   # entered when the sun is below horizon OR clock hits 23:00, whichever
   # comes first; day mode resumes at 07:00 each morning.
   sun_entity: "sun.sun"
-  # Day/night LCD brightness from HA input_number helpers (0-100). The
-  # PCF8574 LCD backpack cannot dim via I2C, so the firmware currently
-  # treats > 0 as "backlight ON" and 0 as "backlight OFF" - the slider
-  # values are exposed and read so a future hardware-PWM mod can be
-  # wired in without touching HA.
+  # Full brightness when someone lingers (HA sliders, 0-100). Night
+  # slider 0 falls back to the day slider so lingering is still bright.
   day_brightness_entity: "input_number.loftc3_lcd_brightness_day"
   night_brightness_entity: "input_number.loftc3_lcd_brightness_night"
+  # Any PIR edge lights the LCD at this PWM percent (linear, no gamma).
+  dim_brightness_day: "16"
+  dim_brightness_night: "4"
+  # How long the dim glow lasts after the last motion pulse.
+  dim_hold_seconds: "8"
   # Motion must be ON continuously for this many seconds before the
-  # backlight is allowed to turn on. Prevents brief night-time blips
-  # from lighting the display.
+  # backlight goes from dim to full.
   pir_continuous_on_seconds: "5"
-  # How long the backlight stays on after the last continuous motion
-  # window expires.
+  # How long full brightness lasts after the last continuous-motion window.
   backlight_hold_seconds: "20"
+  # Fade-through-black between dashboard pages. Out is slower than in.
+  # Set fade_thru_black_out_ms to 0 to disable the effect.
+  fade_thru_black_out_ms: "450"
+  fade_thru_black_in_ms: "120"
+  fade_black_hold_ms: "50"
   # Seconds each calendar event stays on screen before advancing.
   cal_event_dwell_seconds: "4"
   # Seconds on non-calendar pages before rotating.
   page_dwell_seconds: "8"
+  waste_c1_entity: "sensor.waste_collection_schedule_beda_container_1_packaging_of_paper_plastic_metal_and_clear_glass"
+  waste_c2_entity: "sensor.waste_collection_schedule_beda_container_2_food_waste_residual_waste_newspapers_and_colored_glass"
 
 esphome:
   name: loftc3
@@ -143,6 +171,34 @@ globals:
     type: unsigned long
     restore_value: no
     initial_value: "0"
+  # Dim glow after any motion pulse (walk-past), separate from full hold.
+  - id: lcd_dim_until_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  # Page actually drawn on the LCD. Lags display_page_index during a
+  # fade-through-black so the old page stays visible while PWM falls.
+  - id: lcd_drawn_page_index
+    type: int
+    restore_value: no
+    initial_value: "0"
+  # 0=idle, 1=fade out, 2=black hold, 3=fade in.
+  - id: lcd_fade_phase
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: lcd_fade_start_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: lcd_fade_from_pct
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: lcd_pwm_applied_pct
+    type: int
+    restore_value: no
+    initial_value: "-1"
   - id: lcd_last_advance_ms
     type: unsigned long
     restore_value: no
@@ -159,6 +215,335 @@ globals:
     type: unsigned long
     restore_value: no
     initial_value: "0"
+  # BEDA indoor-bin reminder. Visible from 18:00 the evening before
+  # collection until the end of collection day.
+  - id: waste_due_c1
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: waste_due_c2
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: waste_today_c1
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: waste_today_c2
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: waste_show_index
+    type: int
+    restore_value: no
+    initial_value: "0"
+  # Button sequence: 0 idle, 1 backlight only, 2 three LED sets, 3 all loft.
+  - id: loft_btn_stage
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: loft_btn_hold_fired
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: loft_retry_main
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: loft_retry_left
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: loft_retry_stairs
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: lcd_status_until_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+  - id: lcd_status_line1
+    type: std::string
+    restore_value: no
+  - id: lcd_status_line2
+    type: std::string
+    restore_value: no
+
+# LCD backlight PWM. The PCF8574 backpack pin is held off; this GPIO
+# drives the external transistor. Internal so HA area `light.turn_on`
+# does not fight the PIR/slider logic.
+output:
+  - platform: ledc
+    pin: ${backlight_pwm_pin}
+    id: lcd_backlight_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    output: lcd_backlight_pwm
+    id: lcd_backlight_light
+    internal: true
+    default_transition_length: 0s
+    gamma_correct: 1.0
+    restore_mode: ALWAYS_OFF
+
+script:
+  - id: loft_show_status
+    parameters:
+      seconds: int
+    mode: restart
+    then:
+      - lambda: |-
+          int sec = seconds;
+          if (sec < 1) {
+            sec = 2;
+          }
+          id(lcd_status_until_ms) = millis() + (uint32_t) sec * 1000UL;
+          id(lcd_backlight_until_ms) =
+              millis() + ${button_backlight_seconds} * 1000UL;
+          id(loft_lcd_display).update();
+
+  - id: loft_publish_cmd
+    parameters:
+      cmd: string
+    mode: queued
+    max_runs: 6
+    then:
+      - lambda: |-
+          char buf[32];
+          snprintf(buf, sizeof(buf), "%s %lu",
+                   cmd.c_str(), (unsigned long) millis());
+          id(loft_light_command).publish_state(buf);
+          ESP_LOGI("button", "HA command %s", buf);
+
+  - id: loft_btn_hold_watch
+    mode: restart
+    then:
+      - delay: ${button_hold_ms}ms
+      - lambda: |-
+          id(loft_btn_hold_fired) = true;
+          id(loft_btn_stage) = 0;
+          id(lcd_status_line1) = "Lights off";
+          id(lcd_status_line2) = "stairs stay";
+          ESP_LOGI("button", "Hold - room lights off, stairs stay");
+      - script.execute:
+          id: loft_show_status
+          seconds: ${lcd_status_pending_seconds}
+      - script.execute: loft_room_off
+      - delay: ${button_hold_stairs_extra_ms}ms
+      - lambda: |-
+          bool night = false;
+          if (id(ha_time).now().is_valid()) {
+            const int h = id(ha_time).now().hour;
+            if (h < 7 || h >= 23) {
+              night = true;
+            } else if (id(sun_state).has_state() &&
+                       id(sun_state).state == std::string("below_horizon")) {
+              night = true;
+            }
+          }
+          if (!night) {
+            ESP_LOGI("button", "Hold extra - daytime, stairs stay");
+            return;
+          }
+          id(lcd_status_line1) = "Stairs off";
+          id(lcd_status_line2) = "path 30s";
+          ESP_LOGI("button", "Hold extra - night stairs off + path light");
+      - if:
+          condition:
+            lambda: |-
+              if (!id(ha_time).now().is_valid()) {
+                return false;
+              }
+              const int h = id(ha_time).now().hour;
+              if (h < 7 || h >= 23) {
+                return true;
+              }
+              return id(sun_state).has_state() &&
+                     id(sun_state).state == std::string("below_horizon");
+          then:
+            - script.execute:
+                id: loft_show_status
+                seconds: ${lcd_status_success_seconds}
+            - script.execute:
+                id: loft_publish_cmd
+                cmd: stairs_night
+
+  - id: loft_btn_tap
+    mode: queued
+    max_runs: 4
+    then:
+      - lambda: |-
+          id(lcd_backlight_until_ms) =
+              millis() + ${button_backlight_seconds} * 1000UL;
+      - if:
+          condition:
+            lambda: "return id(loft_btn_stage) <= 0;"
+          then:
+            - lambda: |-
+                id(loft_btn_stage) = 1;
+                ESP_LOGI("button", "Tap 1 - backlight %ss",
+                         "${button_backlight_seconds}");
+          else:
+            - if:
+                condition:
+                  lambda: "return id(loft_btn_stage) == 1;"
+                then:
+                  - lambda: |-
+                      id(loft_btn_stage) = 2;
+                      id(lcd_status_line1) = "LEDs on";
+                      id(lcd_status_line2) = "";
+                      ESP_LOGI("button", "Tap 2 - three LED sets");
+                  - script.execute:
+                      id: loft_show_status
+                      seconds: ${lcd_status_pending_seconds}
+                  - script.execute: loft_leds_three_on
+                else:
+                  - if:
+                      condition:
+                        lambda: "return id(loft_btn_stage) == 2;"
+                      then:
+                        - lambda: |-
+                            id(loft_btn_stage) = 3;
+                            id(lcd_status_line1) = "All loft on";
+                            id(lcd_status_line2) = "";
+                            ESP_LOGI("button", "Tap 3 - all loft area lights");
+                        - script.execute:
+                            id: loft_show_status
+                            seconds: ${lcd_status_success_seconds}
+                        - script.execute: loft_leds_all_on
+                      else:
+                        - lambda: |-
+                            id(loft_btn_stage) = 2;
+                            id(lcd_status_line1) = "LEDs on";
+                            id(lcd_status_line2) = "";
+                            ESP_LOGI("button", "Tap - back to three LED sets");
+                        - script.execute:
+                            id: loft_show_status
+                            seconds: ${lcd_status_success_seconds}
+                        - script.execute: loft_leds_only
+
+  - id: loft_leds_three_on
+    mode: restart
+    then:
+      - script.execute:
+          id: loft_publish_cmd
+          cmd: leds_on
+      - delay: ${led_retry_wait_ms}ms
+      - lambda: |-
+          id(loft_retry_main) = !(id(ha_light_loft_main).has_state() &&
+                                  id(ha_light_loft_main).state);
+          id(loft_retry_left) = !(id(ha_light_loft_left).has_state() &&
+                                  id(ha_light_loft_left).state);
+          id(loft_retry_stairs) = !(id(ha_light_loft_stairs).has_state() &&
+                                    id(ha_light_loft_stairs).state);
+          const int on_count =
+              ((id(ha_light_loft_main).has_state() &&
+                id(ha_light_loft_main).state) ? 1 : 0) +
+              ((id(ha_light_loft_left).has_state() &&
+                id(ha_light_loft_left).state) ? 1 : 0) +
+              ((id(ha_light_loft_stairs).has_state() &&
+                id(ha_light_loft_stairs).state) ? 1 : 0);
+          char buf[17];
+          snprintf(buf, sizeof(buf), "%d/3 on", on_count);
+          id(lcd_status_line2) = buf;
+          ESP_LOGI("button",
+                   "LED check main=%s left=%s stairs=%s (retry %d%d%d)",
+                   id(ha_light_loft_main).has_state()
+                     ? (id(ha_light_loft_main).state ? "on" : "off") : "?",
+                   id(ha_light_loft_left).has_state()
+                     ? (id(ha_light_loft_left).state ? "on" : "off") : "?",
+                   id(ha_light_loft_stairs).has_state()
+                     ? (id(ha_light_loft_stairs).state ? "on" : "off") : "?",
+                   id(loft_retry_main) ? 1 : 0,
+                   id(loft_retry_left) ? 1 : 0,
+                   id(loft_retry_stairs) ? 1 : 0);
+      - if:
+          condition:
+            lambda: |-
+              return id(loft_retry_main) || id(loft_retry_left) ||
+                     id(loft_retry_stairs);
+          then:
+            - lambda: |-
+                id(lcd_status_line2) = "retrying";
+                ESP_LOGW("button", "Retry three LED sets");
+            - script.execute:
+                id: loft_show_status
+                seconds: ${lcd_status_pending_seconds}
+            - script.execute:
+                id: loft_publish_cmd
+                cmd: leds_on
+            - delay: ${led_retry_wait_ms}ms
+            - lambda: |-
+                const int on_count =
+                    ((id(ha_light_loft_main).has_state() &&
+                      id(ha_light_loft_main).state) ? 1 : 0) +
+                    ((id(ha_light_loft_left).has_state() &&
+                      id(ha_light_loft_left).state) ? 1 : 0) +
+                    ((id(ha_light_loft_stairs).has_state() &&
+                      id(ha_light_loft_stairs).state) ? 1 : 0);
+                char buf[17];
+                snprintf(buf, sizeof(buf), "%d/3 on", on_count);
+                id(lcd_status_line2) = buf;
+            - script.execute:
+                id: loft_show_status
+                seconds: ${lcd_status_success_seconds}
+          else:
+            - script.execute:
+                id: loft_show_status
+                seconds: ${lcd_status_success_seconds}
+
+  - id: loft_leds_all_on
+    mode: restart
+    then:
+      - script.stop: loft_leds_three_on
+      - script.execute:
+          id: loft_publish_cmd
+          cmd: all_on
+
+  - id: loft_leds_only
+    mode: restart
+    then:
+      - script.stop: loft_leds_all_on
+      - script.execute:
+          id: loft_publish_cmd
+          cmd: leds_only
+
+  - id: loft_room_off
+    mode: restart
+    then:
+      - script.stop: loft_btn_tap
+      - script.stop: loft_leds_three_on
+      - script.stop: loft_leds_all_on
+      - script.stop: loft_leds_only
+      - lambda: |-
+          id(loft_btn_stage) = 0;
+      - script.execute:
+          id: loft_publish_cmd
+          cmd: room_off
+      - delay: ${led_retry_wait_ms}ms
+      - lambda: |-
+          id(loft_retry_main) = id(ha_light_loft_main).has_state() &&
+                                id(ha_light_loft_main).state;
+          id(loft_retry_left) = id(ha_light_loft_left).has_state() &&
+                                id(ha_light_loft_left).state;
+          if (id(loft_retry_main) || id(loft_retry_left)) {
+            id(lcd_status_line2) = "retrying";
+            ESP_LOGW("button", "Retry room off");
+          } else {
+            id(lcd_status_line2) = "stairs stay";
+          }
+      - script.execute:
+          id: loft_show_status
+          seconds: ${lcd_status_success_seconds}
+      - if:
+          condition:
+            lambda: |-
+              return id(loft_retry_main) || id(loft_retry_left);
+          then:
+            - script.execute:
+                id: loft_publish_cmd
+                cmd: room_off
 
 switch:
   - platform: restart
@@ -555,6 +940,24 @@ text_sensor:
     entity_id: ${handl_f_slots_entity}
     attribute: slots
     internal: true
+  # BEDA waste collection (Närab). State is typically
+  # "on Mon, 07.09.2026" or a days-until integer.
+  - platform: homeassistant
+    id: waste_c1_next
+    entity_id: ${waste_c1_entity}
+    internal: true
+  - platform: homeassistant
+    id: waste_c2_next
+    entity_id: ${waste_c2_entity}
+    internal: true
+  # HA automation watches this. Service calls from this device are
+  # rejected until "Allow the device to perform Home Assistant actions"
+  # is enabled, so the button publishes a command instead.
+  - platform: template
+    id: loft_light_command
+    name: "Light Command"
+    icon: mdi:lightbulb-group
+    update_interval: never
 
 binary_sensor:
   - platform: template
@@ -606,9 +1009,54 @@ binary_sensor:
               if (id(pir_motion_start_ms) == 0) {
                 id(pir_motion_start_ms) = millis();
               }
+              id(lcd_dim_until_ms) = millis() + ${dim_hold_seconds} * 1000UL;
             } else {
               id(pir_motion_start_ms) = 0;
             }
+
+  # HA light states so the three-LED script can retry a BLE miss.
+  - platform: homeassistant
+    id: ha_light_loft_main
+    entity_id: ${loft_led_main_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_light_loft_left
+    entity_id: ${loft_led_left_entity}
+    internal: true
+  - platform: homeassistant
+    id: ha_light_loft_stairs
+    entity_id: ${loft_led_stairs_entity}
+    internal: true
+
+  # Push button to GND (internal pull-up, inverted). GPIO10 — GPIO5
+  # pad is damaged. Tap 1 backlight, tap 2 three LED sets, tap 3 all
+  # loft, hold = everything off.
+  - platform: gpio
+    id: loft_lights_button
+    name: "LoftC3 Lights Button"
+    pin:
+      number: ${lights_button_pin}
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 40ms
+      - delayed_off: 40ms
+    on_press:
+      then:
+        - lambda: |-
+            id(loft_btn_hold_fired) = false;
+            ESP_LOGI("button", "Down on %s", "${lights_button_pin}");
+        - script.execute: loft_btn_hold_watch
+    on_release:
+      then:
+        - script.stop: loft_btn_hold_watch
+        - if:
+            condition:
+              lambda: "return !id(loft_btn_hold_fired);"
+            then:
+              - script.execute: loft_btn_tap
 
 display:
   - platform: lcd_pcf8574
@@ -618,49 +1066,10 @@ display:
     update_interval: 500ms
     lambda: |-
       const uint32_t now_ms = millis();
-
-      // ---- Night-mode decision ----
-      // Day starts at 07:00; night starts at sunset OR 23:00, whichever
-      // comes first. Without a valid HA time we default to day so the
-      // boot-up display is visible.
-      auto is_night_mode = [&]() -> bool {
-        if (!id(ha_time).now().is_valid()) {
-          return false;
-        }
-        const int h = id(ha_time).now().hour;
-        if (h < 7 || h >= 23) {
-          return true;
-        }
-        if (id(sun_state).has_state() &&
-            id(sun_state).state == std::string("below_horizon")) {
-          return true;
-        }
-        return false;
-      };
-
-      // ---- Brightness ----
-      // PCF8574 backplane cannot dim by I2C, so > 0 means ON, 0 means OFF.
-      // Defaults are full-day / off-night when the HA helpers don't exist.
-      auto get_brightness = [&]() -> float {
-        const bool night = is_night_mode();
-        const float def = night ? 0.0f : 100.0f;
-        if (night) {
-          return id(lcd_brightness_night).has_state()
-            ? id(lcd_brightness_night).state : def;
-        }
-        return id(lcd_brightness_day).has_state()
-          ? id(lcd_brightness_day).state : def;
-      };
-
-      const bool motion_window_active =
-          (int32_t) (id(lcd_backlight_until_ms) - now_ms) > 0;
-      const float brightness = get_brightness();
-      const bool backlight_on = motion_window_active && (brightness > 0.0f);
-      if (backlight_on) {
-        it.backlight();
-      } else {
-        it.no_backlight();
-      }
+      // PCF8574 backlight pin stays off; GPIO4 PWM is applied in the
+      // 50 ms interval so fade-through-black can run faster than the
+      // LCD refresh.
+      it.no_backlight();
 
       auto fit16 = [](const std::string &raw) -> std::string {
         if (raw.size() >= 16) {
@@ -670,6 +1079,11 @@ display:
         out.append(16 - out.size(), ' ');
         return out;
       };
+      if ((int32_t) (id(lcd_status_until_ms) - now_ms) > 0) {
+        it.print(0, 0, fit16(id(lcd_status_line1)).c_str());
+        it.print(0, 1, fit16(id(lcd_status_line2)).c_str());
+        return;
+      }
       auto scroll16 = [now_ms](const std::string &raw) -> std::string {
         std::string source = raw;
         if (source.empty()) {
@@ -729,9 +1143,85 @@ display:
         return raw.substr(0, 8);
       };
 
+      // BEDA indoor-bin reminder: 18:00 evening before -> collection day.
+      {
+        auto civil_days = [](int y, unsigned m, unsigned d) -> long {
+          y -= (m <= 2);
+          const int era = (y >= 0 ? y : y - 399) / 400;
+          const unsigned yoe = (unsigned) (y - era * 400);
+          const unsigned doy =
+              (153u * (m > 2 ? m - 3 : m + 9) + 2u) / 5u + d - 1u;
+          const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+          return (long) era * 146097L + (long) doe - 719468L;
+        };
+        auto days_until_from_state = [&](const std::string &raw) -> int {
+          if (raw.empty() || raw == "unknown" || raw == "unavailable" ||
+              raw == "none") {
+            return -999;
+          }
+          bool all_num = true;
+          for (char c : raw) {
+            if (!(c == ' ' || c == '-' || (c >= '0' && c <= '9'))) {
+              all_num = false;
+              break;
+            }
+          }
+          if (all_num) {
+            int v = 0;
+            if (sscanf(raw.c_str(), "%d", &v) == 1) {
+              return v;
+            }
+          }
+          int yy = 0;
+          int mm = 0;
+          int dd = 0;
+          if (sscanf(raw.c_str(), "%*[^,], %d.%d.%d", &dd, &mm, &yy) != 3) {
+            if (raw.find('-') != std::string::npos) {
+              if (sscanf(raw.c_str(), "%d-%d-%d", &yy, &mm, &dd) != 3) {
+                return -999;
+              }
+            } else if (sscanf(raw.c_str(), "%d.%d.%d", &dd, &mm, &yy) != 3) {
+              return -999;
+            }
+          }
+          if (yy < 2020 || mm < 1 || mm > 12 || dd < 1 || dd > 31) {
+            return -999;
+          }
+          auto t = id(ha_time).now();
+          if (!t.is_valid()) {
+            return -999;
+          }
+          return (int) (civil_days(yy, (unsigned) mm, (unsigned) dd) -
+                        civil_days((int) t.year, (unsigned) t.month,
+                                   (unsigned) t.day_of_month));
+        };
+        auto due_soon = [&](int days) -> bool {
+          if (days == 0) {
+            return true;
+          }
+          if (days == 1 && id(ha_time).now().is_valid() &&
+              id(ha_time).now().hour >= 18) {
+            return true;
+          }
+          return false;
+        };
+        int d1 = -999;
+        int d2 = -999;
+        if (id(waste_c1_next).has_state()) {
+          d1 = days_until_from_state(id(waste_c1_next).state);
+        }
+        if (id(waste_c2_next).has_state()) {
+          d2 = days_until_from_state(id(waste_c2_next).state);
+        }
+        id(waste_due_c1) = due_soon(d1);
+        id(waste_due_c2) = due_soon(d2);
+        id(waste_today_c1) = (d1 == 0);
+        id(waste_today_c2) = (d2 == 0);
+      }
+
       std::string top = "LoftC3 Display";
       std::string bottom = "Initialising...";
-      const int page = id(display_page_index);
+      const int page = id(lcd_drawn_page_index);
 
       if (page == 0) {
         if (id(ha_time).now().is_valid()) {
@@ -838,7 +1328,7 @@ display:
           top = top_buf;
           bottom = scroll16(id(cal_event_titles)[idx]);
         }
-      } else {
+      } else if (page == 4) {
         const int total = (int) id(notification_ids).size();
         if (total <= 0) {
           top = "Notifications";
@@ -865,6 +1355,25 @@ display:
             body = id(notification_ids)[idx];
           }
           bottom = scroll16(body);
+        }
+      } else {
+        // Page 5 - indoor-bin reminder. Skipped by the rotator unless a
+        // collection is today or from 18:00 the evening before.
+        bool show_c2 = id(waste_due_c2);
+        if (id(waste_due_c1) && id(waste_due_c2)) {
+          show_c2 = (id(waste_show_index) != 0);
+        } else if (id(waste_due_c1)) {
+          show_c2 = false;
+        }
+        const bool today = show_c2 ? id(waste_today_c2) : id(waste_today_c1);
+        top = today ? "Empty today" : "Empty tomorrow";
+        if (show_c2) {
+          bottom = scroll16("C2 food residual newspapers colour glass");
+        } else if (id(waste_due_c1)) {
+          bottom = scroll16("C1 paper plastic metal clear glass");
+        } else {
+          top = "Indoor bins";
+          bottom = "None due";
         }
       }
 
@@ -893,11 +1402,9 @@ interval:
           ESP_LOGI("pir", "PIR state heartbeat: %s",
                    id(loft_pir_motion).state ? "ON" : "OFF");
 
-  # Refresh the backlight hold window once motion has been ON
-  # continuously for `pir_continuous_on_seconds`. The PIR's on_state
-  # handler sets pir_motion_start_ms to the millis() of the rising
-  # edge and clears it on the falling edge, so a brief blip at 3am
-  # never reaches the threshold and the LCD stays dark.
+  # Refresh dim hold while motion is present, and promote to full
+  # brightness once motion has been ON continuously for
+  # `pir_continuous_on_seconds`.
   - interval: 1s
     then:
       - lambda: |-
@@ -905,12 +1412,148 @@ interval:
               ${pir_continuous_on_seconds} * 1000UL;
           static const uint32_t BACKLIGHT_HOLD_MS =
               ${backlight_hold_seconds} * 1000UL;
+          static const uint32_t DIM_HOLD_MS =
+              ${dim_hold_seconds} * 1000UL;
           if (id(pir_motion_start_ms) == 0) {
             return;
           }
-          const uint32_t held = millis() - id(pir_motion_start_ms);
+          const uint32_t now = millis();
+          id(lcd_dim_until_ms) = now + DIM_HOLD_MS;
+          const uint32_t held = now - id(pir_motion_start_ms);
           if (held >= PIR_CONTINUOUS_ON_MS) {
-            id(lcd_backlight_until_ms) = millis() + BACKLIGHT_HOLD_MS;
+            id(lcd_backlight_until_ms) = now + BACKLIGHT_HOLD_MS;
+          }
+
+  # PWM + fade-through-black. Runs faster than the LCD write so a
+  # 100 ms fade is actually 100 ms, not quantized to the 500 ms frame.
+  - interval: 50ms
+    then:
+      - lambda: |-
+          static const uint32_t FADE_OUT_MS = ${fade_thru_black_out_ms};
+          static const uint32_t FADE_IN_MS = ${fade_thru_black_in_ms};
+          static const uint32_t BLACK_MS = ${fade_black_hold_ms};
+          static const int DIM_DAY = ${dim_brightness_day};
+          static const int DIM_NIGHT = ${dim_brightness_night};
+          const uint32_t now = millis();
+
+          auto is_night_mode = [&]() -> bool {
+            if (!id(ha_time).now().is_valid()) {
+              return false;
+            }
+            const int h = id(ha_time).now().hour;
+            if (h < 7 || h >= 23) {
+              return true;
+            }
+            if (id(sun_state).has_state() &&
+                id(sun_state).state == std::string("below_horizon")) {
+              return true;
+            }
+            return false;
+          };
+          auto clamp_pct = [](int p) -> int {
+            if (p < 0) {
+              return 0;
+            }
+            if (p > 100) {
+              return 100;
+            }
+            return p;
+          };
+          auto full_pct = [&]() -> int {
+            if (is_night_mode()) {
+              if (id(lcd_brightness_night).has_state() &&
+                  id(lcd_brightness_night).state > 0.5f) {
+                return clamp_pct((int) (id(lcd_brightness_night).state + 0.5f));
+              }
+              if (id(lcd_brightness_day).has_state()) {
+                return clamp_pct((int) (id(lcd_brightness_day).state + 0.5f));
+              }
+              return 100;
+            }
+            if (id(lcd_brightness_day).has_state()) {
+              return clamp_pct((int) (id(lcd_brightness_day).state + 0.5f));
+            }
+            return 100;
+          };
+
+          const bool full_hold =
+              (int32_t) (id(lcd_backlight_until_ms) - now) > 0;
+          const bool dim_hold =
+              (int32_t) (id(lcd_dim_until_ms) - now) > 0;
+          // Sequence is tied to the 1-minute full backlight window.
+          if (!full_hold && id(loft_btn_stage) != 0) {
+            id(loft_btn_stage) = 0;
+          }
+          int target = 0;
+          if (full_hold) {
+            target = full_pct();
+          } else if (dim_hold) {
+            target = is_night_mode() ? DIM_NIGHT : DIM_DAY;
+          }
+
+          if (FADE_OUT_MS == 0) {
+            id(lcd_fade_phase) = 0;
+            if (id(lcd_drawn_page_index) != id(display_page_index)) {
+              id(lcd_drawn_page_index) = id(display_page_index);
+            }
+          } else {
+            const bool page_pending =
+                id(lcd_drawn_page_index) != id(display_page_index);
+            if (page_pending &&
+                (id(lcd_fade_phase) == 0 || id(lcd_fade_phase) == 3)) {
+              if (id(lcd_pwm_applied_pct) <= 0) {
+                id(lcd_drawn_page_index) = id(display_page_index);
+                id(lcd_fade_phase) = 0;
+              } else {
+                id(lcd_fade_from_pct) = id(lcd_pwm_applied_pct);
+                id(lcd_fade_phase) = 1;
+                id(lcd_fade_start_ms) = now;
+              }
+            }
+          }
+
+          int out_pct = target;
+          if (id(lcd_fade_phase) == 1) {
+            const uint32_t elapsed = now - id(lcd_fade_start_ms);
+            if (elapsed >= FADE_OUT_MS) {
+              out_pct = 0;
+              id(lcd_drawn_page_index) = id(display_page_index);
+              id(loft_lcd_display).update();
+              id(lcd_fade_phase) = 2;
+              id(lcd_fade_start_ms) = now;
+            } else {
+              const float t = (float) elapsed / (float) FADE_OUT_MS;
+              out_pct = (int) (id(lcd_fade_from_pct) * (1.0f - t) + 0.5f);
+            }
+          } else if (id(lcd_fade_phase) == 2) {
+            out_pct = 0;
+            if ((now - id(lcd_fade_start_ms)) >= BLACK_MS) {
+              id(lcd_fade_phase) = 3;
+              id(lcd_fade_start_ms) = now;
+            }
+          } else if (id(lcd_fade_phase) == 3) {
+            const uint32_t elapsed = now - id(lcd_fade_start_ms);
+            const uint32_t in_ms = FADE_IN_MS == 0 ? 1 : FADE_IN_MS;
+            if (elapsed >= in_ms) {
+              out_pct = target;
+              id(lcd_fade_phase) = 0;
+            } else {
+              const float t = (float) elapsed / (float) in_ms;
+              out_pct = (int) (target * t + 0.5f);
+            }
+          }
+
+          out_pct = clamp_pct(out_pct);
+          if (out_pct != id(lcd_pwm_applied_pct)) {
+            id(lcd_pwm_applied_pct) = out_pct;
+            if (out_pct <= 0) {
+              auto call = id(lcd_backlight_light).turn_off();
+              call.perform();
+            } else {
+              auto call = id(lcd_backlight_light).turn_on();
+              call.set_brightness(out_pct / 100.0f);
+              call.perform();
+            }
           }
 
   # Rebuild active calendar events.
@@ -1209,13 +1852,15 @@ interval:
   # Rotate LCD pages. Calendar page dwells on each active event for
   # cal_event_dwell_seconds before advancing; other pages use
   # page_dwell_seconds. When all calendar events have been shown the
-  # cycler moves on to notifications.
+  # cycler moves on to notifications, then the indoor-bin reminder
+  # (skipped unless a collection is in the evening-before / today window).
   - interval: 1s
     then:
       - lambda: |-
-          static const int PAGE_COUNT = 5;
+          static const int PAGE_COUNT = 6;
           static const int PAGE_CALENDAR = 3;
           static const int PAGE_NOTIFY = 4;
+          static const int PAGE_BINS = 5;
           static const uint32_t PAGE_DWELL_MS =
               ${page_dwell_seconds} * 1000UL;
           static const uint32_t CAL_EVENT_DWELL_MS =
@@ -1232,10 +1877,15 @@ interval:
             if (page == PAGE_CALENDAR) {
               id(cal_event_index) = 0;
             }
+            if (page == PAGE_BINS) {
+              id(waste_show_index) = 0;
+            }
             return;
           }
 
           const int cal_total = (int) id(cal_event_titles).size();
+          const int waste_total =
+              (id(waste_due_c1) ? 1 : 0) + (id(waste_due_c2) ? 1 : 0);
           const uint32_t dwell_ms =
               (page == PAGE_CALENDAR && cal_total > 0)
                 ? CAL_EVENT_DWELL_MS
@@ -1256,9 +1906,25 @@ interval:
             return;
           }
 
-          id(display_page_index) = (page + 1) % PAGE_COUNT;
+          if (page == PAGE_BINS && waste_total > 1) {
+            const int next_idx = (id(waste_show_index) + 1) % waste_total;
+            if (next_idx != 0) {
+              id(waste_show_index) = next_idx;
+              return;
+            }
+            id(waste_show_index) = 0;
+          }
+
+          int next = (page + 1) % PAGE_COUNT;
+          if (next == PAGE_BINS && waste_total == 0) {
+            next = (next + 1) % PAGE_COUNT;
+          }
+          id(display_page_index) = next;
           if (id(display_page_index) == PAGE_CALENDAR) {
             id(cal_event_index) = 0;
+          }
+          if (id(display_page_index) == PAGE_BINS) {
+            id(waste_show_index) = 0;
           }
           if (id(display_page_index) == PAGE_NOTIFY) {
             int total = (int) id(notification_ids).size();

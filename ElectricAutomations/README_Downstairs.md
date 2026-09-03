@@ -39,8 +39,10 @@ Clear when spike margin drops below **8%** and level is under **60%**.
 Diagnostic entities: `sensor.downstairs_allrum_mq2_baseline`,
 `sensor.downstairs_allrum_mq2_spike_margin`.
 
-**Flash required** after changing MQ2 logic (re-enable `automation.smoke_downstairs_allrum`
-afterwards — it is turned off while the old firmware leaves the MQ2 binary stuck on):
+**Flash required** after changing MQ2 logic, then re-enable
+`automation.smoke_downstairs_allrum` (it is turned off while the old firmware
+leaves the MQ2 binary stuck on). The binary is healthy when it sits `off` with
+baseline well below the 70% ceiling.
 
 ```bash
 esphome run esphome/Downstairs/DownstairsAllrum.yaml

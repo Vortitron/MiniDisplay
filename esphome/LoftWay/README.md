@@ -7,6 +7,8 @@ ESP32-C3 (SuperMini / devkitm-1) configuration for:
 - Local MQ2 gas/smoke sensing
 - 16x2 I2C LCD dashboard (`lcd_pcf8574`)
 - PIR-driven LCD backlight timeout
+- PWM LCD backlight dimming (external transistor on `GPIO4`)
+- Push button for LCD backlight, then Loft LEDs (hold = all off)
 - Home Assistant calendar + notification display
 
 ## Display Pages (auto-cycle)
@@ -22,6 +24,14 @@ The LCD rotates every 8 seconds:
 4. **Calendar events** — each active event shown for 4 seconds before
    advancing to the next; all events are shown before moving on.
 5. **Notifications** (from HA `input_text` helpers)
+6. **Indoor bins** — shown from **18:00 the evening before** a BEDA
+   collection until the end of collection day (same window as the
+   calendar). Skipped the rest of the week. Reminder to empty indoor
+   bins, not to take the outdoor containers out.
+   - Top: `Empty tomorrow` / `Empty today`
+   - Bottom: scrolls `C2 food residual newspapers colour glass` or
+     `C1 paper plastic metal clear glass`. Cycles between C1 and C2
+     if both are due.
 
 Top row is used for compact numeric/status info, bottom row for descriptive/scrolling text.
 
@@ -32,25 +42,38 @@ as garbage. `Å Ä Ö ö ä å` etc. become their nearest ASCII letters.
 
 ## Backlight Behaviour
 
-- Backlight only turns on when the PIR sees motion **continuously for
-  `pir_continuous_on_seconds`** (default 5 s). Brief blips
-  (settling shadows, a moth) never light the display.
-- After the last continuous-motion window the backlight stays on for
-  `backlight_hold_seconds` (default 20 s).
-- At boot the backlight is forced on for 30 s for setup visibility.
-- Day vs night is decided by the clock + `sun.sun`:
-  - **Day** = 07:00 onwards until **min(sunset, 23:00)**.
-  - **Night** = otherwise (incl. forced after 23:00 even if sun
-    technically up at high latitudes in summer).
-- Brightness during day and night is controlled by two HA helpers
-  (`input_number.loftc3_lcd_brightness_day` and `_night`). The
-  PCF8574 backpack **cannot dim by I2C**, so the firmware currently
-  treats `> 0` as "backlight on" and `0` as "backlight off". The
-  slider values are read from HA anyway so a future hardware-PWM mod
-  can be wired in without touching HA. See "Real dimming requires a
-  hardware mod" below.
+Two brightness levels, both PWM on `GPIO4` (linear, gamma 1.0):
+
+- **Any motion** (PIR rising edge): dim glow immediately.
+  `dim_brightness_day` (default 16%) or `dim_brightness_night`
+  (default 4%, very dim). Holds for `dim_hold_seconds` (8 s) after
+  the last pulse.
+- **Lingering** (PIR ON continuously for `pir_continuous_on_seconds`,
+  default 5 s): full brightness from the HA sliders. Holds for
+  `backlight_hold_seconds` (20 s) after that window. If the night
+  slider is 0, lingering uses the day slider so the LCD still comes
+  up bright when you stand there.
+- At boot the backlight is forced full for 30 s. A short press of
+  the lights button forces full for 60 s.
+
+Day vs night is decided by the clock + `sun.sun`:
+
+- **Day** = 07:00 onwards until **min(sunset, 23:00)**.
+- **Night** = otherwise (incl. forced after 23:00 even if sun
+  technically up at high latitudes in summer).
+
+Between dashboard pages the backlight does a **fade-through-black**
+(`fade_thru_black_out_ms` 450 ms down, `fade_black_hold_ms` 50 ms black,
+`fade_thru_black_in_ms` 120 ms up). Set `fade_thru_black_out_ms` to
+`0` to disable the effect. Calendar event-to-event on the same page
+does not fade.
 
 ## Wiring / Pin Assignments
+
+ESP32-C3 SuperMini GPIOs already taken by the original sensors are
+`GPIO0`–`GPIO3`. Remaining clean pins are `GPIO4`–`GPIO7`, `GPIO10`,
+`GPIO20`, `GPIO21`. Avoid `GPIO8` (onboard LED on many SuperMini
+boards) and `GPIO9` (BOOT button).
 
 | Component | ESP32-C3 pin | Notes |
 |---|---|---|
@@ -59,17 +82,26 @@ as garbage. `Å Ä Ö ö ä å` etc. become their nearest ASCII letters.
 | AHT20 `SDA` | `GPIO1` | Same bus as LCD |
 | AHT20 `SCL` | `GPIO2` | Same bus as LCD |
 | MQ2 analog output (`AO`) | `GPIO0` | ADC input |
-| PIR AM312 output (`OUT`) | `GPIO3` | Motion input, pulldown enabled |
+| PIR AM312 output (`OUT`) | `GPIO3` | Motion input |
+| LCD backlight PWM (transistor base/gate) | `GPIO4` | Via `1 kΩ`. LEDC PWM, not a strapping pin, next to the existing GPIO0–3 wiring |
+| Loft lights push button | `GPIO10` | Momentary N.O. to `GND`, internal pull-up. GPIO5 pad is damaged; do not use GPIO9 (BOOT) or GPIO8 (onboard LED) |
 | LCD1602 + PCF8574 `VCC` | `5V` (or `3.3V` if stable) | 5V gives brighter backlight; use level-safe I2C wiring |
 | MQ2 `VCC` | `5V` | Typical MQ2 boards expect 5V heater supply |
 | PIR AM312 `VCC` | `5V` | See note below - 3.3V is *technically* in spec but unreliable on most AM312 clones |
 | Ground | `GND` | Common ground for all modules |
 
+Pins still free: `GPIO6`, `GPIO7`, `GPIO20`, `GPIO21`. Avoid `GPIO6`
+if the GPIO5 corner of the board is damaged — it is the next pad
+along that edge.
+
 ## LCD Backpack Notes
 
 - Default I2C address is configured as `0x27` via `lcd_i2c_address`.
 - Some boards use `0x3F`; if the display is not found, change that substitution.
-- Keep the backpack backlight jumper fitted if software backlight control is required.
+- The backpack has a 2-pin jumper labelled `LED`, not `BLA`/`BLK`.
+  That jumper is **5V to the LED anode**. Do not put an NPN across it
+  to GND — that shorts USB. Dimming is on the cathode (LCD pin 16);
+  see below.
 - If the LCD backpack is powered at 5V, ensure SDA/SCL are not pulled beyond 3.3V at the ESP32-C3 (level shifter or compatible board).
 
 ## Safety Notes
@@ -85,8 +117,8 @@ These are set in substitutions at the top of `NewLoftWayC3.yaml` and can be chan
 - `sensor.forecast_today_max` - HA template sensor (see `ElectricAutomations/forecast_sensors.yaml`)
 - `sensor.forecast_tonight_min` - HA template sensor (same file)
 - `sun.sun` - HA built-in sun entity
-- `input_number.loftc3_lcd_brightness_day` - 0-100 helper
-- `input_number.loftc3_lcd_brightness_night` - 0-100 helper
+- `input_number.loftc3_lcd_brightness_day` - full brightness when lingering (day)
+- `input_number.loftc3_lcd_brightness_night` - full brightness when lingering (night); 0 falls back to the day slider
 - `input_text.minidisplay_notification_ids`
 - `input_text.minidisplay_notification_titles`
 - `input_text.minidisplay_notification_messages`
@@ -94,8 +126,11 @@ These are set in substitutions at the top of `NewLoftWayC3.yaml` and can be chan
 - `calendar.http_im2_api_infomentor_se_v1_calendarv2_icalsubscription_subscription_8cd9caaa_3f4e_4ee4_b8e8_662e4aa39f09`
 - `calendar.handl_f`
 - `sensor.handl_f_loft_calendar_slots` — multi-event feed for the family calendar (see `ElectricAutomations/loft_calendar_sensors.yaml`)
+- `sensor.waste_collection_schedule_beda_container_1_packaging_of_paper_plastic_metal_and_clear_glass` — BEDA C1 (packaging)
+- `sensor.waste_collection_schedule_beda_container_2_food_waste_residual_waste_newspapers_and_colored_glass` — BEDA C2 (food/residual)
+- `light.loft_lights`, `light.isp_1a3c38_3c38`, `light.isp_0db21e_b21e` — tap-2 LED sets (Loft area)
 
-Family calendar events use the same visibility window as KitchenDetectorer: each event is shown from **18:00 the day before** its start until its end time, so from 6pm you see **tomorrow’s** entries (and any still-active events tonight).
+Family calendar events use the same visibility window as KitchenDetectorer: each event is shown from **18:00 the day before** its start until its end time, so from 6pm you see **tomorrow’s** entries (and any still-active events tonight). The indoor-bin reminder uses that same 18:00-evening-before window against the two BEDA waste-collection sensors.
 
 ### Suggested HA helper YAML
 
@@ -157,40 +192,154 @@ template:
         state: "{{ fc['weather.openweathermap'].forecast[0].templow }}"
 ```
 
-## Real dimming requires a hardware mod
+## LCD backlight dimming (`GPIO4`)
 
-The PCF8574 LCD backpack drives the LCD backlight through a single
-on/off pin on the PCF8574 chip. There is no way to PWM that from
-ESPHome without saturating the I2C bus, so the firmware deliberately
-treats brightness as binary (`>0` = on, `0` = off).
+The PCF8574 backpack can only switch the backlight on or off over I2C.
+Firmware therefore holds that backpack pin **off** (`it.no_backlight()`)
+and PWMs `GPIO4` instead.
 
-To get true dimming:
+These clones have a 2-pin jumper labelled **`LED`**, not `BLA`/`BLK`.
+The jumper sits in the **anode** path:
 
-1. **Cut the backlight jumper** on the back of the PCF8574 board.
-2. Wire a small **NPN transistor (e.g. 2N2222)** or N-MOSFET (e.g.
-   2N7000):
-   - Collector / drain to the backlight `BLA` pad on the LCD side
-     of the cut jumper.
-   - Emitter / source to GND.
-   - Base / gate via a `1 kΩ` resistor to a free **PWM-capable GPIO**
-     on the ESP32-C3 (`GPIO4`, `GPIO5`, `GPIO20` are good options).
-3. Add an `output: ledc` block and a `monochromatic` light component
-   in `NewLoftWayC3.yaml` that drives that GPIO. Replace the current
-   `it.backlight()` / `it.no_backlight()` calls in the display lambda
-   with `id(lcd_backlight_light).turn_on().set_brightness(brightness / 100.0f).perform();`
-   and similar.
+```
+5V (VCC pad) --[LED jumper]-- LCD pin 15 (LED+) --[backlight LEDs]-- LCD pin 16 (LED-) -- resistor -- backpack transistor -- GND
+```
 
-When the hardware mod is in place, the existing `lcd_brightness_day`
-and `lcd_brightness_night` sliders will already feed the right
-values - no HA changes needed.
+With the jumper off, a meter from each pad to GND shows:
+
+- **~5 V** = VCC. Never connect the NPN collector here.
+- **~0 V** (or a couple of volts of leakage) = LED+. The ~−3 V reading
+  across the two pads is just 5 V minus that LED+ voltage with the
+  probes swapped. It is not a cathode.
+
+Putting an NPN from either jumper pad to GND, with the jumper on (or
+from the 5 V pad with the jumper off), saturates 5 V straight to GND
+when GPIO4 goes high at boot. USB then current-limits / drops out.
+That is a short, not a firmware bug. **Unplug the collector wire
+before plugging USB in again.**
+
+### Transistor pinout (TO-92, flat towards you)
+
+A real 2N2222A / PN2222A is **E B C** left to right. Confirm with the
+diode range: base (middle) to each outer pin should read ~0.6 V one
+way only. Cheap “2N2222” parts are sometimes **C B E** (BC547 style);
+if C–E reads as a diode, the pinout is swapped.
+
+### Correct NPN wiring (low-side on the cathode)
+
+1. **Put the LED jumper back on** so pin 15 stays fed from 5 V.
+2. Find **LCD pin 16** (LED−). It is the last pin of the 16-pin LCD
+   header, at the same end as the LED jumper — the pin *next to*
+   pin 15, not either jumper pad. On the solder side it is often a
+   thin track to a small resistor beside a SOT/TO transistor.
+3. Wire:
+   - **E** → ESP `GND`
+   - **C** → LCD **pin 16** (LED− / that resistor’s LCD-side pad)
+   - **B** → `1 kΩ` → **`GPIO4`**
+4. Firmware holds the backpack transistor off, so only this NPN
+   conducts and the day/night sliders are real 0–100 PWM.
+
+The backpack is already soldered through those header pins. A wire on
+the **top** of pin 16 is the intended connection — leave the backpack
+on pin 16. Firmware holds the backpack backlight transistor **off**,
+so pin 16 floats until the external NPN pulls it to GND.
+
+A continuity beep pin 16 → GND that comes and goes is that backpack
+transistor, not a hard short. First beep then open is normal (last
+I2C state, or the meter biasing P3). A **permanent** beep with power
+off and the NPN disconnected would mean pin 16 is tied to GND; this
+board is not that. Do not unsolder pin 16.
+
+Continuity **will not** show the USB-killing fault. A meter’s
+continuity beep is for a near-0 Ω wire. The NPN **B–E junction is a
+diode** (~0.6 V), so GPIO4 (or 5 V / 3.3 V) to GND through E and B
+reads “open” and still crowbars the rail the instant power is applied.
+On the SuperMini, **GPIO4 sits immediately below 5 V / GND / 3.3 V**.
+If the “GPIO4” wire is actually on **5 V** or **3.3 V**, Emitter on
+GND, and there is no 1 kΩ (or the 1 kΩ is bypassed), USB current-limits
+with pin 16 **disconnected**. That is this diode, not a pin-16 short.
+
+Prove it:
+
+1. Remove the transistor entirely (all three leads). Plug USB in. If
+   the port is still unhappy, the 3.3 V regulator may already be
+   wounded from the earlier crowbar — the transistor is no longer the
+   live fault.
+2. If USB is happy with the transistor off, the wiring is wrong. Confirm
+   the PWM wire is on the pad labelled **4**, not `5V` or `3.3V`.
+3. **1 kΩ must be in series with the base.** Without it, B–E is a diode
+   straight onto the rail.
+4. Diode-range on the meter: base (middle) to emitter should be ~0.6 V
+   one way only. Continuity mode will often stay silent.
+
+Watch for a solder blob to **pin 15** (adjacent, 5 V). That is a USB
+crowbar even with the transistor unplugged.
+
+Do not solder the collector to the LED jumper. That jumper is 5 V.
+
+Without the transistor on pin 16 the LCD stays dark (the backpack pin
+is no longer used). Desolder any jumper-pad wiring first, then fit
+the NPN on pin 16 and plug in.
+
+## Loft lights push button (`GPIO10`)
+
+Momentary **normally-open** push button between **`GPIO10` and GND**
+(switches to earth). Internal pull-up, inverted, debounced. The GPIO5
+corner pad is damaged, so the button lives on GPIO10 (further along
+the same header, not BOOT / onboard LED).
+
+Gestures while the 1-minute full backlight window is active. The
+sequence resets when that window expires. Successful light overlays
+last about 2 seconds. Tap 1 does not overlay the dashboard.
+
+- **Tap 1:** LCD backlight full for 60 s. No room lights. No overlay.
+- **Tap 2** (backlight still on): turn on only
+  `light.loft_lights`, `light.isp_1a3c38_3c38`,
+  `light.isp_0db21e_b21e`. Overlay `LEDs on` then `n/3 on`. A miss is
+  retried after 1.5 s. Backlight refreshed another 60 s.
+- **Tap 3:** all lights in HA area `loft`. Overlay `All loft on`.
+- **Tap 4** (all loft already on): back to the three LED sets
+  only (desk/spots off). Overlay `LEDs on`. Another tap goes to
+  all loft again.
+- **Hold (~600 ms):** turn off loft lights **except the stairs**.
+  Overlay `Lights off` / `stairs stay`.
+- **Keep holding (~1 s more), night only:** also turn off the stairs
+  light and turn on `light.gu10_b505z2_2` (loft spot south) for 30 s
+  as a path light. Overlay `Stairs off` / `path 30s`. The GU10 may be
+  unavailable; that call is allowed to fail. Daytime extra hold does
+  nothing — stairs stay on.
+
+The button publishes `sensor.loft_loftc3_light_command`. Automation
+`loftc3_light_command` actually switches the lights. BLE LED sets are
+staggered so the proxy is not flooded.
+
+The ESPHome dashboard “`homeassistant.service` → `homeassistant.action`”
+banner is **not** LoftC3 (this device no longer calls HA actions). It
+appears on BedroomLights, Kitchen Detectorer, MiniDisplay and
+Downstairs Allrum. Click **Update config** on those devices if you
+want the rename applied there.
 
 ## Build/Bring-up Checklist
 
-1. Wire modules according to the pin table.
+1. Wire modules according to the pin table. The `GPIO4` transistor
+   collector goes to LCD **pin 16**, not the `LED` jumper. Leave the
+   jumper on. Button on **`GPIO10` to GND** (not GPIO5).
 2. Flash `NewLoftWayC3.yaml`.
 3. Check boot logs for detected I2C devices (`0x27` or `0x3F`).
-4. Trigger PIR movement and verify backlight timeout behaviour.
-5. Confirm weather/calendar/notification entities exist in Home Assistant.
+4. Confirm the LCD backlight PWM: boot should light it for 30 s; the
+   day slider should dim it. If USB current-limits, the collector is
+   on the 5 V jumper pad — unplug and move it to pin 16. If the LCD
+   stays dark with USB happy, the transistor is on the anode or the
+   LED jumper is off.
+5. Trigger PIR movement and verify backlight timeout behaviour.
+6. Press the GPIO10 button once: LCD should go full for 1 minute.
+   Press again while it is on: the three loft LED sets should come on
+   (staggered; a miss is retried). Press a third time: all Loft-area
+   lights. Press a fourth time: back to the three LED sets only.
+   Hold ~600 ms: loft lights off, stairs stay. Keep holding
+   at night: stairs off and south spot on for 30 s. If nothing
+   happens, confirm the button wire is on GPIO10 not GPIO5.
+7. Confirm weather/calendar/notification entities exist in Home Assistant.
 
 ## Troubleshooting
 
@@ -281,8 +430,9 @@ never produces a state change, work through these in order:
      `pir_pulldown: "true"` or move to a different GPIO via `pir_pin`.
    - If no, the AM312 (or its power supply) is the problem, even with
      5V wired.
-3. **Try a different GPIO.** Set `pir_pin: "GPIO10"` (or `GPIO4`,
-     `GPIO5`, `GPIO20`) and reflash. This rules out a damaged or
+3. **Try a different GPIO.** Set `pir_pin: "GPIO7"` (or `GPIO6`,
+     `GPIO20`) and reflash. Do not steal `GPIO4` (backlight PWM) or
+     `GPIO10` (lights button). This rules out a damaged or
      repurposed input pin.
 4. **Try with `pir_pulldown: "true"`.** Some AM312 boards float `OUT`
    when idle; this nails idle LOW so transitions to HIGH are clean.

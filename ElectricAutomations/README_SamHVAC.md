@@ -340,6 +340,10 @@ live HA list-only `min`/`max` filter semantics).
 - `input_boolean.sam_superchill_active` (source of truth for sam.yaml)
 - `input_datetime.sam_superchill_until` (countdown / expiry)
 - `automation.sync_sam_hvac_with_desired_temperature` (re-triggered on arm/cancel/expiry)
+
+`sam.yaml` **must** keep `id: sync_sam_hvac_with_desired_temperature`. An older
+deploy used `sync_sam_with_sensors` (same alias, no Superchill). If both exist
+they fire together and fight over `climate.sam`.
 - `input_boolean.cheap_leccy` and `input_number.electricity_price_rank` / `…_4h` (smart cooling: cheap-now pre-cool)
 - `input_boolean.on_fixed_price_feed` (suppresses price-driven pre-cool)
 - `sensor.forecast_today_max` (smart cooling: hot-day pre-cool)

@@ -1,5 +1,7 @@
 id: pool_pump_manual_on
 alias: Pool Pump — Manual Switch-On (1 h)
+# Off-season 2026: pool is shut down for the year. Keep YAML, do not run.
+initial_state: false
 description: >-
   If the pool pump switch is turned on while no plan is active (dashboard,
   physical plug button, voice, etc.), arm a 1-hour continuous run — same as

@@ -1,3 +1,4 @@
+id: sync_sam_hvac_with_desired_temperature
 alias: Sync Sam HVAC with Desired Temperature and Energy Saving
 description: >-
   Drives climate.sam (living-room heat pump) from remote room sensors.

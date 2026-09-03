@@ -1,5 +1,7 @@
 id: pool_pump_daily_maintenance
 alias: Pool Pump — Daily Maintenance
+# Off-season 2026: pool is shut down for the year. Keep YAML, do not run.
+initial_state: false
 description: >-
   Ensures at least 3 h/day pool circulation during cheap electricity.
 

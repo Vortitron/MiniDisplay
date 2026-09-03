@@ -205,7 +205,28 @@ def test_cheap_rank_boundary():
 	assert evaluate(ctx)["should_run"] is False
 
 
+def test_scheduler_yaml_does_not_self_trigger_on_counters():
+	"""Writing minutes_remaining / daily_on must not start a second tick."""
+	import pathlib
+
+	import yaml
+
+	cfg = yaml.safe_load(
+		(pathlib.Path(__file__).resolve().parents[1] / "PoolPump.yaml").read_text()
+	)
+	state_entities: list[str] = []
+	for trigger in cfg["triggers"]:
+		if trigger.get("trigger") == "state":
+			state_entities.extend(trigger.get("entity_id") or [])
+	assert "number.pool_pump_minutes_remaining" not in state_entities
+	assert "number.pool_pump_daily_on_minutes" not in state_entities
+	assert "input_number.electricity_price_rank" not in state_entities
+	assert "select.pool_pump_pool_pump_plan" in state_entities
+	assert cfg["actions"][0].get("delay") == {"milliseconds": 800}
+
+
 if __name__ == "__main__":
 	test_pool_pump_cases()
 	test_cheap_rank_boundary()
-	print(f"OK: {len(CASES)} pool pump scenarios + rank boundary passed.")
+	test_scheduler_yaml_does_not_self_trigger_on_counters()
+	print(f"OK: {len(CASES)} pool pump scenarios + rank boundary + trigger hygiene passed.")

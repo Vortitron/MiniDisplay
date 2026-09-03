@@ -1,5 +1,7 @@
 id: pool_pump_price_scheduler
 alias: Pool Pump — Price Scheduler
+# Off-season 2026: pool is shut down for the year. Keep YAML, do not run.
+initial_state: false
 description: >-
   Price-aware pool pump control for `switch.smart_plug_4_socket_1` (5000 L/h pump
   + heater on a 15 000 L pool).
@@ -30,17 +32,20 @@ triggers:
   - trigger: state
     entity_id:
       - select.pool_pump_pool_pump_plan
-      - number.pool_pump_minutes_remaining
       - datetime.pool_pump_pool_pump_plan_until
-      - number.pool_pump_daily_on_minutes
       - input_boolean.cheap_leccy
       - input_boolean.super_expensive_active
       - input_boolean.on_fixed_price_feed
-      - input_number.electricity_price_rank
   - trigger: homeassistant
     event: start
 conditions: []
 actions:
+  # Coalesce time_pattern with cheap_leccy / super_expensive, which often
+  # change on the same 15-min boundary. mode:single only drops overlaps
+  # while a run is still in progress; without this delay a second trigger
+  # 80ms later starts a fresh run and double-counts daily ON / remaining.
+  - delay:
+      milliseconds: 800
   - variables:
       mode: "{{ states(pool_mode_entity) }}"
       mode_cheap: "{{ mode == 'cheap' }}"

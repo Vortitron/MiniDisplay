@@ -1,0 +1,21 @@
+id: "1744360062843"
+alias: Flood off on phone charge
+description: >-
+  Turn off the LED flood when the Pixel 8 has been on charge for 5 s, unless
+  the living-room TV is actually playing (so plugging in during a film does
+  not kill the light). Uses entity ids, not device triggers — those broke when
+  the old phone entity disappeared.
+mode: single
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.pixel_8_is_charging
+    to: "on"
+    for:
+      seconds: 5
+conditions:
+  - condition: template
+    value_template: "{{ states('media_player.lgnano_55') not in ['on', 'playing'] }}"
+actions:
+  - action: light.turn_off
+    target:
+      entity_id: light.led_flood_light

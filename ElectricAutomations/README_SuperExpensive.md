@@ -25,6 +25,11 @@ The threshold is the *ex-VAT* base price ("2 SEK base price"). For the
 VAT-inclusive price use `sensor.nordpool_kwh_se4_sek_3_10_025`, or the all-in
 `sensor.adjusted_nordpool_se4`.
 
+`sensor.adjusted_nordpool_se4` copies Nordpool's full day/tomorrow price arrays
+into attributes. Those exceed the recorder's 16 KiB limit (the native Nordpool
+sensors already mark them unrecorded). Exclude it from history with
+`recorder_exclude.yaml` — live state still works.
+
 ## Helpers
 
 | Entity | Purpose | Default |

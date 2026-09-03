@@ -1,3 +1,4 @@
+id: spot_30d_average
 alias: Spot 30-day Average
 description: >-
   Maintains input_number.spot_30d_avg = rolling mean of the last 30 daily-mean
@@ -23,11 +24,22 @@ actions:
   - variables:
       price_sensor: sensor.nordpool_kwh_se4_sek_3_10_0
       avg_today: "{{ state_attr(price_sensor, 'average') | float(0) }}"
-      buf_raw: "{{ states('input_text.spot_daily_avg_history') }}"
+      # Parse the ring buffer inside this template. Do not assign the comma-
+      # separated history string to its own automation variable — HA promotes
+      # comma-separated template results to a TupleWrapper, and .split() then
+      # fails with "TupleWrapper object has no attribute 'split'".
       buf: >-
+        {% set raw = states('input_text.spot_daily_avg_history') %}
         {% set ns = namespace(items=[]) %}
-        {% for p in buf_raw.split(',') %}
-          {% set q = p | trim %}
+        {% if raw is string %}
+          {% set parts = raw.split(',') %}
+        {% elif raw is iterable and raw is not mapping %}
+          {% set parts = raw %}
+        {% else %}
+          {% set parts = [raw] %}
+        {% endif %}
+        {% for p in parts %}
+          {% set q = p | string | trim %}
           {% if q not in ['', 'unknown', 'unavailable', 'none'] %}
             {% set ns.items = ns.items + [q | float(0)] %}
           {% endif %}
@@ -35,13 +47,15 @@ actions:
         {{ ns.items }}
       append_today: "{{ trigger.id == 'daily' and avg_today > 0 }}"
       new_buf: >-
+        {% set items = buf | list %}
         {% if append_today %}
-          {{ (buf + [avg_today | round(4)])[-30:] }}
+          {{ (items + [avg_today | round(4)])[-30:] }}
         {% else %}
-          {{ buf[-30:] }}
+          {{ items[-30:] }}
         {% endif %}
       new_avg: >-
-        {{ ((new_buf | sum) / (new_buf | length)) | round(4) if (new_buf | length) > 0 else 0 }}
+        {% set items = new_buf | list %}
+        {{ ((items | sum) / (items | length)) | round(4) if items else 0 }}
   - if:
       - condition: template
         value_template: "{{ append_today }}"
@@ -50,7 +64,7 @@ actions:
         target:
           entity_id: input_text.spot_daily_avg_history
         data:
-          value: "{{ new_buf | join(',') }}"
+          value: "{{ new_buf | list | join(',') }}"
   - action: input_number.set_value
     target:
       entity_id: input_number.spot_30d_avg

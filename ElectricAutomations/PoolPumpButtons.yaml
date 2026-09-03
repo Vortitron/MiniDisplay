@@ -1,5 +1,7 @@
 id: pool_pump_arm_plan
 alias: Pool Pump — Arm Plan
+# Off-season 2026: pool is shut down for the year. Keep YAML, do not run.
+initial_state: false
 description: >-
   Arms the pool pump (`switch.smart_plug_4_socket_1`) from dashboard buttons.
   The main scheduler is `PoolPump.yaml`.

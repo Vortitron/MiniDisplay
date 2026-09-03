@@ -83,7 +83,7 @@ GPIO4 is now used to power the I2S microphone.
 
 ## Display Screens
 
-The device cycles through 13 screens (0..12) every 3.5 s. Some are conditionally skipped when their data is unavailable. Numbers without a unit are right-aligned (no trailing blank); numbers with a unit (e.g. `°C`, `h`) keep the unit anchored at the right edge.
+The device cycles through 14 screens (0..13) every 3.5 s. Some are conditionally skipped when their data is unavailable. Numbers without a unit are right-aligned (no trailing blank); numbers with a unit (e.g. `°C`, `h`) keep the unit anchored at the right edge.
 
 (The previous *Air Fryer Power* and *Hours-to-Target* screens have been removed - the device sits next to the air fryer so its power use is already obvious, and the hours-to-target value was rarely useful in practice.)
 
@@ -102,6 +102,7 @@ The device cycles through 13 screens (0..12) every 3.5 s. Some are conditionally
 | 10 | Outside Forecast | scrolled `"Day max XX.XC RAIN 4hr XX.XC"` before 14:00, `"Ngt min XX.XC SUN 4hr XX.XC"` from 14:00 onwards (3 s left-scroll; condition word comes from `sensor.openweathermap_condition` mapped to a 5/6-char abbreviation; missing temperatures render as ` --C`; condition is omitted when its sensor is unknown) | (uses both halves) | - | All three forecast helpers unavailable |
 | 11 | Sam Desired Temp | `Set ` | `%4.1fC` | - | `input_number.sam_desired_temperature` unavailable |
 | 12 | Notifications | `HHMM` static (slots 0..3) - the local time the notification first appeared on the device, captured via `id(homeassistant_time).now()` | sanitised title scrolls leftward over the static `HHMM`, fully obscuring it by the end of the scroll. Scroll RATE is fixed per cell (`NOTIFY_SCROLL_MS_PER_CELL = 200 ms`) so long titles take longer; a manual B8 short press extends the screen hold to "scroll length + 3 s tail" so the entire title gets seen. Multi-notification cases prepend `"N of M "` to the title before scrolling. | LED4 (steady) + alarm flash | No notes and alarm = OK |
+| 13 | Indoor bins (BEDA) | `C1 PACK ` (packaging: paper/plastic/metal/clear glass) or `C2 FOOD ` (food/residual/newspapers/coloured glass). Cycles between the two if both are due. | (uses both halves) | - | **Skipped unless a collection is today, or from 18:00 the evening before** (same window as the calendar). Reminder to empty indoor bins, not to take the outdoor containers out. |
 
 Notes on formatting:
 - The decimal point on the TM1638 is absorbed into the previous digit, so `"%.1f"` only fills 3 display positions for a value like `23.5`. We therefore use `"%5.1f"` (5-char field, leading space) for unit-less floats and `"%4.1fC"` for `°C` values, so the right-most position is always the digit or unit and never a blank.
@@ -266,7 +267,9 @@ The device subscribes to the following Home Assistant entities. Anything missing
 - `input_number.forecast_outside_4h` - 4 h average from HouseThermalModel (subscribed but not shown on forecast screen)
 
 > **Forecast sensors:** include `ElectricAutomations/forecast_sensors.yaml` in HA packages. Do **not** subscribe to `input_number.*` for daily max/min — use the template sensors above.
-- `sensor.openweathermap_condition` - text condition (`rainy`, `sunny`, `partlycloudy` ...); mapped to a short word in the forecast scroll string
+- `sensor.openweathermap_condition` - text condition (`rainy`, `sunny`, `partlycloudy`, ...); mapped to a short word in the forecast scroll string
+- `sensor.waste_collection_schedule_beda_container_1_packaging_of_paper_plastic_metal_and_clear_glass` - next BEDA C1 (packaging) collection. Drives screen 13.
+- `sensor.waste_collection_schedule_beda_container_2_food_waste_residual_waste_newspapers_and_colored_glass` - next BEDA C2 (food/residual) collection. Drives screen 13.
 - `input_number.sam_desired_temperature` - User-facing Sam desired temperature (changed by Button 6)
 - `input_number.airfryer_beep_threshold` *(optional helper)* - Peak amplitude above which `binary_sensor.airfryer_beep` will trip on loudness. Default 50 if the helper is absent. Recommended HA helper config: min 1, max 32000, step 10.
 - `input_number.airfryer_zc_threshold` *(optional helper)* - Zero-crossing rate (frequency proxy) above which `binary_sensor.airfryer_beep` will trip on pitch. **Default 0.30 if the helper is absent** (was 0.20 - the user's measured-with-an-app beep is 4000 Hz, so ZC at 16 kHz sample rate is ~0.50; 0.30 leaves a comfortable margin above ALL non-tonal household noise (voice/hum/thuds top out at ~0.10) while still passing real beeps). Recommended HA helper config: min 0.05, max 0.50, step 0.01. Lower to 0.20 if the mic is far away from the fryer and reflections are dulling the beep's measured ZC; raise to 0.40 if a particularly tonal noise source (e.g. a kettle) keeps getting through.
@@ -357,6 +360,8 @@ For each calendar the device subscribes to the `message`, `start_time` and `end_
 ```
 
 (If `end_time` is unavailable, a default 1 h duration is assumed.)
+
+The indoor-bin reminder (screen 13) uses the same **18:00 the evening before** rule against the two BEDA `waste_collection_schedule` sensors. It is a nudge to empty indoor bins, not to put the outdoor containers out, and is skipped entirely when no collection is in that window.
 
 This implements the user-facing rule: *"after 6 pm, unless there are evening events tonight, start showing the next day"* - tomorrow's events become visible at 18:00 today. If there are still active events tonight (whose `end_time` hasn't passed) they remain in the list alongside tomorrow's, and the cycler walks through both - so the user only sees tomorrow when tonight is empty.
 

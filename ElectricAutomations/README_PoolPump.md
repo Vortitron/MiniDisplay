@@ -1,5 +1,10 @@
 # Pool Pump — Price-Optimised Control
 
+**Off-season (from Aug 2026):** the pool is shut down for the year. All four
+automations are `initial_state: false` and turned **off** on GamlaBio. Plan
+select is `off`. Re-enable in spring by removing `initial_state: false` (or
+setting it `true`), deploying, and turning the automations on.
+
 ## Hardware
 
 - **Switch:** `switch.smart_plug_4_socket_1` (retasked from air fryer)
@@ -54,6 +59,12 @@ Maintenance runs only during **cheap** electricity (same rules as cheap windows)
 | Buttons | `button.pool_cheap_windows`, `pool_extended_run`, `pool_pump_run_1_hour`, `pool_stop` |
 
 All pool MQTT entities are assigned to the **Back Garden** area via device discovery.
+
+The scheduler must **not** trigger on `number.pool_pump_minutes_remaining` or
+`number.pool_pump_daily_on_minutes` — it writes those itself, and a second run
+80 ms later double-counts the 15-minute tick. Price-rank is also omitted (the
+`/15` time pattern already covers it). A short start delay coalesces
+`cheap_leccy` / `super_expensive` when they flip on the same quarter-hour.
 
 ## Automations
 
