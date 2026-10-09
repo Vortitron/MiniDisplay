@@ -1,0 +1,291 @@
+# BILRESA dual button, Button (2) → Bio lights.
+#
+# The BILRESA is a Matter Generic Switch: it reports presses as event
+# entities (multi_press_1 / multi_press_2 / long_press / long_release)
+# and does not send On/Off commands itself, so it cannot be bound to a
+# light. The Bio lights are Tuya anyway. Everything is done here.
+#
+# Tap         cycles Gold only → All → Flood only → Off → Gold only ...
+#             Each step that lights something re-applies the dim
+#             preset: Gold candle, flood warm white.
+#             A tap more than idle_off_s (60 s) after this button's last
+#             press turns the lights off instead, wherever the cycle is.
+# Double tap  all Bio lights off from any step (shortcut).
+# Hold        from off: both on at 50% (Gold candle, flood warm white);
+#             keep holding and after 1.5 s both go to 100% daylight.
+#             With something lit: the lit lights jump to 100% daylight,
+#             then fade down in steps until the button is let go.
+#             mode: restart makes long_release cancel the step or fade.
+# Both        holding both buttons is "Going Out" (BilresaGoingOut.yaml).
+#             This automation stands aside for that; tapping both just
+#             acts on each button.
+#
+# Anything that turns a light on also raises the Sam desired temperature
+# to home_temp_c if it is lower: someone is in.
+#
+# Both-buttons detection (holds only): a hold waits 0.5 s before acting.
+# The sibling button is a trigger too, but only gets past the conditions
+# when both buttons were held inside the window (`combo`). It then
+# restarts this run, which drops the pending hold and stops. If the
+# sibling fired first, this button's own hold sees `combo` and stops the
+# same way. Taps do not wait (2026-09-27: the 0.5 s made the buttons feel
+# sluggish), so tapping both simply acts on both buttons.
+#
+# The step is worked out from which lights are on, so there is no
+# helper to drift out of sync with a light switched by hand.
+#
+# Variables at each level are constants or depend only on earlier
+# blocks: fetched configs come back key-sorted, which would break
+# references between siblings.
+alias: BILRESA button - Bio
+id: bilresa_bio_button
+description: >-
+  BILRESA Button (2). Tap cycles Gold → All → Flood only → Off, dim (Gold
+  candle, flood warm white); the first tap after a minute turns them off.
+  Double tap turns the Bio off. Hold from off: both on at 50% warm, then 100% daylight if still
+  held. Hold with something lit: 100% daylight, fading down until let go.
+  Turning lights on raises the desired temperature to 20 °C. Holding both
+  buttons is Going Out.
+mode: restart
+variables:
+  own: event.bilresa_dual_button_button_2
+  remote_update: update.bilresa_dual_button_firmware
+  home_temp_c: 20
+  idle_off_s: 60
+  gold: light.gold_light
+  flood: light.bio_floodlight
+  dim_pct: 20
+  # Candle is ~1900 K, below these bulbs' 2700 K floor, so Gold uses colour.
+  gold_candle_hs: [30, 85]
+  flood_warm_k: 2700
+  daylight_k: 6500
+  fade_step_pct: 5
+  fade_floor_pct: 5
+  warm_hold_pct: 50
+  hold_step_s: 1.5
+  # True when both buttons were HELD (long_press) in the last 0.5 s:
+  # that is Going Out. Taps are never a combo, so they act at once.
+  # Self-contained on purpose: sibling variables may be evaluated in any
+  # order, so it names its entities and window itself.
+  combo: >-
+    {% set ns = namespace(both=true) %}
+    {% for e in ['event.bilresa_dual_button_button_2',
+                 'event.bilresa_dual_button_button_1'] %}
+      {% set s = states[e] %}
+      {% set t = as_datetime(s.state, none) if s else none %}
+      {% if t is none or s.attributes.event_type != 'long_press'
+            or (now() - t).total_seconds() > 0.5 %}
+        {% set ns.both = false %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.both }}
+triggers:
+  - trigger: state
+    entity_id:
+      - event.bilresa_dual_button_button_2
+      - event.bilresa_dual_button_button_1
+conditions:
+  # An event entity coming back from unavailable restores its old
+  # timestamp; that is not a press.
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none
+         and trigger.from_state.state != 'unavailable'
+         and trigger.to_state.state not in ['unknown', 'unavailable'] }}
+  # BILRESA events sometimes arrive twice, 3-20 ms apart (the kid's-room
+  # remote does it on every press). Drop the copy: same event type as the
+  # previous event on this button, under 0.3 s later. A quick hold can
+  # put long_press and long_release 0.2 s apart, so the type must match.
+  - condition: template
+    value_template: >-
+      {% set prev = as_datetime(trigger.from_state.state, none) %}
+      {% set cur = as_datetime(trigger.to_state.state, none) %}
+      {{ prev is none or cur is none
+         or trigger.from_state.attributes.event_type != trigger.to_state.attributes.event_type
+         or (cur - prev).total_seconds() > 0.3 }}
+  # While this remote's firmware update runs, the Matter server keeps
+  # reconnecting to it, and the remote can re-send old presses from its
+  # buffer (seen 2026-09-26: clicking Update in HA replayed yesterday's
+  # both-buttons test and a later tap). Ignore it until the update is done.
+  - condition: template
+    value_template: "{{ not is_state_attr(remote_update, 'in_progress', true) }}"
+  # The sibling only gets in as the second half of a both-buttons press.
+  - condition: template
+    value_template: "{{ trigger.entity_id == own or combo }}"
+actions:
+  # Both buttons within the window, whichever fired first.
+  - if:
+      - condition: template
+        value_template: "{{ combo }}"
+    then:
+      - stop: Both buttons pressed; BILRESA Going Out handles it
+  - variables:
+      press: "{{ trigger.to_state.attributes.event_type }}"
+      # No press on this button for idle_off_s: a tap turns the lights off.
+      # from_state is this button's previous event.
+      idle: >-
+        {% set t = as_datetime(trigger.from_state.state, none) %}
+        {{ t is none or (now() - t).total_seconds() > idle_off_s }}
+  - if:
+      - condition: template
+        value_template: "{{ press != 'long_release' }}"
+    then:
+      # Holds: 0.5 s for the other button's hold to arrive (Going Out).
+      # Taps: 0.1 s, so a backlog of stored-up presses that the Matter
+      # server delivers all at once (2026-10-03 and 2026-10-05: up to seven
+      # within 40 ms) acts only on the last one. Each later press restarts
+      # this run (mode: restart) before the earlier one acts. Live presses
+      # are never that close together.
+      - delay:
+          milliseconds: "{{ 500 if press == 'long_press' else 100 }}"
+  - variables:
+      gold_on: "{{ is_state(gold, 'on') }}"
+      flood_on: "{{ is_state(flood, 'on') }}"
+  - variables:
+      lights_going_on: >-
+        {{ press == 'long_press'
+           or (press == 'multi_press_1'
+               and not (idle and (gold_on or flood_on))
+               and not (flood_on and not gold_on)) }}
+  - if:
+      - condition: template
+        value_template: >-
+          {{ lights_going_on
+             and is_state('input_boolean.holiday_mode', 'off')
+             and states('input_number.sam_desired_temperature') | float(99) < home_temp_c }}
+    then:
+      - action: input_number.set_value
+        continue_on_error: true
+        target:
+          entity_id: input_number.sam_desired_temperature
+        data:
+          value: "{{ home_temp_c }}"
+  - choose:
+      - conditions: "{{ press == 'multi_press_1' }}"
+        sequence:
+          - choose:
+              # First tap in a while, something lit → Off
+              - conditions: "{{ idle and (gold_on or flood_on) }}"
+                sequence:
+                  - action: light.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id:
+                        - "{{ gold }}"
+                        - "{{ flood }}"
+              # Gold only → All
+              - conditions: "{{ gold_on and not flood_on }}"
+                sequence:
+                  - action: light.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ gold }}"
+                    data:
+                      brightness_pct: "{{ dim_pct }}"
+                      hs_color: "{{ gold_candle_hs }}"
+                  - action: light.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ flood }}"
+                    data:
+                      brightness_pct: "{{ dim_pct }}"
+                      color_temp_kelvin: "{{ flood_warm_k }}"
+              # All → Flood only
+              - conditions: "{{ gold_on and flood_on }}"
+                sequence:
+                  - action: light.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ gold }}"
+                  - action: light.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ flood }}"
+                    data:
+                      brightness_pct: "{{ dim_pct }}"
+                      color_temp_kelvin: "{{ flood_warm_k }}"
+              # Flood only → Off
+              - conditions: "{{ flood_on and not gold_on }}"
+                sequence:
+                  - action: light.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ flood }}"
+            # Off → Gold only
+            default:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ gold }}"
+                data:
+                  brightness_pct: "{{ dim_pct }}"
+                  hs_color: "{{ gold_candle_hs }}"
+      - conditions: "{{ press == 'multi_press_2' }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id:
+                - "{{ gold }}"
+                - "{{ flood }}"
+      # Hold from off: skip the first step, both lights on at
+      # warm_hold_pct in their warm settings. Still held after hold_step_s:
+      # 100% daylight, and stop there. (Letting go restarts this run, which
+      # cancels the step.)
+      - conditions: "{{ press == 'long_press' and not gold_on and not flood_on }}"
+        sequence:
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ gold }}"
+            data:
+              brightness_pct: "{{ warm_hold_pct }}"
+              hs_color: "{{ gold_candle_hs }}"
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ flood }}"
+            data:
+              brightness_pct: "{{ warm_hold_pct }}"
+              color_temp_kelvin: "{{ flood_warm_k }}"
+          - delay:
+              seconds: "{{ hold_step_s }}"
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id:
+                - "{{ gold }}"
+                - "{{ flood }}"
+            data:
+              brightness_pct: 100
+              color_temp_kelvin: "{{ daylight_k }}"
+      - conditions: "{{ press == 'long_press' }}"
+        sequence:
+          - variables:
+              lit: "{{ [gold, flood] | select('is_state', 'on') | list }}"
+          - variables:
+              hold_targets: "{{ lit if lit | count > 0 else [gold, flood] }}"
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ hold_targets }}"
+            data:
+              brightness_pct: 100
+              color_temp_kelvin: "{{ daylight_k }}"
+          # A beat at full before the fade starts, so a short hold is
+          # just "full daylight".
+          - delay:
+              milliseconds: 800
+          - repeat:
+              count: "{{ ((100 - fade_floor_pct) / fade_step_pct) | int }}"
+              sequence:
+                - action: light.turn_on
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ hold_targets }}"
+                  data:
+                    brightness_pct: "{{ 100 - fade_step_pct * repeat.index }}"
+                - delay:
+                    milliseconds: 350
+      # long_release: nothing to do. Starting this run has already
+      # cancelled the fade (mode: restart).

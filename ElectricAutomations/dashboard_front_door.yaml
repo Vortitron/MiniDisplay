@@ -1,0 +1,96 @@
+# Front door dashboard for the Saga by the door (Fully Kiosk, landscape).
+# Fully's start URL: http://192.168.1.15:8123/front-door/door
+title: Front door
+views:
+  - title: Door
+    path: door
+    type: sections
+    max_columns: 3
+    dense_section_placement: true
+    sections:
+      - type: grid
+        column_span: 3
+        visibility:
+          - condition: state
+            entity: sensor.door_message
+            state_not:
+              - ""
+              - unknown
+              - unavailable
+        cards:
+          - type: markdown
+            content: "## {{ states('sensor.door_message') }}"
+            text_only: true
+            grid_options:
+              columns: full
+      - type: grid
+        cards:
+          - type: clock
+            clock_size: large
+            grid_options:
+              columns: full
+          - type: weather-forecast
+            entity: weather.openweathermap
+            forecast_type: daily
+            show_current: true
+            show_forecast: true
+            grid_options:
+              columns: full
+          - type: tile
+            entity: sensor.skanes_fagerhult_road_temperature
+            name: Road
+            icon: mdi:road-variant
+          - type: tile
+            entity: sensor.skanes_fagerhult_air_temperature
+            name: Outside
+      - type: grid
+        cards:
+          - type: tile
+            entity: sensor.journey_markaryd
+            name: Stables
+            grid_options:
+              columns: full
+          - type: tile
+            entity: sensor.journey_orkelljunga
+            name: Pool
+            grid_options:
+              columns: full
+          - type: tile
+            entity: sensor.waste_collection_schedule_beda_container_1_packaging_of_paper_plastic_metal_and_clear_glass
+            name: Bin 1 · packaging
+            icon: mdi:recycle
+            grid_options:
+              columns: full
+          - type: tile
+            entity: sensor.waste_collection_schedule_beda_container_2_food_waste_residual_waste_newspapers_and_colored_glass
+            name: Bin 2 · food & rest
+            icon: mdi:trash-can
+            grid_options:
+              columns: full
+          - type: tile
+            entity: sensor.nordpool_kwh_se4_sek_3_10_025
+            name: Electricity now
+            grid_options:
+              columns: full
+      - type: grid
+        cards:
+          - type: picture-entity
+            entity: camera.front_door_snapshot
+            name: Front door
+            show_state: false
+            # Tap: saved stills in the media browser. Hold: take one now.
+            tap_action:
+              action: navigate
+              navigation_path: /media-browser/browser/app%2Cmedia-source%3A%2F%2Fmedia_source/%2Cmedia-source%3A%2F%2Fmedia_source%2Flocal%2Ffrontdoor
+            hold_action:
+              action: perform-action
+              perform_action: automation.trigger
+              target:
+                entity_id: automation.front_door_snapshot
+            grid_options:
+              columns: full
+          - type: tile
+            entity: light.front_porch
+            name: Porch light
+            grid_options:
+              columns: full

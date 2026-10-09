@@ -34,6 +34,37 @@ services:
         max-file: "3"
         max-size: "1m"
 
+  matterjs-server:
+    # Local Matter controller (matter.js server 1.4.0 = what the HA add-on
+    # 9.2.0 bundles), replacing the GamlaBio Hosted add-on so Matter traffic
+    # stays in the house instead of crossing the HomeLink VPN. Behind a
+    # profile so a plain `docker compose up -d` never starts it: it must
+    # only run while the add-on is stopped (same fabric, same controller).
+    # Started by matter_local.sh; runbook in MATTER_LOCAL_MIGRATION.md.
+    profiles: ["matter-local"]
+    container_name: matterjs-server
+    image: ghcr.io/matter-js/matterjs-server:1.4.0
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /root/otbr/matterjs_data:/data
+    environment:
+      STORAGE_PATH: /data
+      # Must match the HA add-on's controller, or the server ignores the
+      # copied storage (data/server-2-134b) and starts an empty fabric of
+      # its own (data/server-1-fff1, default vendor 0xFFF1 / fabric 1).
+      VENDOR_ID: "4939"   # 0x134B, Nabu Casa
+      FABRIC_ID: "2"
+      BLE_PROXY: "true"   # as the add-on had: commissioning via HA's BLE proxies
+      PRIMARY_INTERFACE: end0
+      PORT: "5580"
+      LOG_LEVEL: info
+    logging:
+      driver: "json-file"
+      options:
+        max-file: "3"
+        max-size: "1m"
+
   matter-server:
     # Leftover from the abandoned on-Pi Matter Server path (SETUP_LOG section 11-12).
     # HA uses the Supervisor Matter Server add-on instead. Leaving this running

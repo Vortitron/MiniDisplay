@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from ast import literal_eval
 
-from jinja2 import Environment
+from jinja2 import Environment, pass_context
 
 
 def _ha_min(value):
@@ -48,6 +48,31 @@ def _ha_max(value):
 _ENV = Environment()
 _ENV.filters["min"] = _ha_min
 _ENV.filters["max"] = _ha_max
+
+
+@pass_context
+def _is_state(ctx, entity_id, state):
+	"""HA is_state(), backed by a `_states` dict in the render context.
+
+	Lets the chain templates below stay byte-identical to DaytimeCheapHeat.yaml
+	instead of being paraphrased into plain variables.
+	"""
+	return ctx.get("_states", {}).get(entity_id) == state
+
+
+@pass_context
+def _states_fn(ctx, entity_id):
+	return ctx.get("_states", {}).get(entity_id, "unknown")
+
+
+@pass_context
+def _state_attr(ctx, entity_id, attr):
+	return ctx.get("_attrs", {}).get(entity_id, {}).get(attr)
+
+
+_ENV.globals["is_state"] = _is_state
+_ENV.globals["states"] = _states_fn
+_ENV.globals["state_attr"] = _state_attr
 
 
 def _parse_result(text: str):
@@ -99,8 +124,6 @@ CONTROL_TEMPLATE = (
 	"  {% else %}"
 	"    {{ [d, evening_hold_floor + 1] | max }}"
 	"  {% endif %}"
-	"{% elif cheap_for_boost and outside_temp < 10 %}"
-	"  {{ prewarm_max }}"
 	"{% elif use_prewarm_25_evening %}"
 	"  {{ prewarm_control_target }}"
 	"{% elif cheap_for_boost %}"
@@ -110,7 +133,7 @@ CONTROL_TEMPLATE = (
 	"  {% else %}"
 	"    {{ boosted }}"
 	"  {% endif %}"
-	"{% elif price_rank > price_rank_4h and not tv_on %}"
+	"{% elif electricity_expensive_now %}"
 	"  16"
 	"{% else %}"
 	"  {{ d }}"
@@ -169,6 +192,8 @@ def _control_ctx(**over):
 		price_rank=6,
 		price_rank_4h=4,
 		tv_on=False,
+		on_fixed_price=False,
+		electricity_expensive_now=True,
 		living_temp=17.4,
 	)
 	ctx.update(over)
@@ -200,8 +225,18 @@ def test_control_other_branches_unchanged():
 	# Expensive, no TV, no boost -> 16.
 	assert float(render(CONTROL_TEMPLATE, _control_ctx(
 		cheap_for_boost=False, use_prewarm_25_evening=False))) == 16
-	# Cheap + very cold outside -> max overheat.
-	assert float(render(CONTROL_TEMPLATE, _control_ctx(outside_temp=5))) == 25
+	# Relative-dear but below today's average must not coast below a higher
+	# desired (10 Sep 2026 morning: rank 15/11 at 0.66 SEK vs avg 1.23).
+	assert float(render(CONTROL_TEMPLATE, _control_ctx(
+		cheap_for_boost=False, use_prewarm_25_evening=False,
+		electricity_expensive_now=False, desired=20))) == 20
+	# Genuinely expensive still coasts to 16 even if desired is higher.
+	assert float(render(CONTROL_TEMPLATE, _control_ctx(
+		cheap_for_boost=False, use_prewarm_25_evening=False,
+		electricity_expensive_now=True, desired=20))) == 16
+	# Cheap + very cold outside no longer means a flat 25°C: it routes through
+	# the model-sized pre-warm like every other cheap hour (Sep 2026).
+	assert float(render(CONTROL_TEMPLATE, _control_ctx(outside_temp=5))) == 24.2
 
 
 # Must match DaytimeCheapHeat.yaml `hours_until_19` exactly (post-fix).
@@ -302,6 +337,207 @@ def test_hot_day_morning_skip():
 	assert hot_afternoon["suppress_morning_heat"] is False
 
 
+# --- Sep 2026: absolute price gate + bounded pre-warm window -----------------
+# Must match DaytimeCheapHeat.yaml exactly.
+NORDPOOL = "sensor.nordpool_kwh_se4_sek_3_10_025"
+
+PRICE_GATE_CHAIN = {
+	"electricity_cheap_now": "{{ price_rank < price_rank_4h and not on_fixed_price }}",
+	"price_genuinely_cheap": (
+		"{{ is_state('input_boolean.cheap_leccy', 'on') "
+		"or price_rank <= cheap_rank_ceiling }}"
+	),
+	"cheap_for_boost": (
+		"{{ electricity_cheap_now and price_genuinely_cheap "
+		"and not evening_hours_block_boost "
+		"and not suppress_morning_heat }}"
+	),
+	"nordpool_price": "{{ states('sensor.nordpool_kwh_se4_sek_3_10_025') | float(0) }}",
+	"nordpool_average": (
+		"{{ state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'average') "
+		"| float(nordpool_price) }}"
+	),
+	"price_genuinely_expensive": "{{ nordpool_price >= nordpool_average }}",
+	"electricity_expensive_now": (
+		"{{ price_rank > price_rank_4h and price_genuinely_expensive "
+		"and not tv_on and not on_fixed_price }}"
+	),
+}
+
+WINDOW_CHAIN = {
+	"cold_outside": "{{ outside_temp < cold_outside_threshold }}",
+	"prewarm_window_start": "{{ 13 if cold_outside else 15 }}",
+	"approaching_evening": (
+		"{{ current_hour | int >= prewarm_window_start | int "
+		"and current_hour | int < 19 }}"
+	),
+}
+
+USE_PREWARM = (
+	"{{ cheap_for_boost and approaching_evening"
+	" and not prewarm_skip_comfortable"
+	" and not prewarm_skip_mild_night"
+	" and not prewarm_skip_on_track"
+	" and (not living_ok or living_temp < 19) }}"
+)
+
+GATE_CONSTS = {
+	"cheap_rank_ceiling": 11,
+	"cold_outside_threshold": 10,
+	"on_fixed_price": False,
+	"evening_hours_block_boost": False,
+	"suppress_morning_heat": False,
+	"tv_on": False,
+}
+
+
+def _nordpool(price, average):
+	return {
+		"_states": {
+			"input_boolean.cheap_leccy": "off",
+			NORDPOOL: str(price),
+		},
+		"_attrs": {NORDPOOL: {"average": average}},
+	}
+
+
+def test_price_gate_rejects_the_run_up_into_a_peak():
+	"""Real Nordpool shape, 3 Sep 2026 (SE4), replayed through both rank
+	templates. The relative test alone calls the run-up into each peak "cheap"."""
+	# hour: (rank, rank_4h, SEK/kWh) — hours 6 and 18 are among the DEAREST of
+	# the day, yet rank < rank_4h because the hours after them are worse still.
+	day = {
+		3: (1, 8, 0.32),
+		6: (15, 18, 1.85),
+		14: (6, 9, 0.51),
+		18: (17, 21, 2.14),
+	}
+	expected_boost = {3: True, 6: False, 14: True, 18: False}
+	for hour, (rank, rank4, _price) in day.items():
+		ctx = _render_chain(PRICE_GATE_CHAIN, dict(
+			GATE_CONSTS, price_rank=rank, price_rank_4h=rank4,
+			_states={"input_boolean.cheap_leccy": "off"}))
+		# The relative signal fires for all four of these hours...
+		assert ctx["electricity_cheap_now"] is True, hour
+		# ...but only the genuinely cheap ones survive the absolute bar.
+		assert ctx["cheap_for_boost"] is expected_boost[hour], (
+			f"hour {hour} (rank {rank}): {ctx['cheap_for_boost']}")
+
+
+def test_cheap_leccy_is_an_absolute_escape_hatch():
+	"""A dear-looking rank still boosts if the day's average is dearer still."""
+	ctx = _render_chain(PRICE_GATE_CHAIN, dict(
+		GATE_CONSTS, price_rank=15, price_rank_4h=18,
+		_states={"input_boolean.cheap_leccy": "on"}))
+	assert ctx["cheap_for_boost"] is True
+
+
+def test_below_average_morning_is_not_called_expensive():
+	"""Live 10 Sep 2026 09:40 SE4: 0.657 SEK, daily avg 1.23, rank 15 vs 4h 11.
+
+	Overnight was 0.16 SEK so this hour ranked in the dearer half of the day,
+	and the relative test (rank > rank_4h) called it 'Electricity expensive'.
+	In kronor it was cheap — below today's average, with an evening of 4–6 SEK.
+	"""
+	live = _render_chain(PRICE_GATE_CHAIN, dict(
+		GATE_CONSTS, price_rank=15, price_rank_4h=11, **_nordpool(0.657, 1.234875)))
+	assert live["electricity_cheap_now"] is False
+	assert live["price_genuinely_cheap"] is False
+	assert live["price_genuinely_expensive"] is False
+	assert live["electricity_expensive_now"] is False
+	# The relative-only test (what the MiniDisplay was showing) still fires.
+	assert live["price_rank"] > live["price_rank_4h"]
+
+	# Same ranks, but a price that really is above today's average -> coast.
+	dear = _render_chain(PRICE_GATE_CHAIN, dict(
+		GATE_CONSTS, price_rank=15, price_rank_4h=11, **_nordpool(2.5, 1.234875)))
+	assert dear["price_genuinely_expensive"] is True
+	assert dear["electricity_expensive_now"] is True
+
+	# TV on still protects comfort even when the price is genuinely dear.
+	watching = _render_chain(PRICE_GATE_CHAIN, dict(
+		GATE_CONSTS, tv_on=True, price_rank=18, price_rank_4h=10,
+		**_nordpool(2.5, 1.234875)))
+	assert watching["electricity_expensive_now"] is False
+
+
+def test_prewarm_window_widens_when_cold():
+	cases = [
+		# (outside, hour, in window?)
+		(15, 14, False), (15, 15, True), (15, 18, True), (15, 19, False),
+		(5, 12, False), (5, 13, True), (5, 18, True), (5, 19, False),
+		(5, 3, False), (15, 3, False),  # never overnight
+	]
+	for outside, hour, expected in cases:
+		ctx = _render_chain(WINDOW_CHAIN, dict(
+			GATE_CONSTS, outside_temp=outside, current_hour=hour))
+		assert ctx["approaching_evening"] is expected, (
+			f"outside={outside} hour={hour}: {ctx['approaching_evening']}")
+		assert ctx["prewarm_window_start"] == (13 if outside < 10 else 15)
+
+
+# The pre-Sep-2026 ladder, kept to prove what the change actually stops.
+OLD_COLD_BRANCH_CONTROL = (
+	CONTROL_TEMPLATE
+	.replace(
+		"{% elif use_prewarm_25_evening %}",
+		"{% elif cheap_for_boost and outside_temp < 10 %}"
+		"  {{ prewarm_max }}"
+		"{% elif use_prewarm_25_evening %}",
+	)
+)
+
+
+def test_no_overnight_25c_blast():
+	"""The headline fix: a cold, genuinely cheap 03:00 no longer drives the
+	house to 25°C. At the learned tau (~6 h) only ~7% of that overshoot would
+	still be there at 19:00, so it was ~93% wasted."""
+	gate = _render_chain(PRICE_GATE_CHAIN, dict(
+		GATE_CONSTS, price_rank=1, price_rank_4h=8,
+		_states={"input_boolean.cheap_leccy": "off"}))
+	window = _render_chain(WINDOW_CHAIN, dict(
+		GATE_CONSTS, outside_temp=2, current_hour=3))
+	assert gate["cheap_for_boost"] is True      # genuinely cheap
+	assert window["approaching_evening"] is False  # but nowhere near evening
+
+	use_prewarm = render(USE_PREWARM, dict(
+		cheap_for_boost=gate["cheap_for_boost"],
+		approaching_evening=window["approaching_evening"],
+		prewarm_skip_comfortable=False,
+		prewarm_skip_mild_night=False,
+		prewarm_skip_on_track=False,
+		living_ok=True, living_temp=16.5))
+	assert use_prewarm is False
+
+	ctx = _control_ctx(
+		cheap_for_boost=True, use_prewarm_25_evening=use_prewarm,
+		outside_temp=2, living_temp=16.5, desired=16)
+	# New: falls through to the modest +3 boost, with its already-warm skip.
+	assert float(render(CONTROL_TEMPLATE, ctx)) == 19.0
+	# Old: the flat cold branch won outright, at 03:00, every cheap hour.
+	assert float(render(OLD_COLD_BRANCH_CONTROL, ctx)) == 25.0
+
+
+def test_cold_afternoon_still_respects_the_skip_guards():
+	"""The other half of the fix: below 10°C the three thermal-model guards
+	used to be unreachable, because the flat cold branch sat above them."""
+	use_prewarm = render(USE_PREWARM, dict(
+		cheap_for_boost=True, approaching_evening=True,
+		prewarm_skip_comfortable=True,   # room is already at 19.5
+		prewarm_skip_mild_night=False,
+		prewarm_skip_on_track=False,
+		living_ok=True, living_temp=19.5))
+	assert use_prewarm is False
+
+	ctx = _control_ctx(
+		cheap_for_boost=True, use_prewarm_25_evening=use_prewarm,
+		outside_temp=4, living_temp=19.5, desired=16)
+	# New: room is already warm enough, so no boost at all.
+	assert float(render(CONTROL_TEMPLATE, ctx)) == 16.0
+	# Old: heated an already-warm room to 25°C because it was cold outside.
+	assert float(render(OLD_COLD_BRANCH_CONTROL, ctx)) == 25.0
+
+
 if __name__ == "__main__":
 	tests = [
 		test_old_prewarm_target_raises_when_living_below_floor,
@@ -310,6 +546,12 @@ if __name__ == "__main__":
 		test_control_other_branches_unchanged,
 		test_hours_until_19,
 		test_hot_day_morning_skip,
+		test_price_gate_rejects_the_run_up_into_a_peak,
+		test_cheap_leccy_is_an_absolute_escape_hatch,
+		test_below_average_morning_is_not_called_expensive,
+		test_prewarm_window_widens_when_cold,
+		test_no_overnight_25c_blast,
+		test_cold_afternoon_still_respects_the_skip_guards,
 	]
 	for fn in tests:
 		fn()

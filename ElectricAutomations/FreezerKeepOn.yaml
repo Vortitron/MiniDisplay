@@ -1,0 +1,83 @@
+alias: Freezer keep on
+description: >-
+  Turn the freezer plug (switch.smart_plug_2_switch_1) back on whenever it is
+  found off — someone knocked the button, or the app/automation slip — unless
+  input_boolean.freezer_maintenance is on (defrosting, cleaning, moving it).
+  Maintenance ends itself after 12 h so a forgotten toggle cannot leave the
+  freezer unpowered and unwatched. See README_Freezer.md.
+id: freezer_keep_on
+mode: queued
+triggers:
+  - trigger: state
+    entity_id: switch.smart_plug_2_switch_1
+    to: "off"
+    for:
+      seconds: 10
+    id: switched_off
+  - trigger: state
+    entity_id: input_boolean.freezer_maintenance
+    to: "off"
+    id: maintenance_done
+  - trigger: time_pattern
+    minutes: "/15"
+    id: poll
+actions:
+  - variables:
+      maintenance_h: >-
+        {% set m = states.input_boolean.freezer_maintenance %}
+        {{ ((now() - m.last_changed).total_seconds() / 3600) | round(1)
+           if m and m.state == 'on' else 0 }}
+  - if:
+      - condition: template
+        value_template: "{{ maintenance_h | float >= 12 }}"
+    then:
+      # Turning it off re-triggers this automation (maintenance_done), which
+      # then switches the plug back on.
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.freezer_maintenance
+      - action: notify.persistent_notification
+        data:
+          message: >-
+            Freezer maintenance mode ended after {{ maintenance_h }} h — plug
+            back under watch — Alarm: 1
+          data:
+            notification_id: freezer_maintenance_expired
+      - stop: Maintenance expired
+  - condition: state
+    entity_id: input_boolean.freezer_maintenance
+    state: "off"
+  - condition: state
+    entity_id: switch.smart_plug_2_switch_1
+    state: "off"
+  - action: switch.turn_on
+    target:
+      entity_id: switch.smart_plug_2_switch_1
+  - wait_template: "{{ is_state('switch.smart_plug_2_switch_1', 'on') }}"
+    timeout:
+      seconds: 60
+  - if:
+      - condition: template
+        value_template: "{{ wait.completed }}"
+    then:
+      - action: notify.persistent_notification
+        data:
+          message: >-
+            Freezer plug was off — turned it back on
+            (trigger={{ trigger.id }}) — Alarm: 1
+          data:
+            notification_id: freezer_switched_off
+    else:
+      - action: notify.persistent_notification
+        data:
+          message: >-
+            Freezer plug is OFF and did not turn back on
+            ({{ states('switch.smart_plug_2_switch_1') }}) — Alarm: 2
+          data:
+            notification_id: freezer_switched_off
+  - action: logbook.log
+    data:
+      name: Freezer
+      message: >-
+        Plug found off (trigger={{ trigger.id }}); turn_on
+        {{ 'worked' if wait.completed else 'did not take' }}.

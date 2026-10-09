@@ -1,0 +1,159 @@
+# Going Out: both buttons of any BILRESA HELD together (living room /
+# Bio, kid's room, quiet room).
+#
+# Fires on the second of the two long_press events, when its partner on
+# the same remote also reported long_press in the last 0.5 s. The
+# per-button automations see the same pair and stand aside (they also
+# stand aside for a tap of both, which does nothing).
+#
+# Why a hold, not a tap (2026-09-26): with nobody touching it, clicking
+# Update in HA made the living-room remote re-send its buffered presses,
+# including the previous day's both-buttons tap test, and Going Out fired
+# (in test mode, luckily). HA does not pass through the Matter event's own
+# timestamp, so a replayed press cannot be told from a live one. With a
+# hold, a replay can only repeat Going Out if the last thing done on that
+# remote was itself Going Out, which is harmless while you are out. Events
+# are also ignored while the remote's firmware update is running.
+#
+#   - every light that is on goes off, except:
+#       the stairs strip (light.isp_0db21e_b21e),
+#       anything in the Front walkway area,
+#       the fish tank, and ESPHome status/backlight LEDs that their
+#       firmware drives.
+#   - input_number.sam_desired_temperature to away_temp_c.
+#
+# dry_run (on while testing): nothing changes. A persistent notification
+# says which remote fired, the gap between the two presses, and what
+# would have been turned off. The per-button automations still stand
+# aside, so a both-buttons press is a no-op in the house.
+#
+# DaytimeCheapHeat.yaml treats the write as a manual change and holds it
+# for 90 minutes. After that its own schedule takes over again, so going
+# out during 19:00–23:00 (desired 20 °C by schedule) only holds 16 °C for
+# 90 minutes.
+alias: BILRESA Going Out
+id: bilresa_going_out
+description: >-
+  Both buttons of any BILRESA held together: all lights off except the
+  stairs, the front walkway, the fish tank and status LEDs, and the desired
+  temperature to 16 °C. While dry_run is on it only posts a notification.
+mode: single
+variables:
+  dry_run: true
+  away_temp_c: 16
+  partner:
+    event.bilresa_dual_button_button_1: event.bilresa_dual_button_button_2
+    event.bilresa_dual_button_button_2: event.bilresa_dual_button_button_1
+    event.bedroom_kid_s_room_bilresa_button_1: event.bedroom_kid_s_room_bilresa_button_2
+    event.bedroom_kid_s_room_bilresa_button_2: event.bedroom_kid_s_room_bilresa_button_1
+    event.quiet_room_quiet_room_bilresa_button_1: event.quiet_room_quiet_room_bilresa_button_2
+    event.quiet_room_quiet_room_bilresa_button_2: event.quiet_room_quiet_room_bilresa_button_1
+  keep_on:
+    - light.isp_0db21e_b21e                       # stairs
+    - light.antela_smart_power_strip_socket_2     # fish tank
+    - light.bioofficec3_occupancy_status_led      # ESPHome status LED
+    - light.loft_display_backlight                # ESPHome display backlight
+  keep_area: front_walkway
+  remote_update:
+    event.bilresa_dual_button_button_1: update.bilresa_dual_button_firmware
+    event.bilresa_dual_button_button_2: update.bilresa_dual_button_firmware
+    event.bedroom_kid_s_room_bilresa_button_1: update.bedroom_kid_s_room_bilresa_firmware
+    event.bedroom_kid_s_room_bilresa_button_2: update.bedroom_kid_s_room_bilresa_firmware
+    event.quiet_room_quiet_room_bilresa_button_1: update.quiet_room_quiet_room_bilresa_firmware
+    event.quiet_room_quiet_room_bilresa_button_2: update.quiet_room_quiet_room_bilresa_firmware
+triggers:
+  - trigger: state
+    entity_id:
+      - event.bilresa_dual_button_button_1
+      - event.bilresa_dual_button_button_2
+      - event.bedroom_kid_s_room_bilresa_button_1
+      - event.bedroom_kid_s_room_bilresa_button_2
+      - event.quiet_room_quiet_room_bilresa_button_1
+      - event.quiet_room_quiet_room_bilresa_button_2
+conditions:
+  # An event entity coming back from unavailable restores its old
+  # timestamp; that is not a press.
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none
+         and trigger.from_state.state != 'unavailable'
+         and trigger.to_state.state not in ['unknown', 'unavailable'] }}
+  # BILRESA events sometimes arrive twice, 3-20 ms apart (the kid's-room
+  # remote does it on every press). Drop the copy: same event type as the
+  # previous event on this button, under 0.3 s later. A quick hold can
+  # put long_press and long_release 0.2 s apart, so the type must match.
+  - condition: template
+    value_template: >-
+      {% set prev = as_datetime(trigger.from_state.state, none) %}
+      {% set cur = as_datetime(trigger.to_state.state, none) %}
+      {{ prev is none or cur is none
+         or trigger.from_state.attributes.event_type != trigger.to_state.attributes.event_type
+         or (cur - prev).total_seconds() > 0.3 }}
+  # Ignore the remote while its firmware update runs (see header).
+  - condition: template
+    value_template: "{{ not is_state_attr(remote_update[trigger.entity_id], 'in_progress', true) }}"
+  # Both buttons of this remote reported long_press in the last 0.5 s.
+  - condition: template
+    value_template: >-
+      {% set ns = namespace(both=true) %}
+      {% for e in [trigger.entity_id, partner[trigger.entity_id]] %}
+        {% set s = states[e] %}
+        {% set t = as_datetime(s.state, none) if s else none %}
+        {% if t is none or s.attributes.event_type != 'long_press'
+              or (now() - t).total_seconds() > 0.5 %}
+          {% set ns.both = false %}
+        {% endif %}
+      {% endfor %}
+      {{ ns.both }}
+actions:
+  - variables:
+      to_off: >-
+        {{ states.light
+           | selectattr('state', 'eq', 'on')
+           | map(attribute='entity_id')
+           | reject('in', keep_on)
+           | reject('in', area_entities(keep_area))
+           | list }}
+      # Seconds between the two presses (tunes the 0.5 s window).
+      gap_s: >-
+        {% set a = as_datetime(states(trigger.entity_id), none) %}
+        {% set b = as_datetime(states(partner[trigger.entity_id]), none) %}
+        {{ ((a - b).total_seconds() | abs | round(2)) if a and b else 'unknown' }}
+  - if:
+      - condition: template
+        value_template: "{{ dry_run }}"
+    then:
+      - action: persistent_notification.create
+        continue_on_error: true
+        data:
+          notification_id: bilresa_going_out_test
+          title: BILRESA Going Out (test mode)
+          message: >-
+            {{ trigger.to_state.name }} + partner, {{ gap_s }} s apart.
+            Would turn off {{ to_off | count }} lights:
+            {{ to_off | join(', ') if to_off else 'none' }}.
+            Would set the desired temperature to {{ away_temp_c }} °C
+            (now {{ states('input_number.sam_desired_temperature') }}).
+            Nothing was changed.
+      - stop: Test mode, nothing changed
+  - if:
+      - condition: template
+        value_template: "{{ to_off | count > 0 }}"
+    then:
+      - action: light.turn_off
+        continue_on_error: true
+        target:
+          entity_id: "{{ to_off }}"
+  - action: input_number.set_value
+    continue_on_error: true
+    target:
+      entity_id: input_number.sam_desired_temperature
+    data:
+      value: "{{ away_temp_c }}"
+  - action: logbook.log
+    continue_on_error: true
+    data:
+      name: BILRESA Going Out
+      message: >-
+        {{ trigger.to_state.name }}: turned off {{ to_off | count }} lights,
+        desired temperature {{ away_temp_c }} °C

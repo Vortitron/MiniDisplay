@@ -1,18 +1,22 @@
 ---
 # ============================================================================
-# RETIRED (summer 2026): both automations in this file depend on
-# climate.mama_bedroom_thermostat, which no longer exists — the bedroom heater
-# was removed for the summer and its smart socket was repurposed. They are
-# turned OFF in Home Assistant. The circulation fan itself
-# (climate.circulation_fan) still runs on its own built-in thermostat.
-# To re-enable automated cross-room circulation, rework these to compare
-# sensor.bedroomlights_bedroomlights_temperature vs sensor.t_h_sensor_temperature
-# against a fixed target and drop all mama_bedroom_thermostat references.
+# climate.mama_bedroom_thermostat is DISABLED in Home Assistant (not deleted):
+# the bedroom heater is put away until winter and its old plug
+# (switch.t34_smart_plug_switch_1) is now the loft dehumidifier ("Loft Wet").
+# Do not re-enable the thermostat without repointing its heater switch first.
+#
+# - Temperature Sync only mirrored that thermostat's setpoint, so it stays
+#   retired (initial_state: false).
+# - Temperature Control no longer needs the thermostat (Sep 2026): it compares
+#   the bedroom and living-room sensors against the house comfort target,
+#   input_number.sam_desired_temperature.
 # ============================================================================
 # Automation to sync circulation fan temperature to mama's bedroom thermostat + 1°C
 id: circulation_fan_temperature_sync
 alias: "Circulation Fan - Temperature Sync"
 description: "Set circulation fan to 1°C higher than mama's bedroom thermostat"
+# Retired with the bedroom heater; load switched off.
+initial_state: false
 trigger:
   - platform: state
     entity_id: climate.mama_bedroom_thermostat
@@ -31,24 +35,24 @@ mode: single
 # Automation to control circulation fan based on temperature comparison
 id: circulation_fan_temperature_control
 alias: "Circulation Fan - Temperature Control"
-description: "Start earlier: turn on when other room is warmer and bedroom is below target; turn off when no longer beneficial"
+description: "Turn on when the living room is warmer and the bedroom is below the comfort target (sam_desired_temperature); turn off when no longer beneficial"
 trigger:
   - platform: state
     entity_id: sensor.bedroomlights_bedroomlights_temperature
   - platform: state
     entity_id: sensor.t_h_sensor_temperature
   - platform: state
-    entity_id: climate.mama_bedroom_thermostat
-    attribute: temperature
+    entity_id: input_number.sam_desired_temperature
 condition: []
 action:
   - variables:
       bedroom_temp_state: "{{ states('sensor.bedroomlights_bedroomlights_temperature') }}"
       other_room_temp_state: "{{ states('sensor.t_h_sensor_temperature') }}"
-      bedroom_target_raw: "{{ state_attr('climate.mama_bedroom_thermostat', 'temperature') }}"
+      # House comfort target (16°C day / 20°C evening, set by DaytimeCheapHeat).
+      bedroom_target_raw: "{{ states('input_number.sam_desired_temperature') }}"
       bedroom_temp_ok: "{{ bedroom_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
       other_room_temp_ok: "{{ other_room_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
-      bedroom_target_ok: "{{ bedroom_target_raw is not none }}"
+      bedroom_target_ok: "{{ bedroom_target_raw not in ['unknown', 'unavailable', 'none', ''] }}"
       bedroom_temp: "{{ bedroom_temp_state | float(0) }}"
       other_room_temp: "{{ other_room_temp_state | float(0) }}"
       bedroom_target: "{{ bedroom_target_raw | float(0) }}"

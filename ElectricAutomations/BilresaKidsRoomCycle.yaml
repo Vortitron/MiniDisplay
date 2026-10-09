@@ -1,0 +1,226 @@
+# Kid's Room BILRESA, Button (1) → stand + spot, getting brighter.
+#
+# Tap         both lights step up through `levels` (warm white): from
+#             off it starts at the lowest; past the top it turns them
+#             off. The step is read from the brighter of the two lit
+#             lights, so it carries on from night mode (stand at 10%)
+#             or anything set by hand. A tap more than idle_off_s (60 s)
+#             after this button's last press turns them off instead.
+#             At night (18:00–06:00, as the night button) steps below
+#             night_spot_min_pct light the stand only, so a look in the
+#             night does not blind anyone; the spot joins from 50%.
+#             The night light (spot off, stand at or below the lowest
+#             step, e.g. the night button's candle) counts as off, at any
+#             time of day: a tap turns the light on properly (the next
+#             step up) and never off, even after a minute of quiet. Double
+#             tap still turns it off.
+# Double tap  both off.
+# Hold        lit lights (or both) to 100% daylight, fading down until
+#             the button is let go (as on the Living Room / Bio remote).
+# Both        holding both buttons is Going Out (BilresaGoingOut.yaml);
+#             tapping both just acts on each button.
+#
+# Turning lights on raises the Sam desired temperature to home_temp_c if
+# lower. Both-buttons handling is the same as BilresaBio.yaml: a hold
+# waits 0.5 s, and the sibling's hold restarts this run to cancel it.
+#
+# The stand is tuya_local (2700–6500 K, no transition). The spot is a
+# Matter Kajplats and smooths each step with the transition.
+alias: BILRESA button - Kid's Room lights
+id: bilresa_kids_room_cycle
+description: >-
+  Kid's Room BILRESA Button (1). Tap steps the stand and spot up 10 → 25 → 50 →
+  75 → 100% warm white, then off; at night the spot stays off below 50%. The
+  first tap after a minute turns them off. Double tap turns both off. Hold jumps
+  to 100% daylight and fades down until the button is let go. Turning lights on raises
+  the desired temperature to 20 °C. Holding both buttons is Going Out.
+mode: restart
+variables:
+  own: event.bedroom_kid_s_room_bilresa_button_1
+  remote_update: update.bedroom_kid_s_room_bilresa_firmware
+  home_temp_c: 20
+  idle_off_s: 60
+  stand: light.living_office_stand
+  spot: light.bedroom_kajplats_kids_bedroom_spot
+  levels: [10, 25, 50, 75, 100]
+  day_start_hour: 6
+  day_end_hour: 18
+  night_spot_min_pct: 50
+  warm_k: 2700
+  daylight_k: 6500
+  fade_step_pct: 5
+  fade_floor_pct: 5
+  # True when both buttons were HELD (long_press) in the last 0.5 s:
+  # that is Going Out. Taps are never a combo, so they act at once.
+  # Self-contained on purpose: sibling variables may be evaluated in any
+  # order, so it names its entities and window itself.
+  combo: >-
+    {% set ns = namespace(both=true) %}
+    {% for e in ['event.bedroom_kid_s_room_bilresa_button_1',
+                 'event.bedroom_kid_s_room_bilresa_button_2'] %}
+      {% set s = states[e] %}
+      {% set t = as_datetime(s.state, none) if s else none %}
+      {% if t is none or s.attributes.event_type != 'long_press'
+            or (now() - t).total_seconds() > 0.5 %}
+        {% set ns.both = false %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.both }}
+triggers:
+  - trigger: state
+    entity_id:
+      - event.bedroom_kid_s_room_bilresa_button_1
+      - event.bedroom_kid_s_room_bilresa_button_2
+conditions:
+  # An event entity coming back from unavailable restores its old
+  # timestamp; that is not a press.
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none
+         and trigger.from_state.state != 'unavailable'
+         and trigger.to_state.state not in ['unknown', 'unavailable'] }}
+  # BILRESA events sometimes arrive twice, 3-20 ms apart (the kid's-room
+  # remote does it on every press). Drop the copy: same event type as the
+  # previous event on this button, under 0.3 s later. A quick hold can
+  # put long_press and long_release 0.2 s apart, so the type must match.
+  - condition: template
+    value_template: >-
+      {% set prev = as_datetime(trigger.from_state.state, none) %}
+      {% set cur = as_datetime(trigger.to_state.state, none) %}
+      {{ prev is none or cur is none
+         or trigger.from_state.attributes.event_type != trigger.to_state.attributes.event_type
+         or (cur - prev).total_seconds() > 0.3 }}
+  # While this remote's firmware update runs, the Matter server keeps
+  # reconnecting to it, and the remote can re-send old presses from its
+  # buffer (seen 2026-09-26: clicking Update in HA replayed yesterday's
+  # both-buttons test and a later tap). Ignore it until the update is done.
+  - condition: template
+    value_template: "{{ not is_state_attr(remote_update, 'in_progress', true) }}"
+  # The sibling only gets in as the second half of a both-buttons press.
+  - condition: template
+    value_template: "{{ trigger.entity_id == own or combo }}"
+actions:
+  # Both buttons within the window, whichever fired first.
+  - if:
+      - condition: template
+        value_template: "{{ combo }}"
+    then:
+      - stop: Both buttons pressed; BILRESA Going Out handles it
+  - variables:
+      press: "{{ trigger.to_state.attributes.event_type }}"
+      # No press on this button for idle_off_s: a tap turns the lights off.
+      # from_state is this button's previous event.
+      idle: >-
+        {% set t = as_datetime(trigger.from_state.state, none) %}
+        {{ t is none or (now() - t).total_seconds() > idle_off_s }}
+  - if:
+      - condition: template
+        value_template: "{{ press != 'long_release' }}"
+    then:
+      # Holds: 0.5 s for the other button's hold to arrive (Going Out).
+      # Taps: 0.1 s, so a backlog of stored-up presses that the Matter
+      # server delivers all at once (2026-10-03 and 2026-10-05: up to seven
+      # within 40 ms) acts only on the last one. Each later press restarts
+      # this run (mode: restart) before the earlier one acts. Live presses
+      # are never that close together.
+      - delay:
+          milliseconds: "{{ 500 if press == 'long_press' else 100 }}"
+  - variables:
+      # Brightness (%) of the brighter lit light; 0 when both are off.
+      lit_pct: >-
+        {% set ns = namespace(m=0) %}
+        {% for e in [stand, spot] if is_state(e, 'on') %}
+          {% set b = (state_attr(e, 'brightness') | int(0)) * 100 / 255 %}
+          {% set ns.m = [ns.m, b] | max %}
+        {% endfor %}
+        {{ ns.m | round(0) | int }}
+      any_on: "{{ is_state(stand, 'on') or is_state(spot, 'on') }}"
+      daytime: "{{ day_start_hour <= now().hour < day_end_hour }}"
+  - variables:
+      # Next level up, with a little slack for the lights' own rounding.
+      # 0 means "turn off": past the top, or the first tap in a while
+      # (never for the night light, which counts as off).
+      next_pct: >-
+        {% set up = levels | select('gt', lit_pct + 3) | list %}
+        {% set night_light = not is_state(spot, 'on')
+                             and lit_pct <= levels[0] + 3 %}
+        {% if not any_on %}{{ levels[0] }}
+        {% elif idle and not night_light %}0
+        {% elif up | count > 0 %}{{ up[0] }}
+        {% else %}0{% endif %}
+  - variables:
+      lights_going_on: >-
+        {{ press == 'long_press' or (press == 'multi_press_1' and next_pct > 0) }}
+  - if:
+      - condition: template
+        value_template: >-
+          {{ lights_going_on
+             and is_state('input_boolean.holiday_mode', 'off')
+             and states('input_number.sam_desired_temperature') | float(99) < home_temp_c }}
+    then:
+      - action: input_number.set_value
+        continue_on_error: true
+        target:
+          entity_id: input_number.sam_desired_temperature
+        data:
+          value: "{{ home_temp_c }}"
+  - choose:
+      - conditions: "{{ press == 'multi_press_1' and next_pct > 0 }}"
+        sequence:
+          - variables:
+              with_spot: "{{ daytime or next_pct >= night_spot_min_pct }}"
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ [stand, spot] if with_spot else [stand] }}"
+            data:
+              brightness_pct: "{{ next_pct }}"
+              color_temp_kelvin: "{{ warm_k }}"
+              transition: 0.5
+          - if:
+              - condition: template
+                value_template: "{{ not with_spot and is_state(spot, 'on') }}"
+            then:
+              - action: light.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ spot }}"
+      - conditions: "{{ press in ['multi_press_1', 'multi_press_2'] }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id:
+                - "{{ stand }}"
+                - "{{ spot }}"
+      - conditions: "{{ press == 'long_press' }}"
+        sequence:
+          - variables:
+              lit: "{{ [stand, spot] | select('is_state', 'on') | list }}"
+          - variables:
+              hold_targets: "{{ lit if lit | count > 0 else [stand, spot] }}"
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ hold_targets }}"
+            data:
+              brightness_pct: 100
+              color_temp_kelvin: "{{ daylight_k }}"
+          # A beat at full before the fade starts, so a short hold is
+          # just "full daylight".
+          - delay:
+              milliseconds: 800
+          - repeat:
+              count: "{{ ((100 - fade_floor_pct) / fade_step_pct) | int }}"
+              sequence:
+                - action: light.turn_on
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ hold_targets }}"
+                  data:
+                    brightness_pct: "{{ 100 - fade_step_pct * repeat.index }}"
+                    transition: 0.35
+                - delay:
+                    milliseconds: 350
+      # long_release: nothing to do. Starting this run has already
+      # cancelled the fade (mode: restart).

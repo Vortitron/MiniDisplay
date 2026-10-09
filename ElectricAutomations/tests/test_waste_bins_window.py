@@ -19,28 +19,45 @@ EVENING_HOUR = 18
 
 
 def days_until_from_state(raw: str, today: dt.date) -> int:
-	"""Mirror the ESPHome lambda. Returns -999 when unparseable."""
+	"""Mirror the ESPHome lambda. Returns -999 when unparseable.
+
+	ESP32 nano scanf has no %[..] scansets, so the device walks the
+	string for dd.mm.yyyy / yyyy-mm-dd instead of sscanf("%*[^,], ...").
+	"""
 	if raw in ("", "unknown", "unavailable", "none"):
 		return -999
-	stripped = raw.strip()
-	if stripped.lstrip("-").isdigit():
-		return int(stripped)
-	match = re.search(r",\s*(\d{1,2})\.(\d{1,2})\.(\d{4})", raw)
+	lower = raw.lower()
+	if "today" in lower:
+		return 0
+	if "tomorrow" in lower:
+		return 1
+	match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", raw)
 	if match:
 		day, month, year = (int(match.group(i)) for i in (1, 2, 3))
 	else:
-		match = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
+		match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
 		if match:
 			year, month, day = (int(match.group(i)) for i in (1, 2, 3))
 		else:
-			match = re.match(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", raw)
-			if not match:
-				return -999
-			day, month, year = (int(match.group(i)) for i in (1, 2, 3))
+			stripped = raw.strip()
+			if re.fullmatch(r"-?\d+", stripped):
+				return int(stripped)
+			return -999
 	if year < 2020 or not (1 <= month <= 12) or not (1 <= day <= 31):
 		return -999
 	target = dt.date(year, month, day)
 	return (target - today).days
+
+
+def bin_label(c1_due: bool, c2_due: bool):
+	"""Kitchen TM1638 8-char label."""
+	if c1_due and c2_due:
+		return "BothBins"
+	if c2_due:
+		return "OtherBin"
+	if c1_due:
+		return "RecylBin"
+	return None
 
 
 def due_soon(days: int, hour: int, evening_hour: int = EVENING_HOUR) -> bool:
@@ -110,6 +127,28 @@ def test_c2_appears_sunday_evening():
 	assert c2 == 1
 	assert not due_soon(c2, 17)
 	assert due_soon(c2, 18)
+
+
+def test_c1_collection_day_is_zero():
+	collection = dt.date(2026, 9, 10)
+	assert days_until_from_state("on Thu, 10.09.2026", collection) == 0
+	assert due_soon(0, 8)
+
+
+def test_today_tomorrow_words():
+	assert days_until_from_state("Today", TODAY) == 0
+	assert days_until_from_state("tomorrow", TODAY) == 1
+
+
+def test_iso_is_not_parsed_as_year_integer():
+	assert days_until_from_state("2026-09-10", dt.date(2026, 9, 10)) == 0
+
+
+def test_bin_labels():
+	assert bin_label(True, False) == "RecylBin"
+	assert bin_label(False, True) == "OtherBin"
+	assert bin_label(True, True) == "BothBins"
+	assert bin_label(False, False) is None
 
 
 if __name__ == "__main__":

@@ -29,6 +29,11 @@ input_number:
     icon: mdi:home-thermometer
 
   # ---- House thermal model ------------------------------------------------
+  # NB: k, h and tau deliberately have NO `initial:`. These are values the
+  # House Thermal Model automation LEARNS (EMA, alpha 0.05 — many hours of
+  # valid samples to converge). An `initial:` makes HA overwrite them with the
+  # default at every restart: k was 0.168 on 27 Aug 2026 and back at exactly
+  # 0.2 after the 3 Sep restart. Without it they restore from the last state.
   house_heat_loss_k:
     name: House Heat Loss Coefficient (k)
     min: 0
@@ -36,7 +41,6 @@ input_number:
     step: 0.0001
     unit_of_measurement: "1/h"
     icon: mdi:snowflake-thermometer
-    initial: 0.2
 
   house_heat_rate:
     name: Sam Heating Rate (h)
@@ -45,7 +49,6 @@ input_number:
     step: 0.001
     unit_of_measurement: "°C/h"
     icon: mdi:fire
-    initial: 2.0
 
   house_thermal_tau:
     name: House Thermal Time Constant
@@ -54,7 +57,6 @@ input_number:
     step: 0.01
     unit_of_measurement: "h"
     icon: mdi:clock-outline
-    initial: 5.0
 
   thermal_last_inside:
     name: Thermal Model Last Inside Temp
@@ -158,6 +160,11 @@ input_datetime:
     has_time: true
 
   # ---- House thermal model ------------------------------------------------
+  # NB: k, h and tau deliberately have NO `initial:`. These are values the
+  # House Thermal Model automation LEARNS (EMA, alpha 0.05 — many hours of
+  # valid samples to converge). An `initial:` makes HA overwrite them with the
+  # default at every restart: k was 0.168 on 27 Aug 2026 and back at exactly
+  # 0.2 after the 3 Sep restart. Without it they restore from the last state.
   thermal_last_sample:
     name: Thermal Model Last Sample
     has_date: true
@@ -206,6 +213,18 @@ input_text:
     name: Pool Pump Status
     max: 255
     initial: Idle
+
+  # ---- Feed-swap light restore (FeedSwapLightRestore.yaml) ---------------
+  # input_text.light_state_snapshot, input_text.light_restore_pending and
+  # input_button.restore_lights_to_snapshot are STORAGE helpers, created live
+  # over MCP (as input_text.spot_daily_avg_history and .loft_stairs_restore
+  # are). They are deliberately NOT declared here: an id declared in both
+  # places fights for the same entity registry slot at restart. Recreate with
+  #   input_text  Light State Snapshot        max 255, icon mdi:camera-timer
+  #   input_text  Light Restore Pending       max 255, icon mdi:progress-clock
+  #   input_button Restore Lights To Snapshot icon mdi:lightbulb-auto
+  # No `initial:` on the snapshot - it must survive a restart, and an initial
+  # would wipe it exactly when a restart follows a power cut.
 
 input_boolean:
   holiday_mode:

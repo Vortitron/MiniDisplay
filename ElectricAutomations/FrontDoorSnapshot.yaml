@@ -1,0 +1,126 @@
+# Front door stills from the Saga (Fully Kiosk Browser, camera.saga).
+#
+# Fully only opens the camera while its motion detection is on, and an
+# open camera is what drained the phone under IP Webcam. So motion
+# detection stays off and each still switches it on for a few seconds.
+#
+#   every 15 min, 06:00-23:00   /media/frontdoor/latest.jpg only
+#   Run (hold the dashboard     latest.jpg plus a timestamped copy, no
+#   picture)                    notification: it is someone indoors
+#   FrontPath person            latest.jpg plus a timestamped copy,
+#                               sent to the Pixel 8 with the picture
+#
+# Tapping the dashboard picture opens /media/frontdoor in the media
+# browser (the history); holding it runs this automation.
+#
+# camera.front_door_snapshot is a Local File camera on latest.jpg, for
+# the Front door dashboard. A visitor or manual still wakes the screen
+# (it is usually dark, see FrontDoorScreen); the 15-minute ones do not.
+#
+# The camera is the Saga's main one (Fully motionCameraId "0") looking
+# up the path, and it exposes for the sky. In the dark a visitor or
+# manual still turns the porch light on first (same "dark" rule as the
+# FrontPath lights). A manual still puts it back off; after a visitor
+# the FrontPath lights automation owns it.
+id: front_door_snapshot
+alias: Front door snapshot
+description: >-
+  Opens the Saga's camera for a few seconds to save a still: every 15
+  minutes by day, and on FrontPath person detection (sent to the Pixel 8).
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: state
+    entity_id:
+      - binary_sensor.frontpath_path_person_detected
+      - binary_sensor.frontpath_ble_processing_path_person_detected
+    from: "off"
+    to: "on"
+    id: visitor
+  - trigger: time_pattern
+    minutes: /15
+    id: periodic
+conditions:
+  - condition: or
+    conditions:
+      - condition: template
+        value_template: "{{ trigger is not defined or trigger.id != 'periodic' }}"
+      - condition: time
+        after: "06:00:00"
+        before: "23:00:00"
+variables:
+  # Keys stay alphabetical in dependency order: the Vome read-back sorts them.
+  announce: "{{ trigger is defined and trigger.id == 'visitor' }}"
+  dark: >-
+    {{ is_state('sun.sun', 'below_horizon')
+       or state_attr('sun.sun', 'elevation') | float(-10) <= 2 }}
+  fresh: "{{ trigger is not defined or trigger.id != 'periodic' }}"
+  light_up: >-
+    {{ fresh and dark and is_state('light.front_porch_local', 'off') }}
+  stamp: "{{ now().strftime('%Y%m%d-%H%M%S') }}"
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ light_up }}"
+    then:
+      - action: light.turn_on
+        target:
+          entity_id: light.front_porch_local
+        data:
+          brightness_pct: 100
+          color_temp_kelvin: 4000
+  - if:
+      - condition: template
+        value_template: "{{ fresh }}"
+      - condition: state
+        entity_id: switch.saga_screen
+        state: "off"
+    then:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.saga_screen
+      - delay:
+          seconds: 2
+  - action: switch.turn_on
+    target:
+      entity_id: switch.saga_motion_detection
+  - delay:
+      seconds: 4
+  - action: camera.snapshot
+    continue_on_error: true
+    target:
+      entity_id: camera.saga
+    data:
+      filename: /media/frontdoor/latest.jpg
+  - if:
+      - condition: template
+        value_template: "{{ fresh }}"
+    then:
+      - action: camera.snapshot
+        continue_on_error: true
+        target:
+          entity_id: camera.saga
+        data:
+          filename: "/media/frontdoor/{{ stamp }}.jpg"
+  - action: switch.turn_off
+    target:
+      entity_id: switch.saga_motion_detection
+  - if:
+      - condition: template
+        value_template: >-
+          {{ light_up and not announce }}
+    then:
+      - action: light.turn_off
+        target:
+          entity_id: light.front_porch_local
+  - if:
+      - condition: template
+        value_template: "{{ announce }}"
+    then:
+      - action: notify.mobile_app_pixel_8
+        data:
+          title: Front door
+          message: "Someone at the front door ({{ now().strftime('%H:%M') }})"
+          data:
+            image: "/media/local/frontdoor/{{ stamp }}.jpg"
+            tag: front_door_snapshot

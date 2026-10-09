@@ -26,6 +26,10 @@ description: >-
   (this is what happened at 00:44 that night — 8.9 s apart). If that pattern of
   false alert recurs, tighten further (shorter window and/or require more than
   3 edges) — see README_Downstairs.md.
+
+  Fixed 2026-10-08: the 20 s window stored `window_start` as `{{ now() }}`,
+  which HA keeps as a string, so the timeout template raised TypeError on every
+  run and no alert was ever sent after the 2026-08-11 rewrite. Now an epoch float.
 id: movement_downstairs
 mode: single
 triggers:
@@ -48,19 +52,23 @@ actions:
   # All 3 crossings must land within 20s of the *first* one (bounded from
   # window_start, not "up to 90s after the previous edge" as before — that
   # let two isolated blips 8.9s apart slip through as if they were a burst).
+  # window_start is an epoch float, not `now()`: script variables are stored
+  # rendered, so `{{ now() }}` came back as a *string* and `now() - window_start`
+  # raised TypeError on every run — the alert never fired from 2026-08-11 until
+  # this fix (2026-10-08), with the cat in the room all night.
   - variables:
-      window_start: "{{ now() }}"
+      window_start: "{{ now().timestamp() }}"
   - wait_for_trigger:
       - trigger: numeric_state
         entity_id: sensor.allrum_motion_moving_energy
         above: 25
-    timeout: "{{ [20 - (now() - window_start).total_seconds(), 0] | max }}"
+    timeout: "{{ [20 - (now().timestamp() - window_start | float), 0] | max }}"
     continue_on_timeout: false
   - wait_for_trigger:
       - trigger: numeric_state
         entity_id: sensor.allrum_motion_moving_energy
         above: 25
-    timeout: "{{ [20 - (now() - window_start).total_seconds(), 0] | max }}"
+    timeout: "{{ [20 - (now().timestamp() - window_start | float), 0] | max }}"
     continue_on_timeout: false
   - action: notify.persistent_notification
     continue_on_error: true

@@ -54,31 +54,72 @@ Computed from the desired temperature and electricity price ranking. The first t
 |---|---|
 | Holiday mode | **10°C** |
 | **Manual override active (lock in effect)** | **= desired** (price logic bypassed) |
-| **Hot day ahead** (`forecast_today_max` > 25°C) + morning (< 12:00) + not really cold | **No cheap-power boost** — the two "cheap now" rows below are disabled, so control = **desired** |
-| Cheap now + outside < 10°C | **25°C** (max overheat) |
-| Cheap now + approaching evening (15:00–19:00) | **Variable** pre-warm (`prewarm_control_target`, capped at 25°C) only to hold **≥ 19°C** — not a flat 25°C |
+| **Hot day ahead** (`forecast_today_max` > 25°C) + morning (< 12:00) + not really cold | **No cheap-power boost** — the "cheap now" rows below are disabled, so control = **desired** |
+| Cheap now + inside the pre-warm window (**15:00–19:00**, or **13:00–19:00** when it is < 10°C out) | **Variable** pre-warm (`prewarm_control_target`, capped at 25°C) only to hold **≥ 19°C** — never a flat 25°C |
 | **19:00–23:00 (evening)** | **control = desired** (20°C); if living **≥ 19°C**, no boost even if electricity is relatively cheap |
 | Cheap now | **desired + 3°C** (capped at 25) — **skipped** if living room is already within 0.5°C of the boosted target |
-| Expensive + TV off + not evening | **16°C** (coast) |
+| Expensive (spot **≥ today's average** *and* dearer than the next 4 h) + TV off + not evening | **16°C** (coast) |
 | Otherwise | **desired** |
 
-"Cheap now" means the current hourly price rank (`input_number.electricity_price_rank`) is lower than the 4-hour window rank (`input_number.electricity_price_rank_4h`).
+"Cheap now" needs **two** signals to agree (Sep 2026):
+
+1. **Relative** — the current hourly price rank (`input_number.electricity_price_rank`) is lower than the 4-hour window rank (`input_number.electricity_price_rank_4h`), i.e. cheaper now than the coming 4 h.
+2. **Absolute** (`price_genuinely_cheap`) — `input_boolean.cheap_leccy` is on (≤ 50 % of the daily average) **or** the rank is in the cheaper half of the day (`price_rank <= cheap_rank_ceiling`, 11).
+
+The relative test on its own is also true on the run-up into every price peak, because it only asks "is the next four hours worse?". Replaying 3 Sep 2026 (SE4) through both rank templates, it called **06:00 (1.85 SEK, the 9th dearest hour of 24)** and **18:00 (2.14 SEK, 2nd dearest)** cheap. Combined with the old flat-25°C cold branch, that meant heating the house hard at nearly the day's top price. The absolute bar rejects both while keeping the genuine troughs (02:00–06:00 at 0.32 SEK, 13:00–15:00 at 0.50 SEK).
+
+The expensive-hour cut has the inverse problem. Rank is relative to *today's* hours, so a dirt-cheap overnight (0.16 SEK) makes a still-cheap morning look dear: on **10 Sep 2026 at 09:40** the spot was **0.66 SEK** (53 % of the 1.23 daily average, Nordpool `low_price: true`, evening 4–6 SEK) but hourly rank 15 vs 4 h rank 11, so MiniDisplay showed **Electricity expensive**. The cut now also needs the spot **≥ today's Nordpool average** (`price_genuinely_expensive`). Regression: `test_below_average_morning_is_not_called_expensive`.
 
 ### Evening pre-warming strategy
 
 The system ensures comfort during evening hours (19:00–23:00) without expensive peak-time heating:
 
-1. **15:00–19:00** — if electricity is cheap, control is boosted to 25°C to build thermal mass
+1. **The pre-warm window** — `15:00–19:00`, widening to **`13:00–19:00` when it is below 10 °C outside** (`prewarm_window_start`), because the house both heats slower and loses faster then. If power is genuinely cheap, control is raised to `prewarm_control_target` to build thermal mass.
 2. **19:00–23:00** — desired is 20°C regardless of TV state; control won't drop below desired even if electricity is expensive
 3. **Result** — the home is warm by evening from pre-heating, and Sam only needs to maintain (not ramp) during peak hours
 
-`DaytimeCheapHeat.yaml` reads the thermal model (**k**, **h**, **τ**, `hours_to_evening_target`, `forecast_outside_4h`) plus **`sensor.forecast_tonight_min`** and **`sensor.forecast_outside_at_23`**. It skips the 25°C evening boost when:
+**Why a window at all?** Heat banked much earlier than it is wanted has leaked away by the time anyone sits in it. At the learned time constant (`input_number.house_thermal_tau` ≈ 6 h) a 15:00 pre-warm still holds ~51 % of its overshoot at 19:00; an 03:00 one holds ~7 %. Pre-warming outside the window is close to pure waste, and holding 25 °C instead of 20 °C at 5 °C outside costs ~33 % more heat loss for the whole hold, at a worse COP because the pump is working harder.
+
+`DaytimeCheapHeat.yaml` reads the thermal model (**k**, **h**, **τ**, `hours_to_evening_target`, `forecast_outside_4h`) plus **`sensor.forecast_tonight_min`** and **`sensor.forecast_outside_at_23`**.
+
+> ⚠️ **`sensor.forecast_outside_at_23` is not currently deployed** (checked 3 Sep 2026: it is not in the entity registry at all). `forecast_at_23` silently falls back to `forecast_tonight_min`, so `prewarm_skip_mild_night` compares the same number against itself, and DaytimeCheapHeat carries a dead state trigger. Cause: an **older copy of `forecast_sensors.yaml` is included twice** — HA logs `Platform template does not generate unique IDs. ID forecast_today_max already exists - ignoring` — and the current file's hourly block never loaded. The hourly forecast itself is fine (`weather.openweathermap` reports `supported_features: 3`, and `HouseThermalModel.yaml` uses it). See "Home Assistant wiring" below. It skips the pre-warm boost when:
 
 - living room is already **≥ 19°C**, or
 - **mild night** (forecast low ≥ 14°C at 23:00 / tonight) **and** (living ≥ 19.5°C **or** `hours_to_evening_target` ≤ hours until 19:00 + 1 h), or
 - **`hours_to_evening_target`** says you will reach 20°C before 19:00 with living already ≥ 17.5°C.
 
 Full working is in **`input_text.sam_preheat_calc`** (k, h, Teq, skips, `pre25=true/false`). See `README_HouseThermalModel.md` for the maths.
+
+### Sep 2026 — pre-warming was bypassing its own brain all winter
+
+Three linked problems, all of which only bite once it is cold:
+
+1. **The flat cold branch short-circuited everything.** The `control` ladder
+   checked `cheap_for_boost and outside_temp < 10 → 25` **above**
+   `use_prewarm_25_evening`. From the first frost on, that branch won on every
+   cheap hour, so the three skip guards and `prewarm_control_target` never ran —
+   pre-warm silently reverted to a flat **25 °C, at any hour of the day or
+   night**. Fixed by deleting the branch: cold is now handled by starting the
+   pre-warm window earlier (13:00 instead of 15:00), with the overshoot sized by
+   the thermal model as it always should have been.
+2. **"Cheap" was relative-only**, so it fired on the run-up into every price
+   peak — see the two-signal definition above. Any boost now also has to clear
+   an absolute bar (`price_genuinely_cheap`). The cooling side of `sam.yaml`
+   already did this via `cheap_leccy`; the heating side had no absolute test.
+3. **Nothing stopped an overnight blast.** The cold branch had no time-of-day
+   gate, so a cheap 03:00 drove the living room to 25 °C to bank heat that was
+   ~93 % gone by 19:00.
+
+Also fixed alongside: `input_text.sam_preheat_calc` is now `truncate`d to 255
+chars (it was one field away from being silently rejected, the same bug that
+once stuck `sam_hvac_status` on `Initializing...`), and `sam.yaml` no longer
+lists `input_number.sam_control_temperature` in *two* triggers — it used to
+evaluate Sam twice, ~30 s apart, on every control change.
+
+Regression: `tests/test_daytime_cheap_heat_templates.py`
+(`test_price_gate_rejects_the_run_up_into_a_peak`, `test_below_average_morning_is_not_called_expensive`, `test_prewarm_window_widens_when_cold`,
+`test_no_overnight_25c_blast`, `test_cold_afternoon_still_respects_the_skip_guards`) —
+the last two assert both the new value **and** what the old ladder would have done.
 
 ### Summer: skip morning heating on a hot day
 
@@ -127,6 +168,19 @@ Sam uses different "remote" temperatures for cooling vs heating:
   - **Fan ON** → `min(sensor.bedroomlights_bedroomlights_temperature, sensor.t_h_sensor_temperature)`
 
 The "min" rule encourages Sam to keep heating until the bedroom catches up whenever the circulation fan is actively pushing warm air, unless the living-room overheat guard is triggered.
+
+### No room sensor: Sam's own sensor (`internal_fallback`)
+
+If **both** room sensors are unavailable (e.g. the Tuya integration signs out and `sensor.t_h_sensor_temperature` goes `unavailable`, while the bedroom sensor is already offline), `sam.yaml` no longer skips with "missing data". It used to, leaving Sam on whatever it was last told (5 Oct 2026: fan_only overnight while the target was 23°C).
+
+Now Sam acts as its own thermostat:
+
+- heat mode, setpoint = `control + heat_fallback_offset` (2°C), clamped to the unit range. The offset is there because Sam's sensor sits near the ceiling and reads warm.
+- cooling decisions use `sensor.sam_inside_temperature` in place of the living room.
+- the headline shows `… · Sam sensor only` and the status shows `remote=… via sam internal`.
+- the super-expensive shed still needs the living-room sensor, so it never sheds blind.
+
+The run still stops if Sam's own readings (inside/outside) or the control temperature are missing.
 
 ## Cooling behaviour (summer)
 
@@ -240,9 +294,11 @@ When heating is needed (`remote_heat < desired_effective - temp_tolerance`), `sa
 
 So if the remote temperature is **6°C** below desired, Sam's target will be set to roughly **internal + 6°C**, which encourages the heat pump to ramp harder.
 
-The final setpoint is clamped to Sam's `min_temp` / `max_temp` attributes (or fallbacks if the integration doesn't expose them), and also to **`sam_setpoint_cap` (27°C)** in `sam.yaml` so `internal + boost` cannot command a sauna under the unit.
+The final setpoint is clamped only to Sam's `min_temp` / `max_temp` attributes (16–30°C, or fallbacks if the integration doesn't expose them) and rounded to the unit's 0.5°C step. Sam sits near the ceiling, so its internal sensor over-reads while it heats; it is a guide for what to request, not a reading of the room. Getting the low 20s in the room can mean asking Sam for its 30°C max.
 
-If `sensor.sam_inside_temperature` is already **≥ 27°C**, Sam switches to **fan_only** (`Unit hot, fan only` in the headline) even when room remotes are still below the control target.
+The 27°C ceiling is on the **room**: once the living-room sensor reaches **`heat_room_max` (27°C)**, Sam switches to **fan_only** (`Room at max, fan only` in the headline). Until Sep 2026 this rule looked at Sam's internal sensor instead, which made Sam short-cycle between heat at 27°C and fan_only at 22°C every ~7 minutes.
+
+Mode and setpoint are only re-sent to `climate.sam` when they differ from what the unit already reports; the sensor triggers fire every ~30 s and re-sending identical commands just churned the AC and the logbook. The automation runs `mode: queued` (max 2), so a change that arrives mid-run is applied rather than dropped.
 
 ### Headline / reason helpers
 
@@ -262,6 +318,14 @@ The `DaytimeCheapHeat.yaml` automation re-evaluates on:
 - `sensor.t_h_sensor_temperature` change (debounced 30 s)
 - Every 15 minutes (time pattern safety net)
 - 19:00 / 19:05 / 23:00 (evening boundary times)
+
+> **`initial:` removed from the learned helpers (Sep 2026).** `helpers.yaml`
+> set `initial:` on `house_heat_loss_k` (0.2), `house_heat_rate` (2.0) and
+> `house_thermal_tau` (5.0), which made HA overwrite the *learned* values with
+> the defaults at **every restart**. k was 0.1682 on 27 Aug 2026 and back at
+> exactly 0.2 after the 3 Sep restart; with `ema_alpha: 0.05` it then needs many
+> hours of valid samples to re-converge, and k only learns while Sam is passive
+> with ΔT > 2 °C. Without `initial:` they restore from the last state instead.
 
 Thermal-model outputs (`house_heat_loss_k`, `house_heat_rate`,
 `forecast_outside_4h`, `hours_to_evening_target`) are **deliberately not**
@@ -314,6 +378,7 @@ live HA list-only `min`/`max` filter semantics).
 - `sensor.t_h_sensor_temperature` (living room — pre-warm cap)
 - `input_number.electricity_price_rank`
 - `input_number.electricity_price_rank_4h`
+- `input_boolean.cheap_leccy` (absolute price bar — see "Cheap now" above)
 - `sensor.forecast_today_max` (hot-day morning heat skip)
 - `input_boolean.daytime_cheap_7_21`
 - `input_boolean.holiday_mode`
@@ -359,6 +424,51 @@ they fire together and fight over `climate.sam`.
 > the bedroom thermostat target). The circulation fan device itself still runs
 > on its own built-in thermostat. If the bedroom heater returns, re-add a
 > `climate` target and re-enable those automations.
+
+## Home Assistant wiring (`configuration.yaml`)
+
+The YAML in this directory is not picked up on its own — the packages have to be
+included. The intended shape:
+
+```yaml
+homeassistant:
+  packages:
+    minidisplay_helpers:  !include MiniDisplay/ElectricAutomations/helpers.yaml
+    minidisplay_forecast: !include MiniDisplay/ElectricAutomations/forecast_sensors.yaml
+```
+
+**Include each file exactly once.** As of 3 Sep 2026 the live instance includes
+`forecast_sensors.yaml` twice (or includes a stale copy of it alongside the
+current one), which HA reports at startup as:
+
+```
+Platform template does not generate unique IDs.
+ID forecast_today_max already exists - ignoring sensor.forecast_today_max
+ID forecast_tonight_min already exists - ignoring sensor.forecast_tonight_min
+```
+
+The duplicate is harmless for those two sensors, but the copy that actually
+loaded is an old one **without the hourly-forecast block**, so
+`sensor.forecast_outside_at_23` was never created. To fix:
+
+1. Grep `configuration.yaml` (and anything it `!include`s) for
+   `forecast_sensors` and for a bare `template:` block defining
+   `forecast_today_max` — remove the duplicate/stale one.
+2. Make sure the remaining include points at **this** repo's
+   `forecast_sensors.yaml`, which has *two* trigger blocks (daily → today max /
+   tonight min, hourly → outside at 23).
+3. Restart HA (a template reload is not enough for a changed package include)
+   and confirm `sensor.forecast_outside_at_23` exists and the duplicate-unique-ID
+   errors are gone.
+
+Until that lands, `prewarm_skip_mild_night` runs on `forecast_tonight_min`
+alone. That guard is mostly a mild-shoulder-season one (it needs a forecast low
+≥ 14 °C), so the impact in winter is small — but the state trigger on the
+missing entity is dead either way.
+
+The automations themselves (`sam.yaml`, `DaytimeCheapHeat.yaml`,
+`SamSuperchill.yaml`, …) are deployed into HA's automation store rather than
+included from here — see the `deploy_*.py` scripts.
 
 ## Helper entities to create in Home Assistant
 

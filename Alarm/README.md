@@ -117,3 +117,26 @@ data:
 5. Check MiniDisplay shows the notification as a screen
 6. Clear the notification and verify everything resets to `OK`
 
+Local script checks (no Home Assistant required):
+
+```bash
+python3 Alarm/tests/test_update_minidisplay.py
+```
+
+## Troubleshooting
+
+### Repair: "Notify Alarm - Sync uses an unknown action"
+
+Home Assistant can show `python_script.update_minidisplay` as an unknown action even when the automation is running. That repair is **persistent**: it is created the moment the automation fires while the Python script is missing, and it stays after the script is restored.
+
+**Do not remove the action.** MiniDisplay notification sync depends on it.
+
+Check, in order:
+
+1. `configuration.yaml` still has a top-level `python_script:` key.
+2. `/config/python_scripts/update_minidisplay.py` exists (copy from this directory if it was overwritten).
+3. Developer Tools → Actions lists `python_script.update_minidisplay`. If it does not, reload Python Scripts, then restart Home Assistant if the integration was newly added.
+4. Confirm `automation.notify_alarm` last-triggered traces finish on `python_script.update_minidisplay` with no error, and that `input_text.minidisplay_notification_ids` updates.
+
+Once the action exists again, open the repair and select **Submit**. That only dismisses the leftover issue; it does not mean the action should be deleted.
+

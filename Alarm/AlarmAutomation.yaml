@@ -1,5 +1,5 @@
 alias: Notify Alarm - Sync
-description: Sync notifications from tracker to MiniDisplay
+description: Sync notifications from tracker to MiniDisplay via python_script.update_minidisplay
 triggers:
   - trigger: state
     entity_id: sensor.persistent_notifications_tracker

@@ -1,0 +1,49 @@
+# TEMPORARY diagnostic overlay. Flash frontpath-rgb.yaml to get rid of it.
+#
+# The question it exists to answer: the four colour registers all return one
+# value that tracks the light. 0x08..0x0B reading identically is not a stuck
+# register pointer -- a stuck pointer would sit on 0x00 (CONF) and return a
+# constant, and this value moves with daylight (1889 to 11806 across a few
+# polls). So the pointer lands, and the part simply has nothing different at
+# those four addresses.
+#
+# VEML6040 (RGBW colour) and VEML7700 (plain ambient light) both answer on
+# address 0x10. The VEML7700 has no colour channels at all: its ALS result is
+# at 0x04 and its white channel at 0x05, and 0x08..0x0B are not registers it
+# implements. If this sweep shows 0x04 and 0x05 differing from one another
+# while 0x08..0x0B are all equal, the board is a VEML7700 and no amount of
+# driver work will get a blue/red ratio out of it.
+#
+# This is an overlay, so the real config is untouched and remains the rollback.
+
+packages:
+  base: !include frontpath-rgb.yaml
+
+interval:
+  - interval: 15s
+    then:
+      - lambda: |-
+          const uint8_t addr = 0x10;
+          auto *bus = id(frontpath_i2c);
+
+          auto read_u16 = [&](uint8_t reg, uint16_t *out) -> bool {
+            if (bus->write(addr, &reg, 1) != i2c::ERROR_OK) return false;
+            uint8_t data[2];
+            if (bus->read(addr, data, 2) != i2c::ERROR_OK) return false;
+            *out = (uint16_t) data[0] | ((uint16_t) data[1] << 8);
+            return true;
+          };
+
+          static const uint8_t SWEEP[] = {0x00, 0x04, 0x05, 0x06,
+                                          0x08, 0x09, 0x0A, 0x0B};
+          char line[200];
+          int n = 0;
+          for (uint8_t i = 0; i < sizeof(SWEEP) && n < (int) sizeof(line) - 16; i++) {
+            uint16_t v = 0;
+            if (read_u16(SWEEP[i], &v)) {
+              n += snprintf(line + n, sizeof(line) - n, "%02X=%u ", SWEEP[i], v);
+            } else {
+              n += snprintf(line + n, sizeof(line) - n, "%02X=ERR ", SWEEP[i]);
+            }
+          }
+          ESP_LOGI("sweep", "%s", line);

@@ -1,26 +1,27 @@
 # FrontPath - ESP32-C3 SuperMini with Dual LD2410C Sensors
 
-## ⚡ Two Operating Modes Available
+## Which files are actually in use
 
-This project supports **two different configurations**:
+Home Assistant device **FrontPath BLE Processing** (GamlaBio, Front Walkway, MAC `58:8C:81:AD:39:EC`, `frontpath.local`; DHCP, last seen at `192.168.1.161`) is the live box. The ESPHome dashboard should show **one** FrontPath config. Every top-level `.yaml` in `/config/esphome` appears there as a device, and these files all share `name: frontpath`, so stray copies show up as duplicates that go live and dark together. The building blocks live in `frontpath/`, which the dashboard does not scan.
 
-### 🔵 **BLE Proxy Mode** (Current: `FrontPath.yaml`) - RECOMMENDED
-- ESP32 acts as Bluetooth proxy for Home Assistant
-- LD2410 sensors communicate directly with HA via BLE
-- All detection logic runs in HA automations (full flexibility)
-- Simpler ESP32 code, easier to maintain
-- Better diagnostics and sensor visibility in HA
-- **See [BLE_SETUP.md](BLE_SETUP.md) for setup instructions**
-- **See [HA_AUTOMATIONS.md](HA_AUTOMATIONS.md) for automation examples**
+| Role | File | Notes |
+|------|------|--------|
+| **Flash this** | `frontpath-display.yaml` | Screen and a passive Bluetooth proxy. Includes the colour overlay. |
+| **Colour + radar** | `frontpath/frontpath-rgb.yaml` | Rollback without the panel. This is what the box was running before the screen. Copy it to the top level to flash it. |
+| **Radar base** | `frontpath/frontpath.yaml` | BLE processing v3. Included by the overlay; keep this as the TEMT6000 rollback. |
+| **Live lighting package** | `frontpath_lights_automations_simple.yaml` | Loaded on HA as `packages/frontpath_automations.yaml`. Also caches hours-until-rain and the next-hour temperature. |
 
-### 🔌 **UART Mode** (Backup: `FrontPathUART.yaml`)
-- Direct UART connection to sensors
-- All detection logic runs on ESP32 (adaptive baseline, gate calibration)
-- More complex but fully autonomous
-- Original configuration with sophisticated filtering
-- **See sections below for UART setup details**
+`FrontPath_BLE_Processing_v3.yaml` is an alias of `frontpath-display.yaml` so old flash commands still hit the current stack.
 
-**To switch modes:** Flash the appropriate YAML file. For BLE mode, disconnect TX/RX pins from sensors (power only).
+Flash:
+
+```bash
+esphome run esphome/FrontPath/frontpath-display.yaml
+```
+
+**Do not flash:** `frontpath/frontpath-sweep.yaml` (I²C register diagnostic, finished — not on the dashboard), `FrontPath.yaml` (capital F — old BLE proxy), UART / v1 / v2, `frontpath_lights_automations.yaml`.
+
+The overlay does not duplicate radar logic. It `!include`s `frontpath/frontpath.yaml`, removes the TEMT6000 ADC sensors, and adds the VEML6040. Colour is read with `write_readv` (repeated START); a split write-then-read silently returns the same value for every register.
 
 ---
 
@@ -32,102 +33,83 @@ This configuration uses an ESP32-C3 SuperMini board with two LD2410C millimetre-
 
 Both sensors are mounted in the same box at the path's midpoint, pointing in opposite directions to provide full coverage of the 12m path length and enable direction/position tracking.
 
-### Windy-day noise hardening (UART processing YAML)
+### Windy-day noise hardening (on-device, v3)
 
 - Detection can only be triggered/held by **motion-backed conditions**; a raw “gate delta” noise spike is no longer allowed to latch `person_detected` on its own (prevents wind from getting it “stuck detected”).
-- **Near-gate wind guard (new)**: if activity is **only** in the near gates (defaults: gates 1–3) the firmware now requires a short **streak** of consecutive hits before it will trigger `Path Person Detected`. This is aimed at wind/LED-string flutter close to the radars, while keeping far-end/door detection responsive.
-  - HA controls (in `FrontPath_BLE_Processing_v2.yaml`):
-    - `Near Gate Guard (Wind Hardening)` (switch)
-    - `Near Gate Max Index` (default 3)
-    - `Near Gate Streak Required` (default 2; with 500ms throttle ≈ ~1s)
-    - `Near Gate Streak Window` (default 1200ms)
-  - If detection feels too slow when someone is near the sensor box (mid-path), set **Streak Required = 1**.
+- **Near-gate wind guard**: if activity is **only** in the near gates (defaults: gates 1–3) the firmware requires a short **streak** of consecutive hits before it will trigger `Path Person Detected`. This is aimed at wind/LED-string flutter close to the radars, while keeping far-end/door detection responsive. Tune in YAML (`near_gate_*` globals) and reflash.
 - **Static confirmation only for near gates**: `static_confirmation_max_gate` controls up to which gate index we require static confirmation for motion to be considered valid. Far gates often do not produce strong stationary energy for walking people, so allowing moving-only there improves detection at the ends without reintroducing near-gate wind chatter.
 
-### v3 “Hardcoded tuning” file
+## Wiring
 
-`FrontPath_BLE_Processing_v3.yaml` is a copy of v2 with **most HA-exposed tuning sliders/switches removed**. The important tuning values are hardcoded in `globals` with `restore_value: no`, so you can adjust behaviour by editing the YAML (and reflashing) without Home Assistant “remembering” old slider values.
+ESP32-C3 SuperMini, USB at the top. Left side top-to-bottom is 5V, GND, 3.3V, GPIO4, GPIO3, GPIO2, GPIO1, GPIO0. Right side is GPIO5, GPIO6, GPIO7, GPIO8, GPIO9, GPIO10, GPIO20, GPIO21.
 
-## Wiring Connections
-
-### BLE Mode (Current Configuration)
-
-**TEMT6000 Light Sensor:**
-| TEMT6000 Pin | ESP32-C3 Pin | Function |
-|--------------|--------------|----------|
-| VCC          | 5V           | Power    |
-| GND          | GND          | Ground   |
-| OUT (SIG)    | GPIO0        | Analog output |
-
-**LD2410 Sensors (Power Only):**
-| LD2410 Pin | ESP32-C3 Pin | Function |
-|------------|--------------|----------|
-| VCC        | 5V           | Power    |
-| GND        | GND          | Ground   |
-| TX         | Not connected | BLE mode |
-| RX         | Not connected | BLE mode |
-
-**Important:** Do NOT connect TX/RX pins in BLE mode. Sensors automatically broadcast BLE when UART is disconnected.
-
----
-
-### UART Mode Wiring (FrontPathUART.yaml)
-
-### ESP32-C3 SuperMini Pinout Reference
 ```
         USB
          |
     +---------+
-5U  |  5V     | 5
- G  |  GND    | 6
-3.3 |  3.3V   | 7
- 4  |  GPIO4  | 8
- 3  |  GPIO3  | 9
- 2  |  GPIO2  | 10
- 1  |  GPIO1  | 20
- 0  |  GPIO0  | 21
+5V  |  5V     | GPIO5
+GND |  GND    | GPIO6
+3V3 |  3.3V   | GPIO7
+ 4  |  GPIO4  | GPIO8
+ 3  |  GPIO3  | GPIO9
+ 2  |  GPIO2  | GPIO10
+ 1  |  GPIO1  | GPIO20
+ 0  |  GPIO0  | GPIO21
     +---------+
 ```
 
-### LD2410C Sensor 1 Connections
-| LD2410C Pin | ESP32-C3 Pin | Function |
-|-------------|--------------|----------|
-| VCC         | 5V           | Power (5V) |
-| GND         | GND          | Ground |
-| TX          | GPIO21       | Data from sensor to ESP32 |
-| RX          | GPIO20       | Data from ESP32 to sensor |
+| Function | Connection |
+|----------|------------|
+| VEML6040 SDA / SCL / VCC | GPIO4 / GPIO5 / **3.3 V** (address `0x10`, not 5 V) |
+| VEML6040 GND / INT | GND / leave INT off |
+| Street radar (sensor 1) TX → ESP RX | GPIO21 |
+| Street radar RX ← ESP TX | GPIO20 |
+| Door radar (sensor 2) TX → ESP RX | GPIO7 |
+| Door radar RX ← ESP TX | GPIO6 |
+| Both radars VCC / GND | 5 V / GND. UART logic is 3.3 V; do not level-shift up |
+| LCD SCL / SDA / D/C | GPIO1 / GPIO3 / GPIO2 |
+| LCD CS | **Tied to GND** on the module (keeps the panel selected) |
+| Software CS | **GPIO9** (BOOT), ESPHome only — nothing attached. Was GPIO21, which the street radar's TX drives |
+| LCD RES | **GPIO10.** ESPHome pulses it low at boot. Tied straight to 3.3 V the panel stayed blank, even with all pixels on |
+| LCD BL | **GPIO0.** High = on. PWM, so it can dim |
+| LCD VCC / GND | 3.3 V / GND |
+| Onboard LED | GPIO8, blue only, active-low. Blinks while a journey is off its usual road |
+| GPIO9 | BOOT. Used only as the software CS above; do not wire anything to it |
 
-### LD2410C Sensor 2 Connections
-| LD2410C Pin | ESP32-C3 Pin | Function |
-|-------------|--------------|----------|
-| VCC         | 5V           | Power (5V) |
-| GND         | GND          | Ground |
-| TX          | GPIO7        | Data from sensor to ESP32 |
-| RX          | GPIO6        | Data from ESP32 to sensor |
+The cable order on the module is BL, RES, D/C, CS, SCL, SDA, GND, VCC. That matches the WeAct 1.37" board.
 
-### TEMT6000 Light Sensor Connections
-| TEMT6000 Pin | ESP32-C3 Pin | Function |
-|--------------|--------------|----------|
-| VCC          | 5V           | Power (5V) |
-| GND          | GND          | Ground |
-| OUT (SIG)    | GPIO0        | Analog output to ESP32 |
+BL does not need the LED current from the ESP. The module has a SI2302 that switches the backlight LED through 47 Ω, with a 33 kΩ pulldown so the lamp stays off until GPIO0 is driven. Leave the **Backlight ON** solder bridge open. If that bridge is closed, BL is tied to 3.3 V and the lamp cannot be turned off.
+
+SDA is on GPIO3, not GPIO2. The module pulls SDA down with 33 kΩ, and GPIO2 is a strapping pin that should not be held low while the chip boots. D/C is only a 100 Ω series resistor into the controller, so that wire is the one on GPIO2. GPIO0 is not a boot pin on the C3 (GPIO9 is).
+
+The panel is transflective, so the backlight stays off in daylight. It comes on at about 40% when the VEML reads under 15 lx, and goes off again above 40 lx. The light is named **Path Display Backlight** if you want to set it by hand; the next time the light level crosses a threshold it follows the sensor again. Refresh of the pixels is every 30 seconds, not in the radar path.
+
+**Do not plug in radar TX/RX yet.** `frontpath-display.yaml` still speaks to the LD2410s as BLE clients. Connecting UART makes the modules stop advertising, and this firmware will lose them. The pins above are the wiring to build to. Logger baud is 0 so GPIO20/21 stay quiet.
+
+### What the screen and LED do
+
+Four lines. Place names are ASCII, so Örkelljunga is written Orkelljunga:
+
+1. `Markaryd 11m Gamla` — from `sensor.journey_markaryd` attributes `minutes` and `road`
+2. `Orkelljunga 16m Gamla` — from `sensor.journey_orkelljunga`, the pool. It stands in for the drive to SiS Ljungaskog, which goes by Gamla E4; Google would route Ljungaskog itself down the E4
+3. `Rain 4h`, `Rain now`, or `No rain`
+4. Next-hour temperature, with `ice` appended when frost is expected
+
+`road` is compared exactly. `Gamla E4` is the old road. `E4` means that journey has diverted.
+
+Rain and the predicted temperature come from the OpenWeatherMap hourly forecast (`weather.openweathermap`), the same feed as the other forecasts. AccuWeather charges, so it is not used. `input_number.frontpath_hours_until_rain` is 48 when nothing wet is in the window (precipitation under 0.2 mm is ignored). `input_number.frontpath_forecast_temp_next` is the next hour's temperature. Both are filled by `frontpath_update_frost_forecast` every 30 minutes. They appear after a Home Assistant configuration reload.
+
+Bluetooth proxy is on, advertisements only (`active: false`), so phone presence can see the box without taking the two radar connection slots.
 
 ## Important Notes
 
-1. **Power Supply**: The LD2410C sensors require 5V power. Connect both VCC pins to the 5V pin on the ESP32-C3 SuperMini.
+1. **Power**: Both LD2410C modules want 5 V on VCC. The VEML6040 and the LCD want 3.3 V.
 
-2. **Logging**: UART logging has been disabled (set to 0) to free up GPIO20/21 for the first sensor. You can still view logs over WiFi using the Home Assistant API.
+2. **Logging**: UART logging is off (`baud_rate: 0`) so GPIO20/21 stay free for the street radar. Logs still come over the Home Assistant API, and over USB-JTAG on the C3.
 
-3. **Pin Usage**: 
-   - GPIO20/21: Sensor 1 (UART0)
-   - GPIO6/7: Sensor 2 (UART1)
-   - GPIO0: TEMT6000 light sensor (ADC)
-   - GPIO8: Onboard blue LED (person indicator)
-   - GPIO2/4/5/9/10 remain available for expansion
+3. **Onboard LED**: GPIO8 blinks at 1 Hz while either journey is off its usual road: both are normally Gamla E4, so it blinks when Google moves one to the E4. The `diverted` attribute on each journey sensor decides it (`ElectricAutomations/JourneyTime.yaml`). Ice is shown on the screen only (`ice` after the temperature).
 
-4. **Bluetooth Proxy**: The Bluetooth proxy feature is still active and will work alongside the sensors.
-
-5. **Onboard LED person indicator**: The blue LED on the ESP32-C3-DevKitM-1 (GPIO8) automatically lights when `Path Person Detected` is active, giving you a quick visual confirmation that the sensors are working.
+4. **BLE**: This firmware is still a client of the two radars, plus a passive proxy. It is not the old `FrontPathUART.yaml` detection stack — do not flash that file.
 
 ## Features
 
@@ -216,10 +198,11 @@ This means:
 
 ### Light sensing & darkness trigger
 
-- TEMT6000 module feeds a raw voltage sensor (`Light Level Voltage`) so you can confirm whether the ADC ever leaves 3.3 V or is saturating.
-- A derived template sensor (`Light Level`) converts that value into 0‑100 % which feeds the `Path Is Dark` binary sensor.
-- The **Darkness Threshold** helper now works in percentages (0‑100 %) and still persists across reboots, making it easier to tune dusk/dawn behaviour.
-- Raw readings are logged at debug level (`light_sensor` tag) every two seconds to help diagnose wiring or saturation issues.
+- **VEML6040** on I²C reports illuminance (lux), **Twilight Index** (smoothed B/R), RGBW counts, sky greyness (%), `Sky Condition`, and a **Dusk** binary sensor (dim *and* blue, delayed 2 min on / 5 min off).
+- Twilight index, not Kelvin: overcast is dim but colour-neutral (~1.0–1.3); civil twilight is the blue hour (~1.8–3.0). A cloud at 14:00 therefore does not look like sunset.
+- `Light Level` is still 0–100 % so `frontpath_darkness_threshold_pct` (default 32 % ≈ 64 lx) keeps working. Drive path lights from **Dusk** once it has been watched for a few evenings.
+- Path lamps will pull B/R toward red once they are on; read twilight before switching, or gate on lights-off.
+- Integration time auto-ranges (80 ms bright … 1280 ms dim). The old TEMT6000 on GPIO0 is removed by the overlay.
 
 ### Automatic gate calibration
 

@@ -1,0 +1,318 @@
+# Restore the lights to how they were before a supply-feed swap.
+#
+# Swapping the house between the Hem (fixed) and Bio (spot) feeds blacks the
+# house out for a few seconds. Most of the mains bulbs come back ON regardless
+# of how they were before, and they trickle back over a couple of minutes
+# (17:38:39 -> 17:40:57 on 21 Sep 2026), well after FeedDetect notices the swap
+# (it flipped input_boolean.on_fixed_price_feed at 17:40:00 that day).
+#
+# So this automation does two jobs, in one automation so the tracked-light list
+# lives in exactly one place:
+#
+#   SNAPSHOT (every 5 min) - encode the state of every tracked light into
+#     input_text.light_state_snapshot as "<count>:<skips>:<code>", one character
+#     per light:
+#         '-'  off
+#         '#'  on, no brightness restored (ONOFF lights and the ISP LED strips,
+#              whose DIY patterns any brightness write would paint over)
+#         0-9a-z  on, brightness in 36 buckets (bucket = brightness/255*35)
+#         '?'  never seen available, so nothing to restore
+#     A light that is unavailable right now KEEPS its previous character, so a
+#     snapshot taken mid-blackout cannot erase what we knew.
+#
+#   RESTORE (on a feed change, or the manual button) - copy the snapshot into
+#     input_text.light_restore_pending and then, every 20 s for 15 min, apply it
+#     to whichever lights are back online, marking each one '.' as it is dealt
+#     with. Each light is therefore touched ONCE, the first time it reappears,
+#     so a light you switch by hand during the restore window is left alone.
+#
+# The snapshot is only as good as its last write, and the dangerous window is
+# the ~90 s between the bulbs coming back on and FeedDetect flipping the
+# boolean: a 5-minute snapshot landing there would record "everything on" as
+# the truth. Hence the jump guard - if the number of lit lights jumps by
+# `jump` or more in one tick the snapshot is NOT overwritten. That freeze is
+# released after `max_skips` consecutive ticks (15 min) so genuinely turning
+# the house lights on does eventually become the new snapshot.
+alias: Feed Swap Light Restore
+id: feed_swap_light_restore
+description: >-
+  Remembers which lights were on (and how bright) every 5 minutes, and puts them
+  back that way after a Hem/Bio feed swap turns most of them on. Lights are
+  restored as they come back online, over a 15-minute window, each one touched
+  only once. Snapshots are skipped when the lit-light count jumps, so the
+  power-on surge is never mistaken for the real state.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: time_pattern
+    minutes: "/5"
+    id: snapshot
+  # FeedDetect flips this when the live feed changes - either direction blacks
+  # the house out, so both restore.
+  - trigger: state
+    entity_id: input_boolean.on_fixed_price_feed
+    from:
+      - "on"
+      - "off"
+    to:
+      - "on"
+      - "off"
+    id: restore
+  # Manual: any power cut, not just a feed swap.
+  # not_from stops a restore firing when HA restores the button's state at
+  # startup. Side effect: the very FIRST press after the helper is created is
+  # swallowed (its previous state is 'unknown') - press it twice that once.
+  - trigger: state
+    entity_id: input_button.restore_lights_to_snapshot
+    not_from:
+      - unknown
+      - unavailable
+    id: restore
+conditions:
+  # Stay quiet until the helpers exist (helpers.yaml needs an HA restart) -
+  # states.<domain>.<object_id> is None for an entity that is not registered,
+  # which states() would hide behind 'unknown'.
+  - condition: template
+    value_template: >-
+      {{ states.input_text.light_state_snapshot is not none
+         and states.input_text.light_restore_pending is not none }}
+actions:
+  - variables:
+      # The tracked lights, in a FIXED order - the snapshot is positional, so
+      # inserting or removing one invalidates the stored code (the leading
+      # count catches that and the next snapshot re-syncs).
+      lights:
+        - light.gold_light
+        - light.gold_light_1
+        - light.gold_light_2
+        - light.gold_light_3
+        - light.gold_light_4
+        - light.gold_light_5
+        - light.bio_floodlight
+        # Motion-driven by esphome/FrontPath/frontpath_lights_automations*.yaml:
+        # a snapshot can catch it mid-motion-brighten, and a restore can dim it
+        # back until the next motion corrects it (seen live, 21 Sep 2026).
+        # Kept in because it does come back on after a swap; drop it if the
+        # fighting ever annoys.
+        - light.front_porch_local
+        - light.kajplats_e14_ws_globe_806lm
+        - light.kajplats_e14_ws_globe_806lm_2
+        - light.loft_desk_kajplats
+        - light.loft_lights
+        - light.isp_1a3c38_3c38
+        - light.isp_0db21e_b21e
+        - light.isp_ba4bb8_4bb8
+      # On/off only - never write brightness to these. The ISP strips run
+      # iDeal LED DIY patterns that any brightness write paints over
+      # (see LoftC3Lights.yaml).
+      plain:
+        - light.loft_lights
+        - light.isp_1a3c38_3c38
+        - light.isp_0db21e_b21e
+        - light.isp_ba4bb8_4bb8
+      chars: "0123456789abcdefghijklmnopqrstuvwxyz"
+      # Tunables
+      jump: 3          # lit-light increase in one tick that means "power-on surge"
+      max_skips: 3     # consecutive skipped snapshots before we believe the jump
+      passes: 45       # restore passes...
+      pass_delay: 20   # ...every 20 s => a 15-minute window for lights to return
+      raw: "{{ states('input_text.light_state_snapshot') }}"
+      parts: "{{ raw.split(':') if ':' in raw else [] }}"
+      snap_n: "{{ parts[0] | int(0) if parts | count == 3 else 0 }}"
+      skips: "{{ parts[1] | int(0) if parts | count == 3 else 0 }}"
+      snap_code: "{{ parts[2] if parts | count == 3 else '' }}"
+      snap_ok: "{{ snap_n == lights | count and snap_code | count == lights | count }}"
+  - choose:
+      # ---- SNAPSHOT -----------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: snapshot
+        sequence:
+          - variables:
+              new_code: >-
+                {%- set ns = namespace(s='') -%}
+                {%- for e in lights -%}
+                  {%- set st = states(e) -%}
+                  {%- if st == 'off' -%}{%- set ns.s = ns.s ~ '-' -%}
+                  {%- elif st == 'on' -%}
+                    {%- set b = state_attr(e, 'brightness') -%}
+                    {%- if e in plain or b is none -%}{%- set ns.s = ns.s ~ '#' -%}
+                    {%- else -%}{%- set ns.s = ns.s ~ chars[((b | float(0) / 255 * 35) | round | int)] -%}
+                    {%- endif -%}
+                  {%- else -%}
+                    {#- unavailable: keep what we already knew about this light -#}
+                    {%- set ns.s = ns.s ~ (snap_code[loop.index0] if snap_ok else '?') -%}
+                  {%- endif -%}
+                {%- endfor -%}
+                {{ ns.s }}
+              new_on: "{{ (new_code | replace('-', '') | replace('?', '')) | count }}"
+              old_on: "{{ (snap_code | replace('-', '') | replace('?', '')) | count }}"
+              surge: "{{ snap_ok and (new_on - old_on) >= jump }}"
+              hold: "{{ surge and skips < max_skips }}"
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ hold }}"
+                sequence:
+                  # Keep the old code, just count the skip.
+                  - action: input_text.set_value
+                    target:
+                      entity_id: input_text.light_state_snapshot
+                    data:
+                      value: "{{ snap_n }}:{{ skips + 1 }}:{{ snap_code }}"
+                  - action: logbook.log
+                    data:
+                      name: Light Snapshot
+                      message: >-
+                        Held snapshot {{ snap_code }} ({{ old_on }} lit) - {{ new_on }}
+                        lit now, a jump of {{ new_on - old_on }}. Skip
+                        {{ skips + 1 }}/{{ max_skips }}.
+            default:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.light_state_snapshot
+                data:
+                  value: "{{ lights | count }}:0:{{ new_code }}"
+      # ---- RESTORE ------------------------------------------------------
+      - conditions:
+          - condition: trigger
+            id: restore
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ not snap_ok }}"
+                sequence:
+                  - action: notify.persistent_notification
+                    data:
+                      title: "Light restore skipped"
+                      message: >-
+                        No usable light snapshot ({{ raw }}) - expected
+                        {{ lights | count }} lights. Nothing was changed; the next
+                        5-minute snapshot will re-sync.
+                      data:
+                        notification_id: feed_light_restore
+                  - stop: "No usable snapshot"
+          - variables:
+              # last_reported, not last_changed: the snapshot is rewritten
+              # every 5 min, but only *changes* when a light does, so
+              # last_changed would report the age of the last light change.
+              snap_age: >-
+                {{ ((now() - states.input_text.light_state_snapshot.last_reported).total_seconds()
+                     / 60) | round | int }}
+              # '?' means we never saw that light, so there is nothing to put back.
+              start_pending: "{{ snap_code | replace('?', '.') }}"
+              planned: "{{ start_pending | replace('.', '') | count }}"
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.light_restore_pending
+            data:
+              value: "{{ start_pending }}"
+          - action: logbook.log
+            data:
+              name: Light Restore
+              message: >-
+                Restoring {{ planned }} lights to snapshot {{ snap_code }}
+                (last confirmed {{ snap_age }} min ago).
+          - repeat:
+              sequence:
+                - variables:
+                    pending: "{{ states('input_text.light_restore_pending') }}"
+                    # Every tracked light that still needs doing AND is back
+                    # online. Anything unavailable is left for a later pass.
+                    todo: >-
+                      {%- set ns = namespace(items=[]) -%}
+                      {%- for e in lights -%}
+                        {%- set want = pending[loop.index0] -%}
+                        {%- if want != '.' -%}
+                          {%- set st = states(e) -%}
+                          {%- if st in ['on', 'off'] -%}
+                            {%- set b = state_attr(e, 'brightness') -%}
+                            {%- set cur = ((b | float(0) / 255 * 35) | round | int)
+                                          if (st == 'on' and b is not none) else -1 -%}
+                            {%- set ns.items = ns.items + [{'e': e, 'want': want, 'st': st, 'cur': cur}] -%}
+                          {%- endif -%}
+                        {%- endif -%}
+                      {%- endfor -%}
+                      {{ ns.items }}
+                    to_off: >-
+                      {{ todo | selectattr('want', 'eq', '-') | selectattr('st', 'eq', 'on')
+                              | map(attribute='e') | list }}
+                    to_on_plain: >-
+                      {{ todo | selectattr('want', 'eq', '#') | selectattr('st', 'eq', 'off')
+                              | map(attribute='e') | list }}
+                    to_on_dim: >-
+                      {%- set ns = namespace(items=[]) -%}
+                      {%- for it in todo if it.want not in '-#' -%}
+                        {%- set wb = chars.index(it.want) -%}
+                        {%- if it.st == 'off' or it.cur != wb -%}
+                          {%- set ns.items = ns.items
+                               + [{'e': it.e, 'b': [1, ((wb * 255 / 35) | round | int)] | max}] -%}
+                        {%- endif -%}
+                      {%- endfor -%}
+                      {{ ns.items }}
+                    new_pending: >-
+                      {%- set handled = todo | map(attribute='e') | list -%}
+                      {%- set ns = namespace(s='') -%}
+                      {%- for e in lights -%}
+                        {%- set ns.s = ns.s ~ ('.' if e in handled else pending[loop.index0]) -%}
+                      {%- endfor -%}
+                      {{ ns.s }}
+                - if:
+                    - condition: template
+                      value_template: "{{ to_off | count > 0 }}"
+                  then:
+                    - action: light.turn_off
+                      target:
+                        entity_id: "{{ to_off }}"
+                - if:
+                    - condition: template
+                      value_template: "{{ to_on_plain | count > 0 }}"
+                  then:
+                    - action: light.turn_on
+                      target:
+                        entity_id: "{{ to_on_plain }}"
+                - repeat:
+                    for_each: "{{ to_on_dim }}"
+                    sequence:
+                      - action: light.turn_on
+                        target:
+                          entity_id: "{{ repeat.item.e }}"
+                        data:
+                          brightness: "{{ repeat.item.b }}"
+                - action: input_text.set_value
+                  target:
+                    entity_id: input_text.light_restore_pending
+                  data:
+                    value: "{{ new_pending }}"
+                - if:
+                    - condition: template
+                      value_template: >-
+                        {{ new_pending | replace('.', '') | count > 0 and repeat.index < passes }}
+                  then:
+                    - delay:
+                        seconds: "{{ pass_delay }}"
+              until:
+                - condition: template
+                  value_template: >-
+                    {{ states('input_text.light_restore_pending') | replace('.', '') | count == 0
+                       or repeat.index >= passes }}
+          - variables:
+              left: "{{ states('input_text.light_restore_pending') | replace('.', '') | count }}"
+          - action: notify.persistent_notification
+            data:
+              title: "Lights restored after feed swap"
+              message: >-
+                Put {{ planned | int - left | int }} of {{ planned }} lights back to the
+                snapshot taken before the swap (last confirmed {{ snap_age }} min ago).
+                {%- if left | int > 0 %} {{ left }} never came back online within
+                {{ (passes * pass_delay / 60) | round | int }} min and were left alone.
+                {%- endif %}
+              data:
+                notification_id: feed_light_restore
+          - action: logbook.log
+            data:
+              name: Light Restore
+              message: >-
+                Done - {{ planned | int - left | int }}/{{ planned }} restored,
+                {{ left }} still offline.

@@ -2,6 +2,13 @@
 # All detection logic, rolling averages, and person tracking happen on the ESP32.
 # Home Assistant just controls lights based on clean binary states.
 #
+# Live firmware target: esphome/FrontPath/frontpath-display.yaml
+# (screen + status LED). Radar logic is still the BLE base under that overlay.
+# Light Level is 0-100% from the VEML6040 (200 lx = 100%). The helper
+# `frontpath_darkness_threshold_pct` (default 32%) is therefore ~64 lx (dusk).
+# Illuminance / colour temperature / sky greyness are extra sensors on the
+# ESP — they do not drive this automation yet.
+#
 # Network traffic reduced by ~90%:
 # - Before: 36+ entities updating every 200ms
 # - After: 4 entities updating only on state change
@@ -133,6 +140,9 @@ input_number:
     unit_of_measurement: "°C"
     icon: mdi:thermometer
     initial: 10
+  # Created live as input_number.front_path_hours_until_rain and
+  # input_number.front_path_forecast_temp_next_hour (ha_set_helper slugs).
+  # 48 means no rain in the fetched hourly window.
   frontpath_darkness_threshold_pct:
     name: "Front Path Darkness Threshold"
     min: 5
@@ -214,7 +224,9 @@ automation:
   - id: frontpath_update_frost_forecast
     alias: "Front Path - Update Frost Forecast"
     description: >
-      Fetch OpenWeatherMap hourly forecast and cache min temp (next 12h) + frost boolean.
+      Fetch OpenWeatherMap hourly forecast and cache min temp (next 12h), the frost
+      boolean, hours until rain, and the next hour's temperature. AccuWeather is not
+      installed; this is the same hourly feed the frost check already uses.
       Newer HA versions don't expose forecast on the weather entity state, so we call `weather.get_forecasts`.
     mode: single
     trigger:
@@ -261,11 +273,51 @@ automation:
               99
             {% endif %}
           frost_expected: "{{ (min_temp_12h | float(99)) < 1 }}"
+          hours_until_rain: >-
+            {% set now_ts = as_timestamp(now()) %}
+            {% set rainy = ['rainy', 'pouring', 'lightning-rainy', 'hail', 'snowy', 'snowy-rainy'] %}
+            {% set ns = namespace(found=false, hours=48) %}
+            {% for entry in (forecast_data or []) %}
+              {% if not ns.found %}
+                {% set ts = as_timestamp(entry.datetime) %}
+                {% set precip = entry.precipitation | default(0) | float(0) %}
+                {% set cond = entry.condition | default('') %}
+                {% if ts is not none and ts >= now_ts and (precip >= 0.2 or cond in rainy) %}
+                  {% set raw_hours = ((ts - now_ts) / 3600) | round(0, 'ceil') | int %}
+                  {% set ns.hours = [raw_hours, 0] | max %}
+                  {% set ns.found = true %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.hours }}
+          forecast_temp_next: >-
+            {% set now_ts = as_timestamp(now()) %}
+            {% set ns = namespace(found=false, temp=99) %}
+            {% for entry in (forecast_data or []) %}
+              {% if not ns.found %}
+                {% set ts = as_timestamp(entry.datetime) %}
+                {% if ts is not none and ts >= now_ts and entry.temperature is defined and entry.temperature is not none %}
+                  {% set ns.temp = entry.temperature | float %}
+                  {% set ns.found = true %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.temp | round(1) }}
       - service: input_number.set_value
         target:
           entity_id: input_number.frontpath_forecast_min_temp_12h
         data:
           value: "{{ min_temp_12h | float(99) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.front_path_hours_until_rain
+        data:
+          value: "{{ hours_until_rain | float(48) }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.front_path_forecast_temp_next_hour
+        data:
+          value: "{{ forecast_temp_next | float(99) }}"
       - choose:
           - conditions:
               - condition: template
@@ -537,8 +589,11 @@ automation:
           - binary_sensor.frontpath_ble_processing_path_person_detected
           - sensor.frontpath_ble_processing_path_person_position
           - text_sensor.frontpath_ble_processing_active_gate
+          - sensor.frontpath_ble_processing_active_gate
           - text_sensor.frontpath_ble_processing_gate_pattern_binary
+          - sensor.frontpath_ble_processing_gate_pattern_binary
           - sensor.frontpath_ble_processing_light_level
+          - sensor.frontpath_light_level
           - sun.sun
           - input_boolean.frontpath_frost_warning_mode
           - input_boolean.frontpath_frost_expected_12h
@@ -553,7 +608,13 @@ automation:
     variables:
       idle_pct: "{{ states('input_number.frontpath_idle_brightness') | float(12) }}"
       path_length: "{{ states('number.frontpath_ble_processing_path_length') | float(16) }}"
-      light_pct: "{{ states('sensor.frontpath_ble_processing_light_level') | float(100) }}"
+      light_pct: >
+        {% set candidates = [
+          states('sensor.frontpath_ble_processing_light_level'),
+          states('sensor.frontpath_light_level')
+        ] %}
+        {% set vals = candidates | reject('in', ['unknown', 'unavailable', 'none', '']) | list %}
+        {{ (vals[0] if vals else 100) | float(100) }}
       darkness_threshold: "{{ states('input_number.frontpath_darkness_threshold_pct') | float(32) }}"
 
       is_dark: >
@@ -565,7 +626,13 @@ automation:
       frost_min_temp_12h: "{{ states('input_number.frontpath_forecast_min_temp_12h') | float(99) }}"
       frost_expected: "{{ is_state('input_boolean.frontpath_frost_expected_12h', 'on') }}"
       frost_warning_enabled: "{{ is_state('input_boolean.frontpath_frost_warning_mode', 'on') }}"
-      active_gate: "{{ states('text_sensor.frontpath_ble_processing_active_gate') }}"
+      active_gate: >
+        {% set t = states('text_sensor.frontpath_ble_processing_active_gate') %}
+        {% if t in ['unknown', 'unavailable', 'none', ''] %}
+          {{ states('sensor.frontpath_ble_processing_active_gate') }}
+        {% else %}
+          {{ t }}
+        {% endif %}
 
       raw_pos: "{{ states('sensor.frontpath_ble_processing_path_person_position') }}"
       position: >

@@ -1,0 +1,112 @@
+# Journey lines for the MiniDisplay: town, minutes, and which corridor.
+#
+# Home is in Skånes Fagerhult. Google Travel Time follows live
+# traffic but only publishes duration and distance, so the distance picks
+# the corridor. A blockage that makes Google leave Gamla E4 shows up as
+# the other corridor's length and the label flips to E4.
+#
+#   Markaryd stables, Hyltevägen 1285
+#     Gamla E4 then G 502   12.2 km
+#     E4                    17.5 km
+#     split                 15 km
+#   Örkelljunga pool, Kungsvägen 20
+#     Gamla E4 (M 1840)     19.0 km
+#     E4                    20.3 km
+#     split                 19.6 km
+# Measured with OSRM on 21 Sep 2026. The pool's first live reading was
+# 19.2 km and 16 min, which is the Gamla E4 side of that split.
+#
+# The pool stands in for the drive to SiS Ljungaskog, just up the road
+# from it, which goes by Gamla E4. Google would send Ljungaskog itself
+# down the E4 (26.3 km, quicker), so it can't show the old road being
+# blocked; the pool can. Both lines are normally Gamla E4, and `diverted`
+# is true when Google moves one to the E4. The FrontPath onboard LED
+# blinks on it.
+#
+# KitchenDetectorer reads `minutes` and `road` too and shows a drive (screens
+# 14, 15) only when it is off Gamla E4 or slower than usual.
+#
+# Traffic-aware routing has 5,000 free requests a month. Both Google
+# entries have polling switched off (pyscript/journey_setup.py). Automation
+# journey_times_daytime refreshes the two sensors every 15 minutes from
+# 07:00 to 19:00, about 3,000 requests a month.
+#
+# Deployed on GamlaBio as packages/journey_time.yaml
+# (homeassistant.packages: !include_dir_named packages).
+
+template:
+  - sensor:
+      - name: "Journey Markaryd"
+        unique_id: journey_markaryd
+        icon: mdi:car-clock
+        availability: >-
+          {% set src = 'sensor.front_walkway_google_travel_time_to_markaryd' %}
+          {{ states(src) not in ['unknown', 'unavailable', 'none', '']
+             and state_attr(src, 'distance') not in [none, '', 'unknown', 'unavailable'] }}
+        state: >-
+          {% set src = 'sensor.front_walkway_google_travel_time_to_markaryd' %}
+          {% set km = state_attr(src, 'distance')
+             | replace(',', '.') | replace('km', '') | trim | float(0) %}
+          {% set traffic = state_attr(src, 'duration_in_traffic') %}
+          {% set mins = (traffic | replace('min', '') | trim | int(0)) if traffic else (states(src) | float(0) | round(0) | int) %}
+          {% set road = 'E4' if km >= 15 else 'Gamla E4' %}
+          Markaryd {{ mins }}min {{ road }}
+        attributes:
+          road: >-
+            {% set src = 'sensor.front_walkway_google_travel_time_to_markaryd' %}
+            {% set km = state_attr(src, 'distance')
+               | replace(',', '.') | replace('km', '') | trim | float(0) %}
+            {{ 'E4' if km >= 15 else 'Gamla E4' }}
+          distance_km: >-
+            {% set src = 'sensor.front_walkway_google_travel_time_to_markaryd' %}
+            {{ state_attr(src, 'distance')
+               | replace(',', '.') | replace('km', '') | trim | float(0) }}
+          minutes: >-
+            {% set src = 'sensor.front_walkway_google_travel_time_to_markaryd' %}
+            {% set traffic = state_attr(src, 'duration_in_traffic') %}
+            {{ (traffic | replace('min', '') | trim | int(0)) if traffic else (states(src) | float(0) | round(0) | int) }}
+          destination: >-
+            {{ state_attr('sensor.front_walkway_google_travel_time_to_markaryd', 'destination') }}
+          usual_road: Gamla E4
+          diverted: >-
+            {% set src = 'sensor.front_walkway_google_travel_time_to_markaryd' %}
+            {% set km = state_attr(src, 'distance')
+               | replace(',', '.') | replace('km', '') | trim | float(0) %}
+            {{ km >= 15 }}
+      - name: "Journey Örkelljunga"
+        unique_id: journey_orkelljunga
+        icon: mdi:car-clock
+        availability: >-
+          {% set src = 'sensor.google_travel_time_to_orkelljunga' %}
+          {{ states(src) not in ['unknown', 'unavailable', 'none', '']
+             and state_attr(src, 'distance') not in [none, '', 'unknown', 'unavailable'] }}
+        state: >-
+          {% set src = 'sensor.google_travel_time_to_orkelljunga' %}
+          {% set km = state_attr(src, 'distance')
+             | replace(',', '.') | replace('km', '') | trim | float(0) %}
+          {% set traffic = state_attr(src, 'duration_in_traffic') %}
+          {% set mins = (traffic | replace('min', '') | trim | int(0)) if traffic else (states(src) | float(0) | round(0) | int) %}
+          {% set road = 'E4' if km >= 19.6 else 'Gamla E4' %}
+          Örkelljunga {{ mins }}min {{ road }}
+        attributes:
+          road: >-
+            {% set src = 'sensor.google_travel_time_to_orkelljunga' %}
+            {% set km = state_attr(src, 'distance')
+               | replace(',', '.') | replace('km', '') | trim | float(0) %}
+            {{ 'E4' if km >= 19.6 else 'Gamla E4' }}
+          distance_km: >-
+            {% set src = 'sensor.google_travel_time_to_orkelljunga' %}
+            {{ state_attr(src, 'distance')
+               | replace(',', '.') | replace('km', '') | trim | float(0) }}
+          minutes: >-
+            {% set src = 'sensor.google_travel_time_to_orkelljunga' %}
+            {% set traffic = state_attr(src, 'duration_in_traffic') %}
+            {{ (traffic | replace('min', '') | trim | int(0)) if traffic else (states(src) | float(0) | round(0) | int) }}
+          destination: >-
+            {{ state_attr('sensor.google_travel_time_to_orkelljunga', 'destination') }}
+          usual_road: Gamla E4
+          diverted: >-
+            {% set src = 'sensor.google_travel_time_to_orkelljunga' %}
+            {% set km = state_attr(src, 'distance')
+               | replace(',', '.') | replace('km', '') | trim | float(0) %}
+            {{ km >= 19.6 }}

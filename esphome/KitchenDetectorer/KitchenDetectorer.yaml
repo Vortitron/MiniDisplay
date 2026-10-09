@@ -413,6 +413,19 @@ sensor:
     id: sam_target_temp
     entity_id: input_number.sam_desired_temperature
     internal: true
+  # Drive times shared with FrontPath (ElectricAutomations/JourneyTime.yaml).
+  # Google refreshes them every 15 min from 07:00 to 19:00. The journey
+  # screens (14, 15) only appear when a drive is off its normal.
+  - platform: homeassistant
+    id: markaryd_minutes
+    entity_id: sensor.journey_markaryd
+    attribute: minutes
+    internal: true
+  - platform: homeassistant
+    id: orkelljunga_minutes
+    entity_id: sensor.journey_orkelljunga
+    attribute: minutes
+    internal: true
   - platform: homeassistant
     id: lily_pouch_count_ha
     entity_id: input_number.lily_pouch_count
@@ -495,6 +508,17 @@ text_sensor:
   - platform: homeassistant
     id: waste_c2_next
     entity_id: sensor.waste_collection_schedule_beda_container_2_food_waste_residual_waste_newspapers_and_colored_glass
+    internal: true
+  # "Gamla E4" or "E4": which corridor Google is routing each drive by.
+  - platform: homeassistant
+    id: markaryd_road
+    entity_id: sensor.journey_markaryd
+    attribute: road
+    internal: true
+  - platform: homeassistant
+    id: orkelljunga_road
+    entity_id: sensor.journey_orkelljunga
+    attribute: road
     internal: true
   # Notifications: comma-separated IDs maintained by the MiniDisplay alarm
   # system. The on_value handler parses the CSV into the `notification_ids`
@@ -1221,8 +1245,8 @@ globals:
     initial_value: "0"
   # BEDA indoor-bin reminder. Rebuilt every display frame from the HA
   # waste sensors. Visible from 18:00 the evening before collection
-  # until the end of collection day. waste_show_index picks C1 vs C2
-  # when both are due in the same window (rare).
+  # until the end of collection day. Labels: RecylBin / OtherBin /
+  # BothBins (lowercase i on the 7-seg).
   - id: waste_due_c1
     type: bool
     restore_value: no
@@ -1231,10 +1255,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
-  - id: waste_show_index
-    type: int
-    restore_value: no
-    initial_value: "0"
 
 # Shared script for the air-fryer beep action so both the (auto) binary_sensor
 # trigger and the HA "Test Airfryer Beep" button run identical logic.
@@ -2899,10 +2919,12 @@ interval:
   - interval: 60s
     then:
       - lambda: |-
-          ESP_LOGI("hb", "alive screen=%d cal_events=%d alarm=%d",
+          ESP_LOGI("hb", "alive screen=%d cal_events=%d alarm=%d waste=%d/%d",
                    id(current_screen),
                    (int) id(cal_event_titles).size(),
-                   id(alarm_led_mode));
+                   id(alarm_led_mode),
+                   id(waste_due_c1) ? 1 : 0,
+                   id(waste_due_c2) ? 1 : 0);
 
 # TM1638 Display Configuration
 display:
@@ -2918,12 +2940,14 @@ display:
     update_interval: 100ms
     intensity: 7
     lambda: |-
-      // 14 screens (0..13). Air-fryer and hours-to-target screens were
+      // 16 screens (0..15). Air-fryer and hours-to-target screens were
       // removed because the device sits next to the air-fryer (visible
       // power use already obvious) and hours-to-target was rarely useful.
       // Screen 13 is the BEDA indoor-bin reminder (skipped unless a
       // collection is today or from 18:00 the evening before).
-      static const int NUM_SCREENS = 14;
+      // Screens 14 and 15 are the Markaryd / Orkelljunga drives, skipped
+      // while that drive is on Gamla E4 at its usual time.
+      static const int NUM_SCREENS = 16;
       static const uint32_t SCREEN_HOLD_MS = 3500; // Standard auto-cycle dwell
       static const uint32_t SCROLL_DURATION_MS = 3000; // Subtitle-style left-shift over the screen dwell
       // Per-cell scroll rate for the notification title overlay. Keep in
@@ -3023,6 +3047,32 @@ display:
       static const int SCREEN_DESIRED    = 11;
       static const int SCREEN_NOTIFY     = 12;
       static const int SCREEN_BINS       = 13;
+      static const int SCREEN_JOURNEY_M  = 14;  // Markaryd stables
+      static const int SCREEN_JOURNEY_O  = 15;  // Orkelljunga pool (stands in for Ljungaskog)
+
+      // A drive is normal on Gamla E4 at or under its usual ceiling.
+      // Ceilings sit just above the 21 Sep - 9 Oct 2026 readings:
+      // Markaryd 10-11 min, Orkelljunga 15-18 min.
+      static const int MARKARYD_USUAL_MAX_MIN    = 12;
+      static const int ORKELLJUNGA_USUAL_MAX_MIN = 19;
+      auto journey_unusual = [](esphome::sensor::Sensor *mins,
+                                esphome::text_sensor::TextSensor *road,
+                                int usual_max) -> bool {
+        if (!mins->has_state() || !std::isfinite(mins->state)) return false;
+        if (!road->has_state() || road->state.empty()) return false;
+        return road->state != "Gamla E4" || (int) mins->state > usual_max;
+      };
+      // Google only refreshes 07:00-19:00, so don't show the 19:00
+      // reading all night.
+      bool journey_hours = false;
+      {
+        auto t = id(homeassistant_time).now();
+        journey_hours = t.is_valid() && t.hour >= 7 && t.hour < 20;
+      }
+      const bool markaryd_due = journey_hours &&
+          journey_unusual(id(markaryd_minutes), id(markaryd_road), MARKARYD_USUAL_MAX_MIN);
+      const bool orkelljunga_due = journey_hours &&
+          journey_unusual(id(orkelljunga_minutes), id(orkelljunga_road), ORKELLJUNGA_USUAL_MAX_MIN);
 
       // ----- Sync alarm LED mode from Home Assistant (every 1s) -----
       static unsigned long last_alarm_check = 0;
@@ -3452,34 +3502,67 @@ display:
           return (long) era * 146097L + (long) doe - 719468L;
         };
         auto days_until_from_state = [&](const std::string &raw) -> int {
+          // ESP32 nano scanf has no %[..] scansets, so "%*[^,], %d.%d.%d"
+          // silently fails on Kitchen and the bins screen is skipped.
+          // Walk with %d.%d.%d / %d-%d-%d only (those conversions work).
           if (raw.empty() || raw == "unknown" || raw == "unavailable" ||
               raw == "none") {
             return -999;
           }
-          bool all_num = true;
-          for (char c : raw) {
-            if (!(c == ' ' || c == '-' || (c >= '0' && c <= '9'))) {
-              all_num = false;
-              break;
+          std::string lower = raw;
+          for (char &c : lower) {
+            if (c >= 'A' && c <= 'Z') {
+              c = (char) (c - 'A' + 'a');
             }
           }
-          if (all_num) {
-            int v = 0;
-            if (sscanf(raw.c_str(), "%d", &v) == 1) {
-              return v;
-            }
+          if (lower.find("today") != std::string::npos) {
+            return 0;
+          }
+          if (lower.find("tomorrow") != std::string::npos) {
+            return 1;
           }
           int yy = 0;
           int mm = 0;
           int dd = 0;
-          if (sscanf(raw.c_str(), "%*[^,], %d.%d.%d", &dd, &mm, &yy) != 3) {
-            if (raw.find('-') != std::string::npos) {
-              if (sscanf(raw.c_str(), "%d-%d-%d", &yy, &mm, &dd) != 3) {
-                return -999;
-              }
-            } else if (sscanf(raw.c_str(), "%d.%d.%d", &dd, &mm, &yy) != 3) {
-              return -999;
+          bool got_date = false;
+          for (size_t i = 0; i < raw.size(); i++) {
+            int y = 0;
+            int m = 0;
+            int d = 0;
+            if (sscanf(raw.c_str() + i, "%d.%d.%d", &d, &m, &y) == 3 &&
+                y >= 2020 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+              yy = y;
+              mm = m;
+              dd = d;
+              got_date = true;
+              break;
             }
+            if (sscanf(raw.c_str() + i, "%d-%d-%d", &y, &m, &d) == 3 &&
+                y >= 2020 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+              yy = y;
+              mm = m;
+              dd = d;
+              got_date = true;
+              break;
+            }
+          }
+          if (!got_date) {
+            bool all_num = true;
+            for (size_t i = 0; i < raw.size(); i++) {
+              const char c = raw[i];
+              if (c == ' ' || (c == '-' && i == 0) || (c >= '0' && c <= '9')) {
+                continue;
+              }
+              all_num = false;
+              break;
+            }
+            if (all_num) {
+              int v = 0;
+              if (sscanf(raw.c_str(), "%d", &v) == 1) {
+                return v;
+              }
+            }
+            return -999;
           }
           if (yy < 2020 || mm < 1 || mm > 12 || dd < 1 || dd > 31) {
             return -999;
@@ -3542,19 +3625,8 @@ display:
             now < id(force_calendar_until)) {
           advance_outer = false;
         }
-        if (id(current_screen) == SCREEN_BINS && num_waste_due > 1) {
-          if (id(waste_show_index) < num_waste_due - 1) {
-            id(waste_show_index) += 1;
-            advance_outer = false;
-          } else {
-            id(waste_show_index) = 0;
-          }
-        }
         if (advance_outer) {
           id(current_screen) = (id(current_screen) + 1) % NUM_SCREENS;
-          if (id(current_screen) == SCREEN_BINS) {
-            id(waste_show_index) = 0;
-          }
         }
 
         // Skip-rules for screens that need data to be meaningful.
@@ -3593,10 +3665,15 @@ display:
                            !id(notification_ids_csv).state.empty();
           if (!has_alarm && !has_notes) {
             id(current_screen) = SCREEN_BINS;
-            id(waste_show_index) = 0;
           }
         }
         if (id(current_screen) == SCREEN_BINS && num_waste_due == 0) {
+          id(current_screen) = SCREEN_JOURNEY_M;
+        }
+        if (id(current_screen) == SCREEN_JOURNEY_M && !markaryd_due) {
+          id(current_screen) = SCREEN_JOURNEY_O;
+        }
+        if (id(current_screen) == SCREEN_JOURNEY_O && !orkelljunga_due) {
           id(current_screen) = SCREEN_BIO;
         }
         id(last_screen_change) = millis();
@@ -3747,6 +3824,19 @@ display:
           last_bean_flash = now;
         }
         it.set_led(7, bean_led_state);
+      }
+      // Journey screens take the whole LED row for a marquee showing the
+      // direction of travel: right-to-left for Markaryd, left-to-right
+      // for Orkelljunga. Two on, two off, one step every 150 ms.
+      if (id(current_screen) == SCREEN_JOURNEY_M ||
+          id(current_screen) == SCREEN_JOURNEY_O) {
+        const uint32_t phase = (now / 150u) % 4u;
+        const bool leftward = id(current_screen) == SCREEN_JOURNEY_M;
+        for (int i = 0; i < 8; i++) {
+          const uint32_t k = leftward ? ((uint32_t) i + phase) % 4u
+                                      : ((uint32_t) i + 4u - phase) % 4u;
+          it.set_led(i, k < 2u);
+        }
       }
 
       // Alarm overlay: when the alarm flash phase is ON, light all 8 LEDs.
@@ -4093,22 +4183,36 @@ display:
           it.print(buf);
         }
       } else if (id(current_screen) == SCREEN_BINS) {
-        // Indoor-bin reminder. C1 = packaging (paper/plastic/metal/
-        // clear glass). C2 = food / residual / newspapers / coloured
-        // glass. 7-seg-safe 8-char labels; skipped unless a collection
-        // is today or from 18:00 the evening before.
-        bool show_c2 = id(waste_due_c2);
+        // Indoor-bin reminder. C1 = RecylBin (packaging). C2 = OtherBin
+        // (food/residual/newspapers/coloured glass). Both due -> BothBins.
+        // Skipped unless a collection is today or from 18:00 the evening before.
         if (id(waste_due_c1) && id(waste_due_c2)) {
-          show_c2 = (id(waste_show_index) != 0);
+          it.print("BothBins");
+        } else if (id(waste_due_c2)) {
+          it.print("OtherBin");
         } else if (id(waste_due_c1)) {
-          show_c2 = false;
-        }
-        if (show_c2) {
-          it.print("C2 FOOD ");
-        } else if (id(waste_due_c1)) {
-          it.print("C1 PACK ");
+          it.print("RecylBin");
         } else {
           it.print("BINS    ");
+        }
+      } else if (id(current_screen) == SCREEN_JOURNEY_M ||
+                 id(current_screen) == SCREEN_JOURNEY_O) {
+        // Road on the left (gE4 = Gamla E4), minutes on the right with no
+        // unit. The LED marquee says which way.
+        const bool m = id(current_screen) == SCREEN_JOURNEY_M;
+        auto *mins = m ? id(markaryd_minutes) : id(orkelljunga_minutes);
+        auto *road = m ? id(markaryd_road) : id(orkelljunga_road);
+        if (road->has_state() && road->state == "Gamla E4") {
+          it.print("gE4 ");
+        } else if (road->has_state() && road->state == "E4") {
+          it.print("E4  ");
+        } else {
+          it.print("--  ");
+        }
+        if (mins->has_state() && std::isfinite(mins->state)) {
+          it.printf(4, "%4d", (int) mins->state);
+        } else {
+          it.print(4, "  --");
         }
       }
 

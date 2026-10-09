@@ -1,0 +1,303 @@
+# Screen for the FrontPath box.
+#
+# Includes frontpath/frontpath-rgb.yaml (radar logic + VEML6040). Flash this file once
+# the 128x64 panel is wired. frontpath-rgb.yaml stays the
+# rollback without the screen.
+#
+# Radar TX/RX are wired but not read by this firmware. It still talks to the
+# LD2410s as BLE clients; a UART build would free the BLE connection slots.
+#
+# Pinout (also in README.md):
+#   VEML6040 SDA/SCL          GPIO4 / GPIO5   3.3 V
+#   LCD SCL / SDA / D/C       GPIO1 / GPIO3 / GPIO2
+#   LCD CS                    tied to GND on the module
+#   LCD RES                   GPIO10, reset pulse at boot
+#   LCD BL                    GPIO0, active high, PWM. Leave the Backlight ON bridge open.
+#   Software CS (ESPHome)     GPIO9 (BOOT) — not wired to the panel. Hardware CS is GND.
+#   Onboard blue LED          GPIO8. Blinks when a journey is off its usual road
+#   Radar 1 street TX/RX      GPIO21 / GPIO20   (wired; this build still uses BLE)
+#   Radar 2 door TX/RX        GPIO7 / GPIO6     (wired; this build still uses BLE)
+
+packages:
+  rgb: !include frontpath/frontpath-rgb.yaml
+
+# GPIO20/21 are the street-radar UART. Quiet the logger so it does not drive them.
+logger:
+  baud_rate: 0
+
+# Advertisements only. The two LD2410 clients already use the connection slots.
+bluetooth_proxy:
+  active: false
+
+spi:
+  id: path_lcd_spi
+  clk_pin: GPIO1
+  mosi_pin: GPIO3
+
+# BL is a logic input on this module (SI2302 on the board switches the LED).
+# High = on. GPIO0 is not a strapping pin on the C3.
+output:
+  - platform: ledc
+    id: path_lcd_backlight_pwm
+    pin: GPIO0
+    frequency: 1000Hz
+
+font:
+  # 10 px keeps "Orkelljunga 16m Gamla" inside 128 pixels.
+  - file: "gfonts://Roboto"
+    id: path_font
+    size: 10
+    glyphs: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz -."
+
+text_sensor:
+  - platform: homeassistant
+    id: markaryd_minutes
+    entity_id: sensor.journey_markaryd
+    attribute: minutes
+    internal: true
+  - platform: homeassistant
+    id: markaryd_road
+    entity_id: sensor.journey_markaryd
+    attribute: road
+    internal: true
+  - platform: homeassistant
+    id: orkelljunga_minutes
+    entity_id: sensor.journey_orkelljunga
+    attribute: minutes
+    internal: true
+  - platform: homeassistant
+    id: orkelljunga_road
+    entity_id: sensor.journey_orkelljunga
+    attribute: road
+    internal: true
+
+sensor:
+  - platform: homeassistant
+    id: hours_until_rain
+    entity_id: input_number.front_path_hours_until_rain
+    internal: true
+  - platform: homeassistant
+    id: forecast_temp_next
+    entity_id: input_number.front_path_forecast_temp_next_hour
+    internal: true
+
+binary_sensor:
+  # `diverted` is worked out in Home Assistant (JourneyTime.yaml): true when
+  # a journey leaves its usual Gamla E4 for the E4. The pool line stands in
+  # for the drive to Ljungaskog.
+  - platform: homeassistant
+    id: markaryd_diverted
+    entity_id: sensor.journey_markaryd
+    attribute: diverted
+    internal: true
+  - platform: homeassistant
+    id: orkelljunga_diverted
+    entity_id: sensor.journey_orkelljunga
+    attribute: diverted
+    internal: true
+  - platform: homeassistant
+    id: ice_risk
+    entity_id: input_boolean.frontpath_frost_expected_12h
+    internal: true
+
+light:
+  - platform: monochromatic
+    id: path_lcd_backlight
+    name: "Path Display Backlight"
+    output: path_lcd_backlight_pwm
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 0s
+
+globals:
+  # -1 until the first lux reading, then 0 off / 1 on. Hysteresis so cloud
+  # edges do not flicker the backlight. Same thresholds as the unit test.
+  - id: backlight_auto
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  # Onboard LED: true while either journey is off its usual road.
+  - id: route_diverted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # False until the panel has had its post-boot reset. The tuning numbers
+  # below restore at boot, before the display is set up, so they wait for it.
+  - id: path_lcd_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+# Panel tuning, live from Home Assistant. A lit backlight with nothing on the
+# glass is usually contrast or the voltage ratio; "All Pixels On" tells the two
+# apart from a wiring fault (all dark = the controller hears us).
+number:
+  - platform: template
+    name: "Display Contrast"
+    id: path_lcd_contrast
+    entity_category: config
+    icon: mdi:contrast-box
+    min_value: 0
+    max_value: 63
+    step: 1
+    initial_value: 27
+    restore_value: true
+    optimistic: true
+    on_value:
+      then:
+        - lambda: 'if (id(path_lcd_ready)) id(path_lcd).set_contrast((uint8_t) x);'
+  - platform: template
+    name: "Display Voltage Ratio"
+    id: path_lcd_ratio
+    entity_category: config
+    icon: mdi:brightness-6
+    min_value: 0
+    max_value: 7
+    step: 1
+    initial_value: 5
+    restore_value: true
+    optimistic: true
+    on_value:
+      then:
+        - lambda: 'if (id(path_lcd_ready)) id(path_lcd).set_brightness((uint8_t) x);'
+
+switch:
+  - platform: template
+    name: "Display All Pixels On"
+    id: path_lcd_all_on
+    entity_category: diagnostic
+    icon: mdi:checkerboard
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: 'id(path_lcd).set_all_pixels_on(true);'
+    turn_off_action:
+      - lambda: 'id(path_lcd).set_all_pixels_on(false);'
+
+button:
+  - platform: template
+    name: "Display Reinitialise"
+    entity_category: config
+    icon: mdi:restart
+    on_press:
+      - lambda: |-
+          id(path_lcd).request_refresh();
+          id(path_lcd).update();
+
+interval:
+  # Once, shortly after boot, apply the contrast and ratio from Home
+  # Assistant and run the refresh sequence: soft reset (0xE2), then the init
+  # registers. The hardware reset on GPIO10 has already happened, at setup.
+  - interval: 5s
+    then:
+      - lambda: |-
+          if (id(path_lcd_ready)) return;
+          id(path_lcd_ready) = true;
+          id(path_lcd).set_brightness((uint8_t) id(path_lcd_ratio).state);
+          id(path_lcd).set_contrast((uint8_t) id(path_lcd_contrast).state);
+          id(path_lcd).request_refresh();
+          id(path_lcd).update();
+  # Onboard blue LED (GPIO8, the person_indicator_led output from
+  # frontpath.yaml) blinks at 1 Hz while either journey is off its usual road.
+  # Only writes on a change when not diverted, so the Home Assistant light
+  # entity for it still works the rest of the time.
+  - interval: 500ms
+    then:
+      - lambda: |-
+          const bool diverted =
+              (id(markaryd_diverted).has_state() && id(markaryd_diverted).state) ||
+              (id(orkelljunga_diverted).has_state() && id(orkelljunga_diverted).state);
+          if (!diverted) {
+            if (id(route_diverted)) id(person_indicator_led).turn_off();
+            id(route_diverted) = false;
+            return;
+          }
+          id(route_diverted) = true;
+          static bool phase = false;
+          phase = !phase;
+          if (phase) id(person_indicator_led).turn_on();
+          else id(person_indicator_led).turn_off();
+  # Night and deep twilight need the lamp. The Dusk flag is only the blue
+  # hour, so it is off again once the sky is properly dark.
+  - interval: 2s
+    then:
+      - lambda: |-
+          if (!id(veml_lux).has_state() || std::isnan(id(veml_lux).state)) return;
+          const float lux = id(veml_lux).state;
+          int want = id(backlight_auto);
+          if (want < 0) want = 0;
+          if (lux < 15.0f) want = 1;
+          else if (lux > 40.0f) want = 0;
+          if (want == id(backlight_auto)) return;
+          id(backlight_auto) = want;
+          if (want == 1) {
+            auto call = id(path_lcd_backlight).turn_on();
+            call.set_brightness(0.4f);
+            call.set_transition_length(0);
+            call.perform();
+          } else {
+            auto call = id(path_lcd_backlight).turn_off();
+            call.set_transition_length(0);
+            call.perform();
+          }
+
+display:
+  - platform: st7567_spi
+    id: path_lcd
+    spi_id: path_lcd_spi
+    dc_pin: GPIO2
+    # RES. The controller needs a low pulse after power-up; with RES only
+    # tied high it ignored everything, blank even with all pixels on.
+    reset_pin: GPIO10
+    # Panel CS is tied to GND. ESPHome 2026.9 still wants a cs_pin, so this
+    # GPIO is software-only and must not be wired to the LCD (or a radar).
+    # GPIO9 is BOOT: pulled up at reset, so idle-high CS cannot upset boot.
+    # It was GPIO21, which the street radar's TX drives.
+    cs_pin:
+      number: GPIO9
+      ignore_strapping_warning: true
+    update_interval: 30s
+    lambda: |-
+      auto minutes_text = [](const std::string &raw, bool has) -> std::string {
+        if (!has || raw.empty() || raw == "unknown" || raw == "unavailable" || raw == "none") return "--";
+        const auto dot = raw.find('.');
+        if (dot == std::string::npos) return raw;
+        return raw.substr(0, dot);
+      };
+      auto road_tag = [](const std::string &raw, bool has) -> std::string {
+        if (!has) return "--";
+        if (raw == "E4") return "E4";
+        if (raw == "Gamla E4") return "Gamla";
+        return "--";
+      };
+      auto fit22 = [](std::string line) -> std::string {
+        if (line.size() > 22) line.resize(22);
+        return line;
+      };
+      const std::string markaryd = fit22(
+          std::string("Markaryd ") + minutes_text(id(markaryd_minutes).state, id(markaryd_minutes).has_state()) +
+          "m " + road_tag(id(markaryd_road).state, id(markaryd_road).has_state()));
+      const std::string orkelljunga = fit22(
+          std::string("Orkelljunga ") +
+          minutes_text(id(orkelljunga_minutes).state, id(orkelljunga_minutes).has_state()) + "m " +
+          road_tag(id(orkelljunga_road).state, id(orkelljunga_road).has_state()));
+      std::string rain = "Rain --";
+      if (id(hours_until_rain).has_state() && !isnan(id(hours_until_rain).state)) {
+        const int hours = (int) (id(hours_until_rain).state + 0.5f);
+        if (hours >= 48) rain = "No rain";
+        else if (hours <= 0) rain = "Rain now";
+        else rain = std::string("Rain ") + std::to_string(hours) + "h";
+      }
+      std::string temp = "--";
+      if (id(forecast_temp_next).has_state() && !isnan(id(forecast_temp_next).state) &&
+          id(forecast_temp_next).state < 90.0f) {
+        const float rounded = roundf(id(forecast_temp_next).state * 10.0f) / 10.0f;
+        char buf[12];
+        if (fabsf(rounded - roundf(rounded)) < 0.05f) snprintf(buf, sizeof(buf), "%.0f C", rounded);
+        else snprintf(buf, sizeof(buf), "%.1f C", rounded);
+        temp = buf;
+      }
+      if (id(ice_risk).state) temp += " ice";
+      it.print(0, 0, id(path_font), markaryd.c_str());
+      it.print(0, 16, id(path_font), orkelljunga.c_str());
+      it.print(0, 36, id(path_font), rain.c_str());
+      it.print(0, 50, id(path_font), temp.c_str());

@@ -1,0 +1,117 @@
+alias: Freezer power watch
+description: >-
+  Watch the freezer compressor via binary_sensor.living_room_freezer_running
+  (template helper: Freezer Power > 15 W). A healthy freezer cycles on and off;
+  running non-stop for RUN_LIMIT_H suggests the door is ajar (or a failing seal
+  / heavy frost), and not running at all for IDLE_LIMIT_H suggests it is broken
+  or unplugged at the appliance. input_select.freezer_alert records which alert
+  is up so each one is raised and dismissed exactly once rather than on every
+  compressor cycle. Raises are polled from last_changed so they still fire after
+  an automation reload, which would silently disarm a `for:` trigger.
+  See README_Freezer.md.
+id: freezer_power_watch
+mode: queued
+variables:
+  run_limit_h: 3
+  idle_limit_h: 3
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.living_room_freezer_running
+    to:
+      - "on"
+      - "off"
+    id: changed
+  - trigger: time_pattern
+    minutes: "/5"
+    id: poll
+actions:
+  - variables:
+      running: "{{ states('binary_sensor.living_room_freezer_running') }}"
+      held_h: >-
+        {% set s = states.binary_sensor.living_room_freezer_running %}
+        {{ ((now() - s.last_changed).total_seconds() / 3600) | round(1)
+           if s else 0 }}
+      alert: "{{ states('input_select.freezer_alert') }}"
+      maintenance: "{{ is_state('input_boolean.freezer_maintenance', 'on') }}"
+  - choose:
+      # Clears come first so a missed clear (e.g. sensor unavailable at the
+      # moment it flipped) is resolved before the opposite alert is raised.
+      - conditions:
+          - condition: template
+            value_template: "{{ running == 'off' and alert == 'running_long' }}"
+        sequence:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: freezer_running_long
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.freezer_alert
+            data:
+              option: none
+          - action: logbook.log
+            data:
+              name: Freezer
+              message: Compressor stopped — running-long alert cleared.
+      - conditions:
+          - condition: template
+            value_template: "{{ running == 'on' and alert == 'idle_long' }}"
+        sequence:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: freezer_idle_long
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.freezer_alert
+            data:
+              option: none
+          - action: logbook.log
+            data:
+              name: Freezer
+              message: Compressor running again — idle alert cleared.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ running == 'on' and held_h | float >= run_limit_h
+                 and alert != 'running_long' and not maintenance }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.freezer_alert
+            data:
+              option: running_long
+          - action: notify.persistent_notification
+            data:
+              message: >-
+                Freezer compressor running non-stop for {{ held_h }} h
+                ({{ states('sensor.smart_plug_2_power_2') }} W) — door open?
+                — Alarm: 2
+              data:
+                notification_id: freezer_running_long
+          - action: logbook.log
+            data:
+              name: Freezer
+              message: "Running {{ held_h }} h without a break — alert raised."
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ running == 'off' and held_h | float >= idle_limit_h
+                 and alert != 'idle_long' and not maintenance }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.freezer_alert
+            data:
+              option: idle_long
+          - action: notify.persistent_notification
+            data:
+              message: >-
+                Freezer compressor has not run for {{ held_h }} h
+                (plug {{ states('switch.smart_plug_2_switch_1') }},
+                {{ states('sensor.smart_plug_2_power_2') }} W) — broken or
+                unplugged? — Alarm: 2
+              data:
+                notification_id: freezer_idle_long
+          - action: logbook.log
+            data:
+              name: Freezer
+              message: "Idle {{ held_h }} h — alert raised."

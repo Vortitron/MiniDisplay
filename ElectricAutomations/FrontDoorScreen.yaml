@@ -1,0 +1,73 @@
+# Saga door display: dark unless something wakes it or there is a message.
+#
+# Fully's own Screen Off Timer (60 s) turns the screen off after the last
+# touch or proximity wave; waking on those is set in Fully, not here.
+# This automation adds:
+#
+#   sensor.door_message non-empty   screen on, off-timer disabled, so the
+#                                   message stays up (bins, input_text)
+#   message cleared                 timer back to 60 s, screen off
+#   FrontPath person                screen on; the 60 s timer ends it
+#
+# sensor.door_message is a UI template helper, source in
+# door_message_template.jinja.
+id: front_door_screen
+alias: Front door screen
+description: >-
+  Keeps the Saga door display on while sensor.door_message has text,
+  wakes it for FrontPath visitors, and otherwise leaves it to Fully's
+  60 s screen-off timer.
+mode: queued
+max: 5
+triggers:
+  - trigger: template
+    value_template: >-
+      {{ states('sensor.door_message') not in ['', 'unknown', 'unavailable'] }}
+    id: message
+  - trigger: template
+    value_template: >-
+      {{ states('sensor.door_message') in ['', 'unknown', 'unavailable'] }}
+    id: message
+  - trigger: homeassistant
+    event: start
+    id: message
+  - trigger: state
+    entity_id:
+      - binary_sensor.frontpath_path_person_detected
+      - binary_sensor.frontpath_ble_processing_path_person_detected
+    from: "off"
+    to: "on"
+    id: visitor
+variables:
+  has_message: >-
+    {{ states('sensor.door_message') not in ['', 'unknown', 'unavailable'] }}
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: visitor
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: switch.saga_screen
+      - conditions:
+          - condition: template
+            value_template: "{{ has_message }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: number.saga_screen_off_timer
+            data:
+              value: 0
+          - action: switch.turn_on
+            target:
+              entity_id: switch.saga_screen
+    default:
+      - action: number.set_value
+        target:
+          entity_id: number.saga_screen_off_timer
+        data:
+          value: 60
+      - action: switch.turn_off
+        target:
+          entity_id: switch.saga_screen

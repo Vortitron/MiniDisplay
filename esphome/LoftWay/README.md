@@ -29,9 +29,8 @@ The LCD rotates every 8 seconds:
    calendar). Skipped the rest of the week. Reminder to empty indoor
    bins, not to take the outdoor containers out.
    - Top: `Empty tomorrow` / `Empty today`
-   - Bottom: scrolls `C2 food residual newspapers colour glass` or
-     `C1 paper plastic metal clear glass`. Cycles between C1 and C2
-     if both are due.
+   - Bottom: `RecylBin` (C1 packaging), `OtherBin` (C2 food/residual/
+     newspapers/coloured glass), or `BothBins` if both are due.
 
 Top row is used for compact numeric/status info, bottom row for descriptive/scrolling text.
 
@@ -55,12 +54,21 @@ Two brightness levels, both PWM on `GPIO4` (linear, gamma 1.0):
   up bright when you stand there.
 - At boot the backlight is forced full for 30 s. A short press of
   the lights button forces full for 60 s.
+- **23:00–07:00:** PWM is capped at `dim_brightness_night` (4%).
+  Linger, button and boot cannot go brighter. The tap sequence still
+  runs; only the LCD stays dim.
+- **Bedtime:** while the Pixel 8 is on charge
+  (`binary_sensor.pixel_8_is_charging`) between `pir_quiet_from_hour`
+  (21) and `pir_quiet_until_hour` (07), motion does not light the LCD
+  at all — no dim glow, no linger. A button tap still does, and
+  `LoftC3 Motion` still reports to HA.
 
-Day vs night is decided by the clock + `sun.sun`:
+Day vs night dim level is decided by the clock + `sun.sun`:
 
 - **Day** = 07:00 onwards until **min(sunset, 23:00)**.
 - **Night** = otherwise (incl. forced after 23:00 even if sun
-  technically up at high latitudes in summer).
+  technically up at high latitudes in summer). PIR dim uses 4% in
+  this window; the hard “never bright” cap is clock-only 23:00–07:00.
 
 Between dashboard pages the backlight does a **fade-through-black**
 (`fade_thru_black_out_ms` 450 ms down, `fade_black_hold_ms` 50 ms black,
@@ -118,7 +126,7 @@ These are set in substitutions at the top of `NewLoftWayC3.yaml` and can be chan
 - `sensor.forecast_tonight_min` - HA template sensor (same file)
 - `sun.sun` - HA built-in sun entity
 - `input_number.loftc3_lcd_brightness_day` - full brightness when lingering (day)
-- `input_number.loftc3_lcd_brightness_night` - full brightness when lingering (night); 0 falls back to the day slider
+- `input_number.loftc3_lcd_brightness_night` - full brightness when lingering after sunset until 23:00; 0 falls back to the day slider. Ignored 23:00–07:00 (capped at 4%).
 - `input_text.minidisplay_notification_ids`
 - `input_text.minidisplay_notification_titles`
 - `input_text.minidisplay_notification_messages`
@@ -292,7 +300,8 @@ Gestures while the 1-minute full backlight window is active. The
 sequence resets when that window expires. Successful light overlays
 last about 2 seconds. Tap 1 does not overlay the dashboard.
 
-- **Tap 1:** LCD backlight full for 60 s. No room lights. No overlay.
+- **Tap 1:** LCD backlight full for 60 s (night-dim only 23:00–07:00).
+  No room lights. No overlay.
 - **Tap 2** (backlight still on): turn on only
   `light.loft_lights`, `light.isp_1a3c38_3c38`,
   `light.isp_0db21e_b21e`. Overlay `LEDs on` then `n/3 on`. A miss is
@@ -313,6 +322,20 @@ The button publishes `sensor.loft_loftc3_light_command`. Automation
 `loftc3_light_command` actually switches the lights. BLE LED sets are
 staggered so the proxy is not flooded.
 
+Plugging in the Pixel 8 after 21:00 / before 06:45 runs
+`Loft lights off Pixel charge`: loft floor off, then the stairs
+strip (`light.isp_0db21e_b21e`) to red at 3%. The Pixel wall
+charger reports `ac`, so that value is a trigger as well as `usb`.
+The red command is last, because the floor turn-off includes the
+stairs and would otherwise leave them off. The other iDeal strips
+are only switched off. HA cannot see DIY patterns
+([idealLED](https://github.com/8none1/idealLED) has no state
+discovery and does not expose DIY); the stairs red write replaces
+that strip's DIY, the others can resume on a bare LoftC3
+`light.turn_on`. Hold still only turns the room lights off (stairs
+stay, including the dim red). Extra hold at night still kills the
+stairs.
+
 The ESPHome dashboard “`homeassistant.service` → `homeassistant.action`”
 banner is **not** LoftC3 (this device no longer calls HA actions). It
 appears on BedroomLights, Kitchen Detectorer, MiniDisplay and
@@ -326,13 +349,14 @@ want the rename applied there.
    jumper on. Button on **`GPIO10` to GND** (not GPIO5).
 2. Flash `NewLoftWayC3.yaml`.
 3. Check boot logs for detected I2C devices (`0x27` or `0x3F`).
-4. Confirm the LCD backlight PWM: boot should light it for 30 s; the
-   day slider should dim it. If USB current-limits, the collector is
-   on the 5 V jumper pad — unplug and move it to pin 16. If the LCD
-   stays dark with USB happy, the transistor is on the anode or the
-   LED jumper is off.
+4. Confirm the LCD backlight PWM: boot should light it for 30 s
+   (dim only if the clock is 23:00–07:00); the day slider should
+   dim it. If USB current-limits, the collector is on the 5 V jumper
+   pad — unplug and move it to pin 16. If the LCD stays dark with USB
+   happy, the transistor is on the anode or the LED jumper is off.
 5. Trigger PIR movement and verify backlight timeout behaviour.
-6. Press the GPIO10 button once: LCD should go full for 1 minute.
+6. Press the GPIO10 button once: LCD should go full for 1 minute
+   (stays at night-dim if the clock is 23:00–07:00).
    Press again while it is on: the three loft LED sets should come on
    (staggered; a miss is retried). Press a third time: all Loft-area
    lights. Press a fourth time: back to the three LED sets only.

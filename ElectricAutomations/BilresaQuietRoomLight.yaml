@@ -1,0 +1,245 @@
+# Quiet room BILRESA, Button (1) → light.bedroom_light.
+#
+# Replaces the latching switch + colour button of the retired ESPHome
+# BedroomLights box (esphome/BedroomLights/BedroomLights.yaml) and keeps
+# its colours and brightness steps.
+#
+# Tap         off → on in the last colour. On → next colour in `palette`
+#             (Candle, Warm white, Neutral, Daylight, Red, Orange, Purple,
+#             Blue, Green, Pink), keeping the brightness. A tap more than
+#             idle_off_s (60 s) after this button's last press turns the
+#             light off instead.
+# Double tap  this light off. After a minute of quiet, every quiet-room
+#             light off (stand and candle lamp too).
+# Hold        brightness steps through `levels` (0-255) every step_ms
+#             while held, wrapping round, from the step after the current
+#             brightness. From off it comes on in the last colour at the
+#             lowest step. Letting go stops it (mode: restart).
+# Both        holding both buttons is Going Out (BilresaGoingOut.yaml);
+#             tapping both just acts on each button.
+#
+# The colour position lives in colour_helper: the bulb cannot report it
+# reliably (candle, warm white and orange are close in hue).
+# Candle is a colour, not a white: ~1900 K is below the bulb's 2700 K
+# floor, so it uses the same hue as the other candles.
+# No desired-temperature change here, unlike the living-room and kid's-room
+# remotes: this is a bedroom, often used at night.
+#
+# Duplicate-event, update and both-buttons handling are the same as
+# BilresaBio.yaml.
+alias: BILRESA button - Quiet room light
+id: bilresa_quiet_room_light
+description: >-
+  Quiet room BILRESA Button (1), bedroom light. Tap cycles colours (Candle,
+  whites, then red, orange, purple, blue, green, pink); the first tap after a
+  minute turns it off. Hold steps the brightness until let go. Double tap:
+  off; after a minute, every quiet-room light off. Holding both buttons is
+  Going Out.
+mode: restart
+variables:
+  own: event.quiet_room_quiet_room_bilresa_button_1
+  remote_update: update.quiet_room_quiet_room_bilresa_firmware
+  lamp: light.bedroom_light
+  other_lamp: light.bedroom_light_stand
+  candle: light.candle_lamp_w505z2
+  colour_helper: input_number.quiet_room_light_colour
+  idle_off_s: 60
+  palette:
+    - {name: Candle, hs: [30, 85]}
+    - {name: Warm white, k: 2700}
+    - {name: Neutral, k: 3500}
+    - {name: Daylight, k: 6500}
+    - {name: Red, hs: [0, 100]}
+    - {name: Orange, hs: [39, 100]}
+    - {name: Purple, hs: [300, 100]}
+    - {name: Blue, hs: [240, 100]}
+    - {name: Green, hs: [120, 100]}
+    - {name: Pink, hs: [350, 25]}
+  levels: [10, 30, 60, 90, 130, 180, 230, 255]
+  step_ms: 800
+  max_steps: 40
+  # True when both buttons were HELD (long_press) in the last 0.5 s:
+  # that is Going Out. Taps are never a combo, so they act at once.
+  # Self-contained on purpose: sibling variables may be evaluated in any
+  # order, so it names its entities and window itself.
+  combo: >-
+    {% set ns = namespace(both=true) %}
+    {% for e in ['event.quiet_room_quiet_room_bilresa_button_1',
+                 'event.quiet_room_quiet_room_bilresa_button_2'] %}
+      {% set s = states[e] %}
+      {% set t = as_datetime(s.state, none) if s else none %}
+      {% if t is none or s.attributes.event_type != 'long_press'
+            or (now() - t).total_seconds() > 0.5 %}
+        {% set ns.both = false %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.both }}
+triggers:
+  - trigger: state
+    entity_id:
+      - event.quiet_room_quiet_room_bilresa_button_1
+      - event.quiet_room_quiet_room_bilresa_button_2
+conditions:
+  # An event entity coming back from unavailable restores its old
+  # timestamp; that is not a press.
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none
+         and trigger.from_state.state != 'unavailable'
+         and trigger.to_state.state not in ['unknown', 'unavailable'] }}
+  # Drop a copy of an event (same type, same button, under 0.3 s later).
+  - condition: template
+    value_template: >-
+      {% set prev = as_datetime(trigger.from_state.state, none) %}
+      {% set cur = as_datetime(trigger.to_state.state, none) %}
+      {{ prev is none or cur is none
+         or trigger.from_state.attributes.event_type != trigger.to_state.attributes.event_type
+         or (cur - prev).total_seconds() > 0.3 }}
+  # Ignore the remote while its firmware update runs (replayed presses).
+  - condition: template
+    value_template: "{{ not is_state_attr(remote_update, 'in_progress', true) }}"
+  # The sibling only gets in as the second half of a both-buttons press.
+  - condition: template
+    value_template: "{{ trigger.entity_id == own or combo }}"
+actions:
+  # Both buttons within the window, whichever fired first.
+  - if:
+      - condition: template
+        value_template: "{{ combo }}"
+    then:
+      - stop: Both buttons pressed; BILRESA Going Out handles it
+  - variables:
+      press: "{{ trigger.to_state.attributes.event_type }}"
+      # No press on this button for idle_off_s (from_state is its
+      # previous event).
+      idle: >-
+        {% set t = as_datetime(trigger.from_state.state, none) %}
+        {{ t is none or (now() - t).total_seconds() > idle_off_s }}
+  - if:
+      - condition: template
+        value_template: "{{ press != 'long_release' }}"
+    then:
+      # Holds: 0.5 s for the other button's hold to arrive (Going Out).
+      # Taps: 0.1 s, so a backlog of stored-up presses that the Matter
+      # server delivers all at once (2026-10-03 and 2026-10-05: up to seven
+      # within 40 ms) acts only on the last one. Each later press restarts
+      # this run (mode: restart) before the earlier one acts. Live presses
+      # are never that close together.
+      - delay:
+          milliseconds: "{{ 500 if press == 'long_press' else 100 }}"
+  - variables:
+      lamp_on: "{{ is_state(lamp, 'on') }}"
+      idx: "{{ (states(colour_helper) | int(1)) % (palette | count) }}"
+  - choose:
+      # First tap in a while, light on → off.
+      - conditions: "{{ press == 'multi_press_1' and idle and lamp_on }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ lamp }}"
+      # Tap: off → on in the last colour; on → next colour.
+      - conditions: "{{ press == 'multi_press_1' }}"
+        sequence:
+          - variables:
+              new_idx: "{{ ((idx + 1) % (palette | count)) if lamp_on else idx }}"
+          - variables:
+              colour: "{{ palette[new_idx] }}"
+          - action: input_number.set_value
+            continue_on_error: true
+            target:
+              entity_id: "{{ colour_helper }}"
+            data:
+              value: "{{ new_idx }}"
+          - if:
+              - condition: template
+                value_template: "{{ 'k' in colour }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ lamp }}"
+                data:
+                  color_temp_kelvin: "{{ colour.k }}"
+            else:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ lamp }}"
+                data:
+                  hs_color: "{{ colour.hs }}"
+      # Double tap after a minute of quiet → every quiet-room light off
+      # (bedroom light, stand and candle lamp).
+      - conditions: "{{ press == 'multi_press_2' and idle }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id:
+                - "{{ lamp }}"
+                - "{{ other_lamp }}"
+                - "{{ candle }}"
+      - conditions: "{{ press == 'multi_press_2' }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ lamp }}"
+      # Hold: step the brightness until let go.
+      - conditions: "{{ press == 'long_press' }}"
+        sequence:
+          - variables:
+              # Index of the level nearest the current brightness; -1 when
+              # off, so the first step is the lowest level.
+              start: >-
+                {% set b = state_attr(lamp, 'brightness') | int(0) %}
+                {% set ns = namespace(i=0, d=999) %}
+                {% for l in levels %}
+                  {% if (l - b) | abs < ns.d %}
+                    {% set ns.d = (l - b) | abs %}
+                    {% set ns.i = loop.index0 %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.i if lamp_on else -1 }}
+              colour: "{{ palette[idx] }}"
+          # From off: on in the last colour first.
+          - if:
+              - condition: template
+                value_template: "{{ not lamp_on }}"
+            then:
+              - if:
+                  - condition: template
+                    value_template: "{{ 'k' in colour }}"
+                then:
+                  - action: light.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ lamp }}"
+                    data:
+                      color_temp_kelvin: "{{ colour.k }}"
+                      brightness: "{{ levels[0] }}"
+                else:
+                  - action: light.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ lamp }}"
+                    data:
+                      hs_color: "{{ colour.hs }}"
+                      brightness: "{{ levels[0] }}"
+              - delay:
+                  milliseconds: "{{ step_ms }}"
+          - repeat:
+              count: "{{ max_steps }}"
+              sequence:
+                - action: light.turn_on
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ lamp }}"
+                  data:
+                    brightness: >-
+                      {% set first = 1 if start < 0 else start + 1 %}
+                      {{ levels[(first + repeat.index - 1) % (levels | count)] }}
+                - delay:
+                    milliseconds: "{{ step_ms }}"
+      # long_release: nothing to do. Starting this run has already
+      # cancelled the brightness steps (mode: restart).

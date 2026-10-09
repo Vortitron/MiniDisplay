@@ -25,6 +25,10 @@ description: >-
   - Heating, fan OFF: living-room sensor.
   - Heating, circulation fan ON: min(living, bedroom) so Sam keeps working
     until the bedroom catches up.
+  - Neither room sensor available (e.g. Tuya signed out): fall back to Sam's
+    own sensor. Sam heats as its own thermostat at control +
+    heat_fallback_offset (its ceiling sensor over-reads), and cooling decisions
+    use the internal reading. Headline shows "Sam sensor only".
 
   ## Heating behaviour (when not in cooling mode)
 
@@ -104,9 +108,19 @@ variables:
   max_stop_heat_offset: -5
   temp_tolerance: 0.5
   fan_only_diff: 3
-  # Cap Sam setpoint so internal+boost cannot drive a "sauna" under the unit.
-  sam_setpoint_cap: 27
+  # Heating ceiling for the ROOM, read from the living-room sensor. Sam sits near
+  # the ceiling, so its internal sensor over-reads while it heats and is only a
+  # guide for what setpoint to request: to get the low 20s in the room Sam may
+  # need asking for its max (30°C). Heating stops once the room reaches this.
+  heat_room_max: 27
+  # Cooling setpoint ceiling. Cooling asks for internal-1, and the over-reading
+  # ceiling sensor would otherwise request 29°C and barely cool.
+  cool_setpoint_cap: 27
   # Fallbacks if the climate entity does not expose min/max temp attributes
+  # No room sensor at all (living AND bedroom unavailable): Sam runs as its own
+  # thermostat at control + this. Its sensor sits near the ceiling and reads
+  # warm, so asking for exactly the target would leave the room short.
+  heat_fallback_offset: 2
   sam_min_temp_fallback: 10
   sam_max_temp_fallback: 30
   # Super-expensive mode: only switch Sam fully off when it is just idling — i.e.
@@ -123,7 +137,6 @@ triggers:
       - sensor.bedroomlights_bedroomlights_temperature
       - sensor.sam_outside_temperature
       - sensor.sam_inside_temperature
-      - input_number.sam_control_temperature
     for:
       seconds: 30
   - trigger: state
@@ -133,6 +146,9 @@ triggers:
       - input_boolean.super_expensive_active
       - input_boolean.on_fixed_price_feed
       - input_boolean.sam_superchill_active
+  # A new control target should act now, not in 30 s — so this one is
+  # deliberately undebounced. (It used to ALSO sit in the debounced sensor
+  # block above, so every control change evaluated Sam twice, ~30 s apart.)
   - trigger: state
     entity_id:
       - input_text.sam_hvac_reason
@@ -162,6 +178,9 @@ actions:
       outdoor_ok: "{{ sam_outdoor_state not in ['unknown', 'unavailable', 'none', ''] }}"
       internal_ok: "{{ sam_internal_state not in ['unknown', 'unavailable', 'none', ''] }}"
       control_ok: "{{ sam_control_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      # Both room sensors gone: steer from Sam's own (ceiling) sensor rather
+      # than skip and leave Sam on whatever it was last told.
+      internal_fallback: "{{ internal_ok and not living_room_temp_ok and not bedroom_temp_ok }}"
 
       living_room_temp: "{{ living_room_temp_state | float(0) }}"
       bedroom_temp: "{{ bedroom_temp_state | float(0) }}"
@@ -200,7 +219,7 @@ actions:
         {% else %}
           Daytime economy {{ desired_base | round(0) }}°C
         {% endif %}
-      internal_at_unit_hot: "{{ internal_ok and internal >= sam_setpoint_cap }}"
+      room_at_heat_max: "{{ living_room_temp_ok and living_room_temp >= heat_room_max }}"
 
       # Effective heating/cooling target. This used to blend in the mama
       # bedroom thermostat target, but that thermostat/heater was retired
@@ -208,12 +227,13 @@ actions:
       # the effective target is simply the price-adjusted control temperature.
       desired_effective: "{{ desired_base }}"
 
-      # Cooling still uses the living room sensor.
-      remote_cool: "{{ living_room_temp }}"
+      # Cooling uses the living room sensor (Sam's own when no room sensor).
+      remote_cool: "{{ internal if internal_fallback else living_room_temp }}"
 
       # Heating uses:
       # - living room sensor when circulation fan is off
       # - min(bedroom,living) when circulation fan is on (so Sam keeps heating until bedroom catches up)
+      # - Sam's internal sensor when neither room sensor is available
       remote_heat: >-
         {% if fan_running %}
           {% if living_room_temp_ok and bedroom_temp_ok %}
@@ -223,7 +243,7 @@ actions:
           {% elif living_room_temp_ok %}
             {{ living_room_temp }}
           {% else %}
-            0
+            {{ internal }}
           {% endif %}
         {% else %}
           {% if living_room_temp_ok %}
@@ -231,7 +251,7 @@ actions:
           {% elif bedroom_temp_ok %}
             {{ bedroom_temp }}
           {% else %}
-            0
+            {{ internal }}
           {% endif %}
         {% endif %}
       remote_heat_source: >-
@@ -243,7 +263,7 @@ actions:
           {% elif living_room_temp_ok %}
             living
           {% else %}
-            none
+            sam internal
           {% endif %}
         {% else %}
           {% if living_room_temp_ok %}
@@ -251,7 +271,7 @@ actions:
           {% elif bedroom_temp_ok %}
             bedroom
           {% else %}
-            none
+            sam internal
           {% endif %}
         {% endif %}
       # Guard: allow living-room overheating to help bedroom, but never above
@@ -308,7 +328,8 @@ actions:
       # trend / cheaper-still-later guessing.
       cool_hot_rooms: >-
         {{ (living_room_temp_ok and living_room_temp > cool_hot_room)
-           or (bedroom_temp_ok and bedroom_temp > cool_hot_room) }}
+           or (bedroom_temp_ok and bedroom_temp > cool_hot_room)
+           or (internal_fallback and internal > cool_hot_room) }}
       hot_cheap_cool: "{{ cheap_now and outdoor > cool_hot_outdoor and cool_hot_rooms }}"
       # Pre-cool opportunity: power cheap now, a hot day forecast, NOT about to
       # get cooler outside, and there is still warmth to remove from the room.
@@ -334,7 +355,8 @@ actions:
         {% else %}
           {% set unclamped = internal %}
         {% endif %}
-        {{ [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max }}
+        {% set clamped = [sam_min_temp, [sam_max_temp, cool_setpoint_cap, unclamped] | min] | max %}
+        {{ (clamped * 2) | round(0) / 2 }}
       cool_action_label: >-
         {% if is_state('input_boolean.sam_superchill_active', 'on') %}Superchill
         {% elif cool_use_compressor and precool_now and not very_hot and not hot_cheap_cool %}Pre-cool (cheap)
@@ -345,14 +367,20 @@ actions:
       heat_diff: "{{ remote_heat - desired_effective }}"
       heat_need: "{{ desired_effective - remote_heat }}"
       heat_boost: "{{ [heat_offset, heat_need] | max }}"
-      # fan_only when: unit already hot, living above all targets, free-cooling
-      # opportunity (cold remote but warm outdoors), or remote far above target.
-      heat_fan_only: "{{ internal_at_unit_hot or living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or heat_diff > fan_only_diff }}"
+      # fan_only when: room at the heating ceiling, living above all targets,
+      # free-cooling opportunity (cold remote but warm outdoors), or remote far
+      # above target. Sam's own sensor never forces fan_only — it over-reads.
+      # On internal_fallback Sam stays in heat and regulates itself.
+      heat_fan_only: "{{ not internal_fallback and (room_at_heat_max or living_above_all_targets or (remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective) or heat_diff > fan_only_diff) }}"
       heat_mode: "{{ 'fan_only' if heat_fan_only else 'heat' }}"
+      # Clamped to the unit's own range only, and rounded to its 0.5°C step so
+      # the unchanged-setpoint check against climate.sam compares like with like.
       heat_setpoint: >-
-        {% if living_above_all_targets %}
+        {% if internal_fallback %}
+          {% set unclamped = desired_effective + heat_fallback_offset %}
+        {% elif living_above_all_targets %}
           {% set unclamped = internal + [base_stop_heat_offset - (living_overheat_diff | float(0)), max_stop_heat_offset] | max %}
-        {% elif internal_at_unit_hot %}
+        {% elif room_at_heat_max %}
           {% set unclamped = internal + max_stop_heat_offset %}
         {% elif remote_heat < desired_effective - temp_tolerance %}
           {% set unclamped = internal + heat_boost %}
@@ -361,17 +389,21 @@ actions:
         {% else %}
           {% set unclamped = internal %}
         {% endif %}
-        {{ [sam_min_temp, [sam_max_temp, sam_setpoint_cap, unclamped] | min] | max }}
+        {% set clamped = [sam_min_temp, [sam_max_temp, unclamped] | min] | max %}
+        {{ (clamped * 2) | round(0) / 2 }}
       # Short action word for the headline/status suffix.
       heat_action_label: >-
-        {% if internal_at_unit_hot %}Unit hot, fan only
+        {% if internal_fallback %}Sam sensor only
+        {% elif room_at_heat_max %}Room at max, fan only
         {% elif not heat_fan_only %}Heating
         {% elif living_above_all_targets %}Warm enough
         {% elif remote_heat < desired_effective - temp_tolerance and outdoor > desired_effective %}Coasting (mild)
         {% else %}Fan only{% endif %}
   - if:
       - condition: template
-        value_template: "{{ not (outdoor_ok and internal_ok and control_ok and (living_room_temp_ok or bedroom_temp_ok)) }}"
+        # Room sensors are optional (internal_fallback); Sam's own readings and
+        # the control target are not.
+        value_template: "{{ not (outdoor_ok and internal_ok and control_ok) }}"
     then:
       - action: logbook.log
         data:
@@ -502,25 +534,34 @@ actions:
                   entity_id: climate.sam
                 data:
                   preset_mode: none
-          - action: climate.set_hvac_mode
-            target:
-              entity_id: climate.sam
-            data:
-              hvac_mode: "{{ cool_mode }}"
-          - action: climate.set_temperature
-            target:
-              entity_id: climate.sam
-            data:
-              temperature: "{{ cool_setpoint | float }}"
-              hvac_mode: "{{ cool_mode }}"
-          - action: logbook.log
-            data:
-              name: Sam HVAC
-              message: >-
-                Cooling: {{ cool_action_label | trim }} (mode={{ cool_mode }}, setpoint={{ cool_setpoint | round(1) }}°C, preset={{ sam_preset }}),
-                living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C,
-                very_hot={{ very_hot }}, precool={{ precool_now }}, hot_cheap={{ hot_cheap_cool }}, cooling_trend={{ outdoor_cooling_trend }} (base {{ cool_trend_baseline | round(1) }}°C),
-                cheap_now={{ cheap_now }}, bedroom={{ bedroom_temp | round(1) }}°C, fc_day_max={{ forecast_day_max | round(1) }}°C, fc_out_4h={{ forecast_out_4h | round(1) }}°C
+          # Only talk to the unit when mode or setpoint actually differ. The
+          # sensor triggers fire every ~30 s and re-sending identical commands
+          # just churns the AC and the logbook.
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ states('climate.sam') != cool_mode
+                     or (state_attr('climate.sam', 'temperature') | float(-1)) != (cool_setpoint | float) }}
+            then:
+              - action: climate.set_hvac_mode
+                target:
+                  entity_id: climate.sam
+                data:
+                  hvac_mode: "{{ cool_mode }}"
+              - action: climate.set_temperature
+                target:
+                  entity_id: climate.sam
+                data:
+                  temperature: "{{ cool_setpoint | float }}"
+                  hvac_mode: "{{ cool_mode }}"
+              - action: logbook.log
+                data:
+                  name: Sam HVAC
+                  message: >-
+                    Cooling: {{ cool_action_label | trim }} (mode={{ cool_mode }}, setpoint={{ cool_setpoint | round(1) }}°C, preset={{ sam_preset }}),
+                    living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C,
+                    very_hot={{ very_hot }}, precool={{ precool_now }}, hot_cheap={{ hot_cheap_cool }}, cooling_trend={{ outdoor_cooling_trend }} (base {{ cool_trend_baseline | round(1) }}°C),
+                    cheap_now={{ cheap_now }}, bedroom={{ bedroom_temp | round(1) }}°C, fc_day_max={{ forecast_day_max | round(1) }}°C, fc_out_4h={{ forecast_out_4h | round(1) }}°C
           - action: input_text.set_value
             target:
               entity_id: input_text.sam_hvac_headline
@@ -559,28 +600,35 @@ actions:
                   entity_id: climate.sam
                 data:
                   preset_mode: none
-          - action: climate.set_hvac_mode
-            target:
-              entity_id: climate.sam
-            data:
-              hvac_mode: "{{ heat_mode }}"
-          - action: climate.set_temperature
-            target:
-              entity_id: climate.sam
-            data:
-              temperature: "{{ heat_setpoint }}"
-              hvac_mode: "{{ heat_mode }}"
-          - action: logbook.log
-            data:
-              name: Sam HVAC
-              message: >-
-                Heating: mode={{ heat_mode }},
-                control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C,
-                need={{ heat_need | round(1) }}°C, boost={{ heat_boost | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C,
-                remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source }},
-                living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, overheat_guard={{ living_above_all_targets }},
-                fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
-                {% if desired_base > (sam_desired_state | float(0)) + 0.5 %} [pre-warm: control>{{ sam_desired_state }} desired]{% endif %}
+          # Same unchanged-command guard as the cooling branch.
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ states('climate.sam') != heat_mode
+                     or (state_attr('climate.sam', 'temperature') | float(-1)) != (heat_setpoint | float) }}
+            then:
+              - action: climate.set_hvac_mode
+                target:
+                  entity_id: climate.sam
+                data:
+                  hvac_mode: "{{ heat_mode }}"
+              - action: climate.set_temperature
+                target:
+                  entity_id: climate.sam
+                data:
+                  temperature: "{{ heat_setpoint }}"
+                  hvac_mode: "{{ heat_mode }}"
+              - action: logbook.log
+                data:
+                  name: Sam HVAC
+                  message: >-
+                    Heating: mode={{ heat_mode }},
+                    control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C,
+                    need={{ heat_need | round(1) }}°C, boost={{ heat_boost | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C,
+                    remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source }},
+                    living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, overheat_guard={{ living_above_all_targets }},
+                    fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
+                    {% if desired_base > (sam_desired_state | float(0)) + 0.5 %} [pre-warm: control>{{ sam_desired_state }} desired]{% endif %}
           - action: input_text.set_value
             target:
               entity_id: input_text.sam_hvac_headline
@@ -611,3 +659,8 @@ actions:
                   name: Sam HVAC
                   message: "Circulation fan OFF (not cooling; outdoor {{ outdoor | round(1) }}°C)."
     default: []
+# One run waits behind the current one, so a change that lands mid-run is still
+# applied (with fresh state) instead of dropped as "Already running".
+mode: queued
+max: 2
+max_exceeded: silent

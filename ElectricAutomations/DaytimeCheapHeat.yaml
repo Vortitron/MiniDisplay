@@ -3,7 +3,20 @@ description: >-
   Sets sam_desired_temperature based on occupancy, time of day, and holiday
   mode. Computes sam_control_temperature by adjusting desired for electricity
   price: overheat when cheap, pre-warm before evening, reduce to 16 when
-  expensive.
+  expensive (spot at or above today's average AND dearer than the next 4 h).
+
+  Pre-warming (Sep 2026 rework, see README_SamHVAC.md):
+    - Any boost needs BOTH a relative signal (cheaper now than the next 4 h)
+      and an absolute one (cheap_leccy, or the cheaper half of today's hours).
+      The relative test alone is true on the run-up into every price peak.
+    - The expensive-hour cut needs the same two-sided test in reverse: relative
+      (dearer now than the next 4 h) AND absolute (spot >= today's average).
+      Otherwise a dirt-cheap overnight makes a still-cheap morning look dear.
+    - Pre-warm only happens in a window before 19:00 — from 15:00, or 13:00
+      when it is below 10°C out — because heat banked earlier has leaked away
+      by evening at the learned time constant (~6 h).
+    - The overshoot is always sized by prewarm_control_target and the three
+      thermal-model skip guards. There is no longer a flat 25°C branch.
 
   Manual changes to sam_desired_temperature (from the HA UI, KitchenDetectorer
   Button 6, the MiniDisplay, voice, automations, scripts, etc.) are now
@@ -87,7 +100,20 @@ actions:
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
       current_hour: "{{ now().hour }}"
       evening_hours: "{{ current_hour | int >= 19 and current_hour | int < 23 }}"
-      approaching_evening: "{{ current_hour | int >= 15 and current_hour | int < 19 }}"
+      # ---- Pre-warm window ----
+      # Heat banked much earlier than it is wanted has leaked away again by the
+      # time anyone is sitting in it. At the learned house time constant
+      # (input_number.house_thermal_tau, ~6 h) a 15:00 pre-warm still holds
+      # ~51% of its overshoot at 19:00; an 03:00 one holds ~7%. So pre-warming
+      # only ever happens inside a window before 19:00 — from 15:00 normally,
+      # and from 13:00 when it is cold out, since the house then heats more
+      # slowly and needs the extra couple of hours to get there.
+      cold_outside_threshold: 10
+      cold_outside: "{{ outside_temp < cold_outside_threshold }}"
+      prewarm_window_start: "{{ 13 if cold_outside else 15 }}"
+      approaching_evening: >-
+        {{ current_hour | int >= prewarm_window_start | int
+           and current_hour | int < 19 }}
       # ---- Summer: skip morning heating on a hot day ----
       # If the day is forecast to be warm there's no point heating (or
       # cheap-boosting) the house in the morning — it will warm up by itself.
@@ -108,11 +134,36 @@ actions:
       # boost and no expensive-hour cut — just run normal occupancy/comfort heating.
       on_fixed_price: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
       electricity_cheap_now: "{{ price_rank < price_rank_4h and not on_fixed_price }}"
+      # electricity_cheap_now is purely RELATIVE — "cheaper now than the coming
+      # 4 h" — which is also true on the run-up into every price peak. On
+      # 3 Sep 2026 it flagged 06:00 (1.85 SEK, the 9th DEAREST hour of 24) and
+      # 18:00 (2.14 SEK, 2nd dearest) as "cheap", purely because the hours after
+      # them were worse. Heating the house hard at those moments is the opposite
+      # of the intent, so any boost must also clear an absolute bar: either the
+      # cheap_leccy window (<= 50% of the daily average) or the cheaper half of
+      # today's hours. Lower cheap_rank_ceiling to boost more rarely.
+      cheap_rank_ceiling: 11
+      price_genuinely_cheap: >-
+        {{ is_state('input_boolean.cheap_leccy', 'on')
+           or price_rank <= cheap_rank_ceiling }}
+      # Inverse problem (10 Sep 2026 09:40): overnight was 0.16 SEK, so a
+      # 0.66 SEK morning ranked 15/24 and the relative test called it
+      # "Electricity expensive". In kronor it was cheap — daily average
+      # ~1.23, evening 4–6 SEK. Only treat "dearer than the next 4 h" as
+      # expensive when the spot price is at or above today's average.
+      nordpool_price: "{{ states('sensor.nordpool_kwh_se4_sek_3_10_025') | float(0) }}"
+      nordpool_average: >-
+        {{ state_attr('sensor.nordpool_kwh_se4_sek_3_10_025', 'average') | float(nordpool_price) }}
+      price_genuinely_expensive: "{{ nordpool_price >= nordpool_average }}"
+      electricity_expensive_now: >-
+        {{ price_rank > price_rank_4h and price_genuinely_expensive
+           and not tv_on and not on_fixed_price }}
       # Relative "cheap" must not trigger afternoon-style boost during 19:00–23:00,
       # nor a wasteful morning warm-up when the day is going to be hot anyway.
       evening_hours_block_boost: "{{ evening_hours }}"
       cheap_for_boost: >-
-        {{ electricity_cheap_now and not evening_hours_block_boost
+        {{ electricity_cheap_now and price_genuinely_cheap
+           and not evening_hours_block_boost
            and not suppress_morning_heat }}
       evening_comfort_target: 20
       evening_hold_floor: 19
@@ -168,8 +219,10 @@ actions:
       prewarm_skip_on_track: >-
         {{ hours_to_20 < 99 and living_ok and living_temp >= 17.5
            and hours_to_20 <= (hours_until_19 | float) + 1.0 }}
+      # NB: gated on cheap_for_boost, not the raw relative electricity_cheap_now,
+      # so the absolute price bar above applies to pre-warming too.
       use_prewarm_25_evening: >-
-        {{ electricity_cheap_now and approaching_evening
+        {{ cheap_for_boost and approaching_evening
            and not prewarm_skip_comfortable
            and not prewarm_skip_mild_night
            and not prewarm_skip_on_track
@@ -199,9 +252,14 @@ actions:
           {% else %}
             {{ [d, evening_hold_floor + 1] | max }}
           {% endif %}
-        {% elif cheap_for_boost and outside_temp < 10 %}
-          {{ prewarm_max }}
         {% elif use_prewarm_25_evening %}
+          {# Cold weather no longer gets its own flat 25°C branch. It used to
+             sit ABOVE this one and win on every cheap hour below 10°C outside,
+             which meant that all winter the three skip guards and the sizing
+             below never ran at all — pre-warm silently reverted to a flat 25°C
+             at any hour of the day or night. Cold is now handled by starting
+             the pre-warm window earlier (prewarm_window_start), with the
+             overshoot sized by the thermal model as it always should have been. #}
           {{ prewarm_control_target }}
         {% elif cheap_for_boost %}
           {% set boosted = [d + 3, prewarm_max] | min %}
@@ -210,7 +268,7 @@ actions:
           {% else %}
             {{ boosted }}
           {% endif %}
-        {% elif price_rank > price_rank_4h and not tv_on and not on_fixed_price %}
+        {% elif electricity_expensive_now %}
           16
         {% else %}
           {{ d }}
@@ -241,9 +299,9 @@ actions:
         {% elif suppress_morning_heat and electricity_cheap_now %}
           Hot day — no morning heat
         {% elif c > d + 0.5 %}
-          {% if cheap_for_boost and outside_temp < 10 %}
-            Pre-warm (cold + cheap)
-          {% elif cheap_for_boost and approaching_evening and use_prewarm_25_evening %}
+          {% if use_prewarm_25_evening and cold_outside %}
+            Pre-warm to {{ c | round(0) }}°C (cold)
+          {% elif use_prewarm_25_evening %}
             Pre-warm to {{ c | round(0) }}°C (hold 19)
           {% elif cheap_for_boost and approaching_evening %}
             No pre-warm (forecast/model)
@@ -252,25 +310,31 @@ actions:
           {% else %}
             Control above comfort
           {% endif %}
-        {% elif price_rank > price_rank_4h and not tv_on and not on_fixed_price %}
+        {% elif electricity_expensive_now %}
           Electricity expensive
         {% elif tv_on %}
           Evening comfort {{ d | round(0) }}°C
         {% else %}
           Daytime economy {{ d | round(0) }}°C
         {% endif %}
+      # NB: input_text.sam_preheat_calc has max: 255 and set_value is SILENTLY
+      # rejected above that (this is what once stuck sam_hvac_status on
+      # "Initializing..."), so truncate exactly as sam.yaml does.
       preheat_calc: >-
-        desired={{ desired }}°C control={{ control }}°C |
+        {% set s %}desired={{ desired }}°C control={{ control }}°C |
         in={{ living_temp | round(1) if living_ok else 'n/a' }}°C
         out={{ outside_temp | round(1) }}°C fc4h={{ forecast_4h }}°C
         fc23={{ forecast_at_23 | round(1) }}°C night={{ forecast_tonight_min | round(1) }}°C |
         k={{ thermal_k }} h={{ thermal_h }} τ={{ thermal_tau }}h
         Teq={{ t_eq_heat }}°C hrs→{{ evening_comfort_target }}={{ hours_to_20 }}h
         until19={{ hours_until_19 }}h |
-        rank {{ price_rank }}/{{ price_rank_4h }} cheap={{ electricity_cheap_now }} |
+        rank {{ price_rank }}/{{ price_rank_4h }} cheap={{ electricity_cheap_now }}
+        abs={{ price_genuinely_cheap }} dear={{ price_genuinely_expensive }}
+        win={{ prewarm_window_start }}h |
         skip: warm={{ prewarm_skip_comfortable }}
         mild={{ prewarm_skip_mild_night }} track={{ prewarm_skip_on_track }}
-        pre25={{ use_prewarm_25_evening }}
+        pre25={{ use_prewarm_25_evening }}{% endset -%}
+        {{ s | truncate(255, True, '', 0) }}
   # Detect a user-driven manual override (current_desired drifted away
   # from what the automation last wrote) and extend the lock. This is
   # also done when holiday mode is OFF only - while holiday mode is on
@@ -340,6 +404,8 @@ actions:
         living={{ living_temp | round(1) if living_ok else 'n/a' }}°C,
         rank={{ price_rank }}, rank_4h={{ price_rank_4h }},
         cheap_now={{ electricity_cheap_now }},
+        expensive_now={{ electricity_expensive_now }},
+        nordpool={{ nordpool_price | round(3) }}/avg={{ nordpool_average | round(3) }},
         hot_day={{ hot_day_ahead }} (fc_max={{ forecast_day_max | round(1) }}°C),
         suppress_am_heat={{ suppress_morning_heat }},
         holiday={{ holiday_mode }},

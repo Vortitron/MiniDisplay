@@ -1,0 +1,36 @@
+{#- sensor.door_message: what the Saga door display should say, or "".
+    UI template helper on GamlaBio (Settings > Helpers > Door message).
+    While it is non-empty the screen stays on (FrontDoorScreen.yaml).
+
+    input_text.door_message   free text, set by hand or other automations
+    bins                      18:00-22:00 the evening before collection
+                              06:30-09:00 on collection day
+    The BEDA sensors carry each collection date as a YYYY-MM-DD attribute
+    key, which is easier to trust than the "on Thu, 08.10.2026" state. -#}
+{%- set bins = [
+  ('sensor.waste_collection_schedule_beda_container_1_packaging_of_paper_plastic_metal_and_clear_glass', 'Bin 1 (packaging)'),
+  ('sensor.waste_collection_schedule_beda_container_2_food_waste_residual_waste_newspapers_and_colored_glass', 'Bin 2 (food & rest)')] -%}
+{%- set h = now().hour + now().minute / 60 -%}
+{%- set ns = namespace(tonight=[], today=[]) -%}
+{%- for e, label in bins -%}
+  {%- for k in states[e].attributes.keys() | select('match', '^\\d{4}-\\d{2}-\\d{2}$') -%}
+    {%- set d = (strptime(k, '%Y-%m-%d', none).date() - now().date()).days -%}
+    {%- if d == 1 and 18 <= h < 22 -%}
+      {%- set ns.tonight = ns.tonight + [label] -%}
+    {%- elif d == 0 and 6.5 <= h < 9 -%}
+      {%- set ns.today = ns.today + [label] -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endfor -%}
+{%- set parts = [] -%}
+{%- set custom = states('input_text.door_message') -%}
+{%- if custom not in ['', 'unknown', 'unavailable'] -%}
+  {%- set parts = parts + [custom] -%}
+{%- endif -%}
+{%- if ns.tonight -%}
+  {%- set parts = parts + ['Bins out tonight: ' ~ ns.tonight | unique | join(', ')] -%}
+{%- endif -%}
+{%- if ns.today -%}
+  {%- set parts = parts + ['Bin day today: ' ~ ns.today | unique | join(', ')] -%}
+{%- endif -%}
+{{ parts | join(' · ') }}

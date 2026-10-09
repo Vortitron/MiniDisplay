@@ -157,6 +157,24 @@ real cat visit could plausibly be just as brief. If that specific false-alert
 pattern recurs, tighten further: shrink the window below 20 s and/or raise the
 edge requirement to 4.
 
+#### Fix note — the 20 s window never worked (2026-10-08)
+
+The cat was in the Allrum all night 2026-10-07/08 and no alert went out. The
+sensor saw her fine — replaying the night through the burst rule gives 5 alerts
+(20:34, 00:06, 06:24, 06:55, 07:26 local) — but the HA log showed
+`Error rendering Movement Downstairs timeout template: TypeError: unsupported
+operand type(s) for -: 'datetime.datetime' and 'str'` on every run.
+
+Cause: `window_start: "{{ now() }}"`. Script variables are stored rendered, so
+it came back as a string and `now() - window_start` raised on the first
+`wait_for_trigger`. The 2026-08-11 rewrite was only ever replayed offline, never
+seen firing live, so it has probably been dead since then. It now stores
+`now().timestamp()` (epoch float) and the timeouts compare floats.
+
+**Live check:** after a fix here, confirm a real overnight run reaches the
+notification (`counter.movement_downstairs` increments) — an offline replay is
+not proof that the templates render.
+
 The notification includes the energy reading so you can tune the numbers
 (crossing 25, 3 edges / 20 s) after a few real vs false nights.
 Redeploy with `deploy_downstairs.py MovementDownstairs.yaml`.

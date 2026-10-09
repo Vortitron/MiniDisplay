@@ -4,13 +4,29 @@
 # perform Home Assistant actions" is ticked on the ESPHome device.
 # The firmware publishes sensor.loft_loftc3_light_command:
 #   leds_on / all_on / leds_only / room_off / stairs_night  (plus a millis nonce)
+#
+# iDeal LED DIY patterns are not exposed in Home Assistant
+# (https://github.com/8none1/idealLED). HA reports 100% white even
+# when a DIY is running, and any rgb/brightness write paints over it.
+# leds_on / all_on / leds_only therefore use a bare light.turn_on so
+# the controller can resume the last DIY. room_off still turns the
+# room lights off and leaves stairs as they are.
+#
+# Morning exception (05:00-12:00): overnight the stairs strip is
+# painted dim red by LoftLightsOffCharge.yaml, so a bare turn_on would
+# only resume the red. When the LEDs go on in the morning the stairs
+# strip is set to built-in "Effect 09" instead.
 alias: LoftC3 light command
 id: loftc3_light_command
 description: >-
   Run loft lights from the LoftC3 button command sensor.
   leds_only turns extras off so only the three LED sets remain.
-  room_off leaves the stairs light on. stairs_night (night extra hold)
-  turns stairs off and lights loft spot south for 30 seconds.
+  ISP strips are turned on with no colour or brightness so DIY
+  patterns survive. room_off leaves the stairs light on.
+  stairs_night (night extra hold) turns stairs off and lights loft
+  spot south for 30 seconds. In the morning (05:00-12:00) turning the
+  LEDs on sets the stairs strip to Effect 09 instead of resuming the
+  overnight red.
 mode: parallel
 max: 6
 triggers:
@@ -27,6 +43,7 @@ conditions:
 actions:
   - variables:
       cmd: "{{ trigger.to_state.state.split(' ')[0] }}"
+      stairs_morning: "{{ 5 <= now().hour < 12 }}"
   - choose:
       - conditions:
           - condition: template
@@ -45,6 +62,16 @@ actions:
           - action: light.turn_on
             target:
               entity_id: light.isp_0db21e_b21e
+          - if:
+              - condition: template
+                value_template: "{{ stairs_morning }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: light.isp_0db21e_b21e
+                data:
+                  effect: Effect 09
       - conditions:
           - condition: template
             value_template: "{{ cmd == 'leds_only' }}"
@@ -64,6 +91,16 @@ actions:
                 - light.loft_lights
                 - light.isp_1a3c38_3c38
                 - light.isp_0db21e_b21e
+          - if:
+              - condition: template
+                value_template: "{{ stairs_morning }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: light.isp_0db21e_b21e
+                data:
+                  effect: Effect 09
       - conditions:
           - condition: template
             value_template: "{{ cmd == 'all_on' }}"
@@ -71,6 +108,16 @@ actions:
           - action: light.turn_on
             target:
               area_id: loft
+          - if:
+              - condition: template
+                value_template: "{{ stairs_morning }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: light.isp_0db21e_b21e
+                data:
+                  effect: Effect 09
       - conditions:
           - condition: template
             value_template: "{{ cmd in ['room_off', 'all_off'] }}"

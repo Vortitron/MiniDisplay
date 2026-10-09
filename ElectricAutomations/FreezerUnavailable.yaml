@@ -1,0 +1,63 @@
+alias: Freezer plug unavailable
+description: >-
+  Alert when the freezer plug (switch.smart_plug_2_switch_1) is unavailable or
+  unknown for 30 minutes — Tuya cloud outage, Wi-Fi drop, or the plug pulled
+  from the wall. While it is missing nothing else in README_Freezer.md can see
+  the freezer, and binary_sensor.living_room_freezer_running goes unavailable
+  too, so the power watch is blind. The 15-minute poll also catches the entity
+  never coming back after a restart. Dismissed once the plug reports again.
+id: freezer_plug_unavailable
+mode: single
+triggers:
+  - trigger: state
+    entity_id: switch.smart_plug_2_switch_1
+    to:
+      - unavailable
+      - unknown
+    for:
+      minutes: 30
+    id: sustained
+  - trigger: time_pattern
+    minutes: "/15"
+    id: poll
+  - trigger: state
+    entity_id: switch.smart_plug_2_switch_1
+    from:
+      - unavailable
+      - unknown
+    to:
+      - "on"
+      - "off"
+    id: back
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: back
+        sequence:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: freezer_unavailable
+      - conditions:
+          - condition: template
+            value_template: >-
+              {% set s = states.switch.smart_plug_2_switch_1 %}
+              {{ s is none
+                 or (s.state in ['unavailable', 'unknown']
+                     and now() - s.last_changed > timedelta(minutes=30)) }}
+        sequence:
+          - action: notify.persistent_notification
+            data:
+              message: >-
+                Freezer plug offline
+                ({{ states('switch.smart_plug_2_switch_1') }}) — freezer not
+                being monitored — Alarm: 2
+              data:
+                notification_id: freezer_unavailable
+          - action: logbook.log
+            data:
+              name: Freezer
+              message: >-
+                Plug entity switch.smart_plug_2_switch_1 is
+                {{ states('switch.smart_plug_2_switch_1') }}
+                (trigger={{ trigger.id }}).

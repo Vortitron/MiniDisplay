@@ -1,0 +1,231 @@
+# Kid's Room BILRESA, Button (2) → night mode (day mode 06:00–18:00).
+#
+# Tap, 18:00–06:00 (night mode)
+#             spot off, Living Room lights off, stand to candle at 10%,
+#             Sky Lite on at 50% in Stars against nebula with fading off.
+#             Does not touch the desired temperature.
+#             Tapped again while night mode is still as it was left (Sky
+#             Lite on, spot off, stand at the dim candle level): Sky Lite
+#             off, the candle stand stays on as a night light. The next
+#             tap is full night mode again. If the light button has turned
+#             the stand up meanwhile, a tap is full night mode again.
+# Tap, 06:00–10:00 (morning)
+#             Living Room lights, stand and spot all to 40% at 4000 K
+#             (between warm and daylight, not harsh first thing), and
+#             raise the desired temperature as in day mode. Never the
+#             Sky Lite: repeated taps just re-apply the morning light.
+# Tap, 10:00–18:00 (day mode)
+#             Living Room lights, stand and spot all to daylight at 50%,
+#             and raise the Sam desired temperature to home_temp_c if
+#             lower (the bedroom opens onto the living room).
+#             A second tap within second_tap_s (60 s) of the last press
+#             on this button turns the Sky Lite on at 100% as well.
+# Double tap  stand, spot and Sky Lite off.
+# Hold        nothing.
+# Both        holding both buttons is Going Out (BilresaGoingOut.yaml);
+#             tapping both just acts on each button.
+#
+# Both-buttons handling is the same as BilresaBio.yaml: a hold waits
+# 0.5 s, and the sibling's hold restarts this run to cancel it.
+#
+# Candle on the stand is a colour, not a white: candle is ~1900 K, below
+# its 2700 K floor. Same hue as the Bio Gold candle.
+# At night the Sky Lite is set to Stars against nebula, fading off, at 50%
+# (it has just 3 brightness levels, so the middle one). The scene goes in
+# the same turn_on as the brightness: the integration switches scene first
+# and sets the brightness on top, as a scene switch resets the brightness.
+# The day second tap only sets brightness and keeps the scene it has.
+alias: BILRESA button - Kid's Room night
+id: bilresa_kids_room_night
+description: >-
+  Kid's Room BILRESA Button (2). Tap at night (18:00–06:00): spot and Living
+  Room lights off, stand candle 10%, Sky Lite on at 50% in Stars against
+  nebula, fading off; tap again for Sky
+  Lite off, leaving the candle stand as a night light. Tap 06:00–10:00: Living
+  Room lights, stand and spot to 40% at 4000 K, never the Sky Lite. Tap
+  10:00–18:00: those lights to 50% daylight; a second tap within a minute
+  adds the Sky Lite at 100%. Daytime taps raise the desired temperature to
+  20 °C.
+  Double tap turns the bedroom lights off. Holding both buttons is Going Out.
+mode: restart
+variables:
+  own: event.bedroom_kid_s_room_bilresa_button_2
+  remote_update: update.bedroom_kid_s_room_bilresa_firmware
+  home_temp_c: 20
+  stand: light.living_office_stand
+  spot: light.bedroom_kajplats_kids_bedroom_spot
+  sky: light.sky_lite
+  sky_fading: switch.sky_lite_fading
+  sky_night_scene: Stars against nebula
+  living_room_lights:
+    - light.kajplats_e14_ws_globe_806lm_2
+    - light.led_flood_light
+  day_start_hour: 6
+  day_end_hour: 18
+  night_stand_pct: 10
+  candle_hs: [30, 85]
+  day_pct: 50
+  morning_end_hour: 10
+  morning_pct: 40
+  morning_k: 4000
+  daylight_k: 6500
+  sky_day_pct: 100
+  sky_night_pct: 50
+  second_tap_s: 60
+  # True when both buttons were HELD (long_press) in the last 0.5 s:
+  # that is Going Out. Taps are never a combo, so they act at once.
+  # Self-contained on purpose: sibling variables may be evaluated in any
+  # order, so it names its entities and window itself.
+  combo: >-
+    {% set ns = namespace(both=true) %}
+    {% for e in ['event.bedroom_kid_s_room_bilresa_button_2',
+                 'event.bedroom_kid_s_room_bilresa_button_1'] %}
+      {% set s = states[e] %}
+      {% set t = as_datetime(s.state, none) if s else none %}
+      {% if t is none or s.attributes.event_type != 'long_press'
+            or (now() - t).total_seconds() > 0.5 %}
+        {% set ns.both = false %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.both }}
+triggers:
+  - trigger: state
+    entity_id:
+      - event.bedroom_kid_s_room_bilresa_button_2
+      - event.bedroom_kid_s_room_bilresa_button_1
+conditions:
+  # An event entity coming back from unavailable restores its old
+  # timestamp; that is not a press.
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none
+         and trigger.from_state.state != 'unavailable'
+         and trigger.to_state.state not in ['unknown', 'unavailable'] }}
+  # BILRESA events sometimes arrive twice, 3-20 ms apart (the kid's-room
+  # remote does it on every press). Drop the copy: same event type as the
+  # previous event on this button, under 0.3 s later. A quick hold can
+  # put long_press and long_release 0.2 s apart, so the type must match.
+  - condition: template
+    value_template: >-
+      {% set prev = as_datetime(trigger.from_state.state, none) %}
+      {% set cur = as_datetime(trigger.to_state.state, none) %}
+      {{ prev is none or cur is none
+         or trigger.from_state.attributes.event_type != trigger.to_state.attributes.event_type
+         or (cur - prev).total_seconds() > 0.3 }}
+  # While this remote's firmware update runs, the Matter server keeps
+  # reconnecting to it, and the remote can re-send old presses from its
+  # buffer (seen 2026-09-26: clicking Update in HA replayed yesterday's
+  # both-buttons test and a later tap). Ignore it until the update is done.
+  - condition: template
+    value_template: "{{ not is_state_attr(remote_update, 'in_progress', true) }}"
+  # The sibling only gets in as the second half of a both-buttons press.
+  - condition: template
+    value_template: "{{ trigger.entity_id == own or combo }}"
+actions:
+  # Both buttons within the window, whichever fired first.
+  - if:
+      - condition: template
+        value_template: "{{ combo }}"
+    then:
+      - stop: Both buttons pressed; BILRESA Going Out handles it
+  - variables:
+      press: "{{ trigger.to_state.attributes.event_type }}"
+      # This button was pressed in the last second_tap_s (from_state is
+      # its previous event).
+      second_tap: >-
+        {% set t = as_datetime(trigger.from_state.state, none) %}
+        {{ t is not none and (now() - t).total_seconds() <= second_tap_s }}
+  - if:
+      - condition: template
+        value_template: "{{ press != 'long_release' }}"
+    then:
+      # Holds: 0.5 s for the other button's hold to arrive (Going Out).
+      # Taps: 0.1 s, so a backlog of stored-up presses that the Matter
+      # server delivers all at once (2026-10-03 and 2026-10-05: up to seven
+      # within 40 ms) acts only on the last one. Each later press restarts
+      # this run (mode: restart) before the earlier one acts. Live presses
+      # are never that close together.
+      - delay:
+          milliseconds: "{{ 500 if press == 'long_press' else 100 }}"
+  - variables:
+      daytime: "{{ day_start_hour <= now().hour < day_end_hour }}"
+      morning: "{{ day_start_hour <= now().hour < morning_end_hour }}"
+  - choose:
+      # Day, second tap → Sky Lite on at full brightness too.
+      - conditions: "{{ press == 'multi_press_1' and daytime and second_tap and not morning }}"
+        sequence:
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ sky }}"
+            data:
+              brightness_pct: "{{ sky_day_pct }}"
+      - conditions: "{{ press == 'multi_press_1' and daytime }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ is_state('input_boolean.holiday_mode', 'off')
+                     and states('input_number.sam_desired_temperature') | float(99) < home_temp_c }}
+            then:
+              - action: input_number.set_value
+                continue_on_error: true
+                target:
+                  entity_id: input_number.sam_desired_temperature
+                data:
+                  value: "{{ home_temp_c }}"
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ living_room_lights + [stand, spot] }}"
+            data:
+              brightness_pct: "{{ morning_pct if morning else day_pct }}"
+              color_temp_kelvin: "{{ morning_k if morning else daylight_k }}"
+      # Night mode still exactly as it was left (Sky Lite on, spot off,
+      # stand at its dim candle level) → Sky Lite off, candle stand stays.
+      # If the stand has been turned up since (the light button, as on
+      # 2026-09-27 20:23), this is not a second tap: full night mode again.
+      - conditions: >-
+          {{ press == 'multi_press_1'
+             and is_state(sky, 'on') and is_state(stand, 'on')
+             and not is_state(spot, 'on')
+             and (state_attr(stand, 'brightness') | int(255))
+                 <= (night_stand_pct + 3) * 255 / 100 }}
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ sky }}"
+      - conditions: "{{ press == 'multi_press_1' }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ living_room_lights + [spot] }}"
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ stand }}"
+            data:
+              brightness_pct: "{{ night_stand_pct }}"
+              hs_color: "{{ candle_hs }}"
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ sky }}"
+            data:
+              effect: "{{ sky_night_scene }}"
+              brightness_pct: "{{ sky_night_pct }}"
+          - action: switch.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ sky_fading }}"
+      - conditions: "{{ press == 'multi_press_2' }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id:
+                - "{{ stand }}"
+                - "{{ spot }}"
+                - "{{ sky }}"

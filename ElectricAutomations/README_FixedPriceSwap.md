@@ -76,6 +76,9 @@ Two ways of measuring "the next 24 h" are computed and **either** can trigger:
   true 30-day trailing mean of daily means. The comma-separated history string is
   parsed *inside* the `buf` template — assigning it to its own automation
   variable makes HA wrap it as a TupleWrapper, and `.split()` then fails.
+- **`FeedSwapLightRestore.yaml`** (`feed_swap_light_restore`) — snapshots which
+  lights are on (and how bright) every 5 min, and puts them back after a swap.
+  See *Putting the lights back* below.
 - **`FixedPriceSwapAdvisor.yaml`** (`fixed_price_swap_advisor`) — computes the
   next-24 h figures, publishes them, and sends a notification when a swap looks
   worthwhile (throttled once/day). Runs on tomorrow's prices publishing, a few
@@ -105,6 +108,107 @@ already reflects our **load-shifting to cheap hours**, so the weighted next-24 h
 figure tends to sit slightly *below* the flat one. Refresh from that meter if usage
 patterns change materially.
 
+## Putting the lights back
+
+Swapping the feed blacks the house out for a few seconds, and **most of the mains
+bulbs come back ON** whatever they were before — they trickle back over a couple
+of minutes, well after the swap itself is detected. On 21 Sep 2026 the bulbs
+relit from 17:38:39 to 17:40:57 while `FeedDetect.yaml` only flipped
+`input_boolean.on_fixed_price_feed` at 17:40:00.
+
+`FeedSwapLightRestore.yaml` remembers the state beforehand and replays it. Both
+halves live in **one** automation so the tracked-light list exists in one place,
+and `mode: single` means the restore run also pauses snapshotting while it works.
+
+### Snapshot (every 5 minutes)
+
+`input_text.light_state_snapshot` holds `"<count>:<skips>:<code>"` — `code` is one
+character per tracked light, in the fixed order of `actions[0].variables.lights`:
+
+| Char | Meaning |
+| --- | --- |
+| `-` | off |
+| `#` | on, restore with a bare `light.turn_on` (no brightness) |
+| `0`–`9`, `a`–`z` | on, brightness in 36 buckets (`brightness / 255 × 35`) |
+| `?` | never seen available — nothing to restore |
+
+`count` guards the positional encoding: change the light list and the stored code
+is rejected (and re-synced 5 minutes later). Lights in
+`actions[0].variables.plain` are always `#` — the **ISP LED strips run iDeal LED
+DIY patterns that any brightness write paints over** (same reason
+`LoftC3Lights.yaml` uses a bare `light.turn_on`).
+
+Two things keep the snapshot honest:
+
+- **A light that is unavailable keeps its previous character.** A snapshot taken
+  mid-blackout therefore cannot erase what we knew.
+- **The jump guard.** The dangerous window is the ~90 s between the bulbs
+  relighting and the feed boolean flipping: a 5-minute tick landing there would
+  record "everything on" as the truth. If the number of lit lights rises by
+  `jump` (3) or more in one tick the snapshot is **not** overwritten, only the
+  skip counter moves. After `max_skips` (3) consecutive holds — 15 minutes — the
+  new state is believed, so genuinely lighting the house up does eventually
+  become the snapshot.
+
+### Restore (on a feed change, or by hand)
+
+Triggered by `input_boolean.on_fixed_price_feed` changing **either way**, or by
+pressing `input_button.restore_lights_to_snapshot` (for a plain power cut, or a swap
+FeedDetect did not flag).
+
+The snapshot is copied to `input_text.light_restore_pending`, then every 20 s for
+15 minutes (`passes` × `pass_delay`) the automation applies it to **whichever
+lights are back online**, marking each one `.` as it deals with it:
+
+- wanted off, currently on → `light.turn_off`
+- wanted on → `light.turn_on`, with `brightness` unless it is a `plain` light
+- already correct → marked done, not touched
+- still unavailable → left pending for a later pass
+
+**Each light is touched exactly once**, the first time it reappears, so a light
+you switch by hand during the restore window is left alone. A persistent
+notification (`notification_id: feed_light_restore`) reports how many were put
+back and how many never returned.
+
+### Helpers
+
+| Entity | Purpose |
+| --- | --- |
+| `input_text.light_state_snapshot` | The snapshot, `"<count>:<skips>:<code>"`. |
+| `input_text.light_restore_pending` | Restore working copy; `.` = dealt with. |
+| `input_button.restore_lights_to_snapshot` | Run a restore by hand. |
+
+These are **storage helpers**, created live over MCP (as
+`input_text.spot_daily_avg_history` and `input_text.loft_stairs_restore` are) —
+so no restart, and deliberately *not* declared in `helpers.yaml`, where the same
+id would fight for the entity registry slot at restart. `helpers.yaml` carries a
+comment with the three definitions so they can be recreated. The automation's
+condition keeps it silent until all three exist.
+
+```bash
+python3 ElectricAutomations/deploy_feed_restore.py
+```
+
+### Two things found while commissioning it (21 Sep 2026)
+
+- **The first press of the button after creating it does nothing.** The trigger
+  carries `not_from: [unknown, unavailable]` so HA restoring the button's state
+  at startup cannot fire a restore; a never-pressed button's previous state is
+  `unknown`, so that first press is filtered too. Press it twice that once.
+- **`light.front_porch_local` is motion-driven** by
+  `esphome/FrontPath/frontpath_lights_automations*.yaml`. A snapshot can catch it
+  mid-motion-brighten, and a restore then dims it back — the test run put it to
+  brightness 44 while the motion automation wanted 166, and the motion automation
+  won again within the minute. Harmless, but it is the one entity in the list
+  another automation actively drives; drop it if it ever annoys.
+
+### Tuning
+
+`actions[0].variables` — `lights` (tracked entities, order matters), `plain`
+(on/off only), `jump`, `max_skips`, `passes`, `pass_delay`. Adding a smart plug
+works the same way; leave anything another automation owns (hot water, pool)
+out of the list.
+
 ## What the switch disables (and what it does NOT)
 
 When `input_boolean.on_fixed_price_feed` is **ON**:
@@ -133,10 +237,15 @@ When `input_boolean.on_fixed_price_feed` is **ON**:
 - `tests/test_feed_detect.py` — feed detection: dual-meter compare + dead-band
   latch, single-meter fallback when a meter is unavailable (incl. the live
   Hem-down/Bio-idle = FIXED case), solar export, and no redundant writes.
+- `tests/test_feed_swap_light_restore.py` — the light snapshot encoding
+  (brightness buckets, plain lights, unavailable keeping its old character), the
+  jump guard (surge held, released after `max_skips`) and one restore pass
+  (turn off/on, brightness, offline lights deferred, each light touched once).
 
 ```bash
 python3 ElectricAutomations/tests/test_fixed_price_swap.py
 python3 ElectricAutomations/tests/test_feed_detect.py
+python3 ElectricAutomations/tests/test_feed_swap_light_restore.py
 ```
 
 ## Notes / caveats

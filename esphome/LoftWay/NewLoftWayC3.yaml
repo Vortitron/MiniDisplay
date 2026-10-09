@@ -50,12 +50,13 @@ substitutions:
   # comes first; day mode resumes at 07:00 each morning.
   sun_entity: "sun.sun"
   # Full brightness when someone lingers (HA sliders, 0-100). Night
-  # slider 0 falls back to the day slider so lingering is still bright.
+  # slider 0 falls back to the day slider. From 23:00 to 07:00 the PWM
+  # is capped at dim_brightness_night and the sliders are ignored.
   day_brightness_entity: "input_number.loftc3_lcd_brightness_day"
   night_brightness_entity: "input_number.loftc3_lcd_brightness_night"
   # Any PIR edge lights the LCD at this PWM percent (linear, no gamma).
   dim_brightness_day: "16"
-  dim_brightness_night: "4"
+  dim_brightness_night: "2"
   # How long the dim glow lasts after the last motion pulse.
   dim_hold_seconds: "8"
   # Motion must be ON continuously for this many seconds before the
@@ -63,6 +64,11 @@ substitutions:
   pir_continuous_on_seconds: "5"
   # How long full brightness lasts after the last continuous-motion window.
   backlight_hold_seconds: "20"
+  # Bedtime: while the Pixel is on charge between these hours, motion no
+  # longer lights the LCD (dim glow or full). Button taps still do.
+  pixel_charging_entity: "binary_sensor.pixel_8_is_charging"
+  pir_quiet_from_hour: "21"
+  pir_quiet_until_hour: "7"
   # Fade-through-black between dashboard pages. Out is slower than in.
   # Set fade_thru_black_out_ms to 0 to disable the effect.
   fade_thru_black_out_ms: "450"
@@ -233,10 +239,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
-  - id: waste_show_index
-    type: int
-    restore_value: no
-    initial_value: "0"
   # Button sequence: 0 idle, 1 backlight only, 2 three LED sets, 3 all loft.
   - id: loft_btn_stage
     type: int
@@ -1009,10 +1011,35 @@ binary_sensor:
               if (id(pir_motion_start_ms) == 0) {
                 id(pir_motion_start_ms) = millis();
               }
+              if (id(pir_glow_suppressed).state) {
+                return;
+              }
               id(lcd_dim_until_ms) = millis() + ${dim_hold_seconds} * 1000UL;
             } else {
               id(pir_motion_start_ms) = 0;
             }
+
+  # Pixel on charge (bedtime signal, same phone as LoftLightsOffCharge).
+  - platform: homeassistant
+    id: pixel_charging
+    entity_id: ${pixel_charging_entity}
+    internal: true
+
+  # True while motion must not light the LCD: Pixel charging during the
+  # bedtime hours. Evaluated every loop; the PIR handlers read .state.
+  # The motion sensor itself still reports to HA.
+  - platform: template
+    id: pir_glow_suppressed
+    internal: true
+    lambda: |-
+      if (!id(pixel_charging).has_state() || !id(pixel_charging).state) {
+        return false;
+      }
+      if (!id(ha_time).now().is_valid()) {
+        return false;
+      }
+      const int h = id(ha_time).now().hour;
+      return h >= ${pir_quiet_from_hour} || h < ${pir_quiet_until_hour};
 
   # HA light states so the three-LED script can retry a BLE miss.
   - platform: homeassistant
@@ -1155,34 +1182,65 @@ display:
           return (long) era * 146097L + (long) doe - 719468L;
         };
         auto days_until_from_state = [&](const std::string &raw) -> int {
+          // Avoid %[..] scansets so ESP32 nano scanf and C3 stay in sync.
           if (raw.empty() || raw == "unknown" || raw == "unavailable" ||
               raw == "none") {
             return -999;
           }
-          bool all_num = true;
-          for (char c : raw) {
-            if (!(c == ' ' || c == '-' || (c >= '0' && c <= '9'))) {
-              all_num = false;
-              break;
+          std::string lower = raw;
+          for (char &c : lower) {
+            if (c >= 'A' && c <= 'Z') {
+              c = (char) (c - 'A' + 'a');
             }
           }
-          if (all_num) {
-            int v = 0;
-            if (sscanf(raw.c_str(), "%d", &v) == 1) {
-              return v;
-            }
+          if (lower.find("today") != std::string::npos) {
+            return 0;
+          }
+          if (lower.find("tomorrow") != std::string::npos) {
+            return 1;
           }
           int yy = 0;
           int mm = 0;
           int dd = 0;
-          if (sscanf(raw.c_str(), "%*[^,], %d.%d.%d", &dd, &mm, &yy) != 3) {
-            if (raw.find('-') != std::string::npos) {
-              if (sscanf(raw.c_str(), "%d-%d-%d", &yy, &mm, &dd) != 3) {
-                return -999;
-              }
-            } else if (sscanf(raw.c_str(), "%d.%d.%d", &dd, &mm, &yy) != 3) {
-              return -999;
+          bool got_date = false;
+          for (size_t i = 0; i < raw.size(); i++) {
+            int y = 0;
+            int m = 0;
+            int d = 0;
+            if (sscanf(raw.c_str() + i, "%d.%d.%d", &d, &m, &y) == 3 &&
+                y >= 2020 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+              yy = y;
+              mm = m;
+              dd = d;
+              got_date = true;
+              break;
             }
+            if (sscanf(raw.c_str() + i, "%d-%d-%d", &y, &m, &d) == 3 &&
+                y >= 2020 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+              yy = y;
+              mm = m;
+              dd = d;
+              got_date = true;
+              break;
+            }
+          }
+          if (!got_date) {
+            bool all_num = true;
+            for (size_t i = 0; i < raw.size(); i++) {
+              const char c = raw[i];
+              if (c == ' ' || (c == '-' && i == 0) || (c >= '0' && c <= '9')) {
+                continue;
+              }
+              all_num = false;
+              break;
+            }
+            if (all_num) {
+              int v = 0;
+              if (sscanf(raw.c_str(), "%d", &v) == 1) {
+                return v;
+              }
+            }
+            return -999;
           }
           if (yy < 2020 || mm < 1 || mm > 12 || dd < 1 || dd > 31) {
             return -999;
@@ -1359,18 +1417,15 @@ display:
       } else {
         // Page 5 - indoor-bin reminder. Skipped by the rotator unless a
         // collection is today or from 18:00 the evening before.
-        bool show_c2 = id(waste_due_c2);
-        if (id(waste_due_c1) && id(waste_due_c2)) {
-          show_c2 = (id(waste_show_index) != 0);
-        } else if (id(waste_due_c1)) {
-          show_c2 = false;
-        }
-        const bool today = show_c2 ? id(waste_today_c2) : id(waste_today_c1);
+        const bool today = (id(waste_due_c1) && id(waste_today_c1)) ||
+                           (id(waste_due_c2) && id(waste_today_c2));
         top = today ? "Empty today" : "Empty tomorrow";
-        if (show_c2) {
-          bottom = scroll16("C2 food residual newspapers colour glass");
+        if (id(waste_due_c1) && id(waste_due_c2)) {
+          bottom = "BothBins";
+        } else if (id(waste_due_c2)) {
+          bottom = "OtherBin";
         } else if (id(waste_due_c1)) {
-          bottom = scroll16("C1 paper plastic metal clear glass");
+          bottom = "RecylBin";
         } else {
           top = "Indoor bins";
           bottom = "None due";
@@ -1414,7 +1469,7 @@ interval:
               ${backlight_hold_seconds} * 1000UL;
           static const uint32_t DIM_HOLD_MS =
               ${dim_hold_seconds} * 1000UL;
-          if (id(pir_motion_start_ms) == 0) {
+          if (id(pir_motion_start_ms) == 0 || id(pir_glow_suppressed).state) {
             return;
           }
           const uint32_t now = millis();
@@ -1436,12 +1491,15 @@ interval:
           static const int DIM_NIGHT = ${dim_brightness_night};
           const uint32_t now = millis();
 
-          auto is_night_mode = [&]() -> bool {
+          auto is_clock_quiet = [&]() -> bool {
             if (!id(ha_time).now().is_valid()) {
               return false;
             }
             const int h = id(ha_time).now().hour;
-            if (h < 7 || h >= 23) {
+            return h < 7 || h >= 23;
+          };
+          auto is_night_mode = [&]() -> bool {
+            if (is_clock_quiet()) {
               return true;
             }
             if (id(sun_state).has_state() &&
@@ -1489,6 +1547,12 @@ interval:
             target = full_pct();
           } else if (dim_hold) {
             target = is_night_mode() ? DIM_NIGHT : DIM_DAY;
+          }
+          // 23:00-07:00: never brighter than the night dim glow, even
+          // for linger / button / boot. Evening after sunset can still
+          // go full until 23:00.
+          if (is_clock_quiet() && target > DIM_NIGHT) {
+            target = DIM_NIGHT;
           }
 
           if (FADE_OUT_MS == 0) {
@@ -1877,9 +1941,6 @@ interval:
             if (page == PAGE_CALENDAR) {
               id(cal_event_index) = 0;
             }
-            if (page == PAGE_BINS) {
-              id(waste_show_index) = 0;
-            }
             return;
           }
 
@@ -1906,15 +1967,6 @@ interval:
             return;
           }
 
-          if (page == PAGE_BINS && waste_total > 1) {
-            const int next_idx = (id(waste_show_index) + 1) % waste_total;
-            if (next_idx != 0) {
-              id(waste_show_index) = next_idx;
-              return;
-            }
-            id(waste_show_index) = 0;
-          }
-
           int next = (page + 1) % PAGE_COUNT;
           if (next == PAGE_BINS && waste_total == 0) {
             next = (next + 1) % PAGE_COUNT;
@@ -1922,9 +1974,6 @@ interval:
           id(display_page_index) = next;
           if (id(display_page_index) == PAGE_CALENDAR) {
             id(cal_event_index) = 0;
-          }
-          if (id(display_page_index) == PAGE_BINS) {
-            id(waste_show_index) = 0;
           }
           if (id(display_page_index) == PAGE_NOTIFY) {
             int total = (int) id(notification_ids).size();
