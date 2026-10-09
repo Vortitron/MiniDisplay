@@ -3827,7 +3827,7 @@ display:
       }
       // Journey screens take the whole LED row for a marquee showing the
       // direction of travel: right-to-left for Markaryd, left-to-right
-      // for Orkelljunga. Two on, two off, one step every 150 ms.
+      // for Orkelljunga. One lit, three dark, one step every 150 ms.
       if (id(current_screen) == SCREEN_JOURNEY_M ||
           id(current_screen) == SCREEN_JOURNEY_O) {
         const uint32_t phase = (now / 150u) % 4u;
@@ -3835,7 +3835,7 @@ display:
         for (int i = 0; i < 8; i++) {
           const uint32_t k = leftward ? ((uint32_t) i + phase) % 4u
                                       : ((uint32_t) i + 4u - phase) % 4u;
-          it.set_led(i, k < 2u);
+          it.set_led(i, k == 0u);
         }
       }
 
