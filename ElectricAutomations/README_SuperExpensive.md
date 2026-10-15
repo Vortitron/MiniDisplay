@@ -50,7 +50,6 @@ across domains (climate → off, lights/switches → off):
 | --- | --- |
 | `switch.t34_smart_plug_switch_1` | Loft Wet humidifier |
 | `switch.smart_plug_5_socket_1` | circulation fan (Tuya plug; `sam.yaml` drives it directly during cooling, so we shed the switch, not the `climate.circulation_fan` thermostat) |
-| `switch.smart_plug_4_socket_1` | pool pump + heater (`PoolPump.yaml`) |
 | `climate.bio_office_heat` | Bio office heater (often unplugged) |
 | `light.led_flood_light` | LED flood light |
 | `light.bio_floodlight` | Bio flood light |
@@ -60,6 +59,10 @@ Plus **`climate.sam`** — handled by `sam.yaml`'s own guard: Sam is switched of
 (`super_expensive_off_above`). At/below 19 °C — or if the living temperature is
 unknown — Sam is left running, because it may be actively heating. Holiday mode
 still wins over super-expensive.
+
+Never shed: `switch.smart_plug_4_socket_1`, the old pool plug, which has fed and
+metered Sam since Oct 2026 (`SamPlugKeepOn.yaml`). Switching it off would cut
+the heat pump's power outright, guard or no guard.
 
 Already-off or unavailable entities are skipped (no error, no log noise).
 

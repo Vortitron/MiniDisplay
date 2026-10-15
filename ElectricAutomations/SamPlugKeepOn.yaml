@@ -1,0 +1,81 @@
+# Sam (the living-room heat pump) is fed through the old pool plug,
+# switch.smart_plug_4_socket_1 (Tuya), from Oct 2026, to measure what it
+# really draws: Sam's own power figure comes from its cloud and may be an
+# estimate. The plug's entities are named "Sam Plug ..." in Home Assistant.
+#
+# Nothing should switch this plug off: SuperExpensive.yaml no longer sheds
+# it, the PoolPump*.yaml automations that drove it are disabled, and the
+# Sam & Energy dashboard shows its readings without a switch row. This is
+# the backstop: off for 10 s, other than by a person in Home Assistant
+# (who may mean it), and it is switched back on and logged. It also sets
+# the plug to power on after a power cut once the plug is online.
+#
+# Deployed with ha_set_automation, id sam_plug_keep_on (2026-10-15).
+
+id: sam_plug_keep_on
+alias: Sam plug - keep on
+description: >-
+  The old pool plug (smart_plug_4) now feeds and meters Sam, the heat pump.
+  Nothing should switch it off: if it goes off for 10 s, for any reason other
+  than a person switching it off in Home Assistant, it is switched back on and
+  logged. When the plug comes online it is set to power on after a power cut
+  (power_on).
+mode: queued
+triggers:
+  - trigger: state
+    entity_id: switch.smart_plug_4_socket_1
+    to: "off"
+    for:
+      seconds: 10
+    id: "off"
+  - trigger: state
+    entity_id: select.smart_plug_4_power_on_behaviour
+    from: unavailable
+    id: online
+  - trigger: homeassistant
+    event: start
+    id: online
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: "off"
+          - condition: template
+            value_template: "{{ trigger.to_state.context.user_id is none }}"
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: switch.smart_plug_4_socket_1
+          - action: logbook.log
+            data:
+              name: Sam plug
+              message: was switched off (not by a person in HA); switched back on
+              entity_id: switch.smart_plug_4_socket_1
+      - conditions:
+          - condition: trigger
+            id: online
+          - condition: template
+            value_template: >-
+              {{ states('select.smart_plug_4_power_on_behaviour')
+                 not in ['unavailable', 'unknown'] }}
+        sequence:
+          # Tuya options: power_off, power_on, last.
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ states('select.smart_plug_4_power_on_behaviour') != 'power_on' }}
+            then:
+              - action: select.select_option
+                continue_on_error: true
+                target:
+                  entity_id: select.smart_plug_4_power_on_behaviour
+                data:
+                  option: power_on
+          - if:
+              - condition: state
+                entity_id: switch.smart_plug_4_socket_1
+                state: "off"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: switch.smart_plug_4_socket_1

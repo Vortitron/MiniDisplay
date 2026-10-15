@@ -3048,7 +3048,7 @@ display:
       static const int SCREEN_NOTIFY     = 12;
       static const int SCREEN_BINS       = 13;
       static const int SCREEN_JOURNEY_M  = 14;  // Markaryd stables
-      static const int SCREEN_JOURNEY_O  = 15;  // Orkelljunga pool (stands in for Ljungaskog)
+      static const int SCREEN_JOURNEY_O  = 15;  // Orkelljunga pool (stands in for a regular drive along Gamla E4)
 
       // A drive is normal on Gamla E4 at or under its usual ceiling.
       // Ceilings sit just above the 21 Sep - 9 Oct 2026 readings:

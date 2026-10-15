@@ -16,7 +16,6 @@ description: >-
   homeassistant.turn_off (climate -> off, lights/switches -> off):
     - switch.t34_smart_plug_switch_1  Loft Wet humidifier
     - switch.smart_plug_5_socket_1    circulation fan (Tuya plug; sam.yaml drives it)
-    - switch.smart_plug_4_socket_1    pool pump + heater (PoolPump.yaml)
     - climate.bio_office_heat         Bio office heater (often unplugged)
     - light.led_flood_light           LED flood light
     - light.bio_floodlight            Bio flood light
@@ -31,6 +30,8 @@ description: >-
   spuriously energised.
 
   ## Not shed
+  - switch.smart_plug_4_socket_1 (the old pool plug): since Oct 2026 it
+    meters Sam's supply. Switching it off would cut the heat pump.
   - Hot water (switch.smart_plug_2_socket_1): already price-gated by
     HotWater.yaml (heats only in the cheapest hours), so effectively off when
     expensive.
@@ -46,7 +47,6 @@ variables:
   shed_entities:
     - switch.t34_smart_plug_switch_1   # Loft Wet humidifier
     - switch.smart_plug_5_socket_1     # circulation fan (Tuya plug; sam.yaml drives it directly)
-    - switch.smart_plug_4_socket_1     # pool pump + heater
     - climate.bio_office_heat          # Bio office heater (often unplugged)
     - light.led_flood_light            # LED flood light
     - light.bio_floodlight             # Bio flood light

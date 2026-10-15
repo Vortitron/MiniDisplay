@@ -5,6 +5,9 @@
 #   python3 ElectricAutomations/deploy_sam_energy_dashboard.py
 # (needs HA_URL + HA_TOKEN in the environment), or paste into Settings → Dashboards.
 #
+# The Back Garden (pool pump) tab was removed in Oct 2026 when its plug
+# moved to Sam; it is in git history if the pool comes back.
+#
 # Uses only built-in cards (thermostat, entities, glance, gauge, history-graph,
 # markdown, heading) so it needs no HACS/custom cards.
 title: Sam & Energy
@@ -106,6 +109,32 @@ views:
               - entity: input_number.forecast_outside_4h
                 name: Next 4 h avg
       # ------------------------------------------------------ Electricity price
+      # Sam's supply through the old pool plug (smart_plug_4, Oct 2026): the
+      # plug's own reading next to what Sam's cloud integration reports.
+      # No switch row: switching this plug off would cut the heat pump
+      # (automation sam_plug_keep_on turns it back on anyway).
+      - type: grid
+        cards:
+          - type: heading
+            heading: Sam power (measured)
+            icon: mdi:meter-electric
+          - type: glance
+            columns: 3
+            entities:
+              - entity: sensor.smart_plug_4_power
+                name: Plug
+              - entity: sensor.sam_current_power
+                name: Sam reports
+              - entity: sensor.smart_plug_4_voltage
+                name: Voltage
+          - type: history-graph
+            title: Measured vs reported (24 h)
+            hours_to_show: 24
+            entities:
+              - entity: sensor.smart_plug_4_power
+                name: Plug
+              - entity: sensor.sam_current_power
+                name: Sam reports
       - type: grid
         cards:
           - type: heading
@@ -288,55 +317,3 @@ views:
               {{ states('input_text.house_thermal_status') }}
 
               _{{ states('input_text.sam_preheat_calc') }}_
-  - title: Back Garden
-    path: back-garden
-    icon: mdi:pool
-    type: sections
-    max_columns: 2
-    sections:
-      - type: grid
-        cards:
-          - type: heading
-            heading: Pool pump
-            icon: mdi:pool
-          - type: markdown
-            content: >
-              **{{ states('text.pool_pump_pool_pump_status') }}**
-
-              _15 000 L pool · 5000 L/h pump · **3 h/day** maintenance (auto) · cheap windows up to **6 h** until 16:00_
-          - type: entities
-            show_header_toggle: false
-            entities:
-              - entity: switch.smart_plug_4_socket_1
-                name: Pump + heater
-                icon: mdi:pool-pump
-              - entity: select.pool_pump_pool_pump_plan
-                name: Plan
-              - entity: number.pool_pump_minutes_remaining
-                name: Budget remaining
-              - entity: number.pool_pump_daily_on_minutes
-                name: ON time today
-              - entity: number.pool_pump_maintenance_daily_target
-                name: Daily maintenance target
-              - entity: datetime.pool_pump_pool_pump_plan_until
-                name: Timed until
-          - type: entities
-            title: Controls
-            show_header_toggle: false
-            entities:
-              - entity: button.pool_cheap_windows
-                name: Cheap windows (6 h, until 16:00)
-              - entity: button.pool_extended_run
-                name: Extended run (6 h)
-              - entity: button.pool_pump_run_1_hour
-                name: Run 1 hour
-              - entity: button.pool_stop
-                name: Stop
-          - type: history-graph
-            title: Pump (24 h)
-            hours_to_show: 24
-            entities:
-              - entity: switch.smart_plug_4_socket_1
-                name: Pump
-              - entity: number.pool_pump_daily_on_minutes
-                name: Daily ON min

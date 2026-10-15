@@ -1,5 +1,7 @@
 # Pool Pump — Price-Optimised Control
 
+> **Retired, Oct 2026.** The plug (`switch.smart_plug_4_socket_1`) now feeds and meters Sam, the heat pump, and its entities are named "Sam Plug". The pool automations are disabled, the Back Garden dashboard tab was removed, and `SamPlugKeepOn.yaml` switches the plug back on if anything turns it off. Before re-enabling anything here, give the pool its own plug.
+
 **Off-season (from Aug 2026):** the pool is shut down for the year. All four
 automations are `initial_state: false` and turned **off** on GamlaBio. Plan
 select is `off`. Re-enable in spring by removing `initial_state: false` (or
