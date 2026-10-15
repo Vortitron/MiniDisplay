@@ -35,13 +35,18 @@ def backlight_wanted(lux: float, currently_on: bool) -> bool:
 	return currently_on
 
 
-def onboard_led(markaryd_diverted: bool | None, orkelljunga_diverted: bool | None) -> str:
-	"""Blinks while either journey is off its usual road (HA works out `diverted`).
+def onboard_led(markaryd_diverted: bool | None, orkelljunga_diverted: bool | None, ice: bool | None) -> str:
+	"""Blink while a journey is off its usual Gamla E4; else a blip for frost.
 
-	Both are usually Gamla E4; the pool line stands in for Ljungaskog. Ice is shown on the
-	screen only; the WS2812 that used to show it was never fitted.
+	Both are usually Gamla E4; the pool line stands in for a regular
+	drive that goes by Gamla E4. The
+	WS2812 that the old firmware drove was never fitted.
 	"""
-	return "blink" if (markaryd_diverted or orkelljunga_diverted) else "off"
+	if markaryd_diverted or orkelljunga_diverted:
+		return "blink"
+	if ice:
+		return "blip"
+	return "off"
 
 
 def hours_until_rain(entries: list[dict], now_ts: float) -> tuple[int, float | None]:
@@ -122,14 +127,20 @@ class BacklightTests(unittest.TestCase):
 
 class LedModeTests(unittest.TestCase):
 	def test_usual_roads_are_off(self) -> None:
-		self.assertEqual(onboard_led(False, False), "off")
+		self.assertEqual(onboard_led(False, False, False), "off")
 
 	def test_either_journey_diverted_blinks(self) -> None:
-		self.assertEqual(onboard_led(True, False), "blink")
-		self.assertEqual(onboard_led(False, True), "blink")
+		self.assertEqual(onboard_led(True, False, False), "blink")
+		self.assertEqual(onboard_led(False, True, False), "blink")
+
+	def test_diversion_wins_over_ice(self) -> None:
+		self.assertEqual(onboard_led(True, False, True), "blink")
+
+	def test_ice_alone_blips(self) -> None:
+		self.assertEqual(onboard_led(False, False, True), "blip")
 
 	def test_unknown_does_not_blink(self) -> None:
-		self.assertEqual(onboard_led(None, None), "off")
+		self.assertEqual(onboard_led(None, None, None), "off")
 
 class ForecastTests(unittest.TestCase):
 	def test_first_wet_hour(self) -> None:

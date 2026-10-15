@@ -1,0 +1,60 @@
+# A Saga still for every FrontPath "Path Person Detected", for labelling the
+# radar rule's hits (person / cat / nothing). Photos land in
+# /media/frontpath/<YYYYmmdd-HHMMSS>.jpg (Media > My media > frontpath), and a
+# logbook line names the photo and the gates that set the rule off, from
+# sensor ..._path_trigger ("S3 43/12" = street radar gate 3, peak 43 against
+# a normal of 12). No notification: automation.front_door_snapshot (off until
+# detection is trusted) is the one that messages the Pixel. Unlike that one,
+# this does not touch the porch light: switching it off after the photo
+# would cut the light the path-lights automation has just raised for a
+# real arrival.
+#
+# Deployed with ha_set_automation, id frontpath_trigger_snapshot (2026-10-15).
+
+id: frontpath_trigger_snapshot
+alias: Front Path - Snapshot each detection
+description: >-
+  Labelling aid for the FrontPath radar rule (15 Oct): a Saga still for every
+  Path Person Detected, saved to /media/frontpath/<time>.jpg, plus a logbook
+  line with the gates that set it off. No notification, and leaves the porch
+  light to the path-lights automation.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.frontpath_ble_processing_path_person_detected
+    from: "off"
+    to: "on"
+actions:
+  - variables:
+      stamp: "{{ now().strftime('%Y%m%d-%H%M%S') }}"
+      why: "{{ states('sensor.front_walkway_frontpath_ble_processing_path_trigger') }}"
+      screen_was_off: "{{ is_state('switch.saga_screen', 'off') }}"
+  - if:
+      - condition: template
+        value_template: "{{ screen_was_off }}"
+    then:
+      - action: switch.turn_on
+        target:
+          entity_id: switch.saga_screen
+      - delay:
+          seconds: 2
+  - action: switch.turn_on
+    target:
+      entity_id: switch.saga_motion_detection
+  - delay:
+      seconds: 4
+  - action: camera.snapshot
+    continue_on_error: true
+    target:
+      entity_id: camera.saga
+    data:
+      filename: "/media/frontpath/{{ stamp }}.jpg"
+  - action: switch.turn_off
+    target:
+      entity_id: switch.saga_motion_detection
+  - action: logbook.log
+    data:
+      name: FrontPath snapshot
+      message: "{{ stamp }}.jpg  {{ why }}"
+      entity_id: binary_sensor.frontpath_ble_processing_path_person_detected

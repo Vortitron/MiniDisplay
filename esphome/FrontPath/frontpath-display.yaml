@@ -11,10 +11,10 @@
 #   VEML6040 SDA/SCL          GPIO4 / GPIO5   3.3 V
 #   LCD SCL / SDA / D/C       GPIO1 / GPIO3 / GPIO2
 #   LCD CS                    tied to GND on the module
-#   LCD RES                   GPIO10, reset pulse at boot
+#   LCD RES                   GPIO10, pulsed by lcd_hard_reset after boot
 #   LCD BL                    GPIO0, active high, PWM. Leave the Backlight ON bridge open.
 #   Software CS (ESPHome)     GPIO9 (BOOT) — not wired to the panel. Hardware CS is GND.
-#   Onboard blue LED          GPIO8. Blinks when a journey is off its usual road
+#   Onboard blue LED          GPIO8. 1 Hz blink: route diverted; blip every 3 s: frost
 #   Radar 1 street TX/RX      GPIO21 / GPIO20   (wired; this build still uses BLE)
 #   Radar 2 door TX/RX        GPIO7 / GPIO6     (wired; this build still uses BLE)
 
@@ -41,15 +41,63 @@ output:
     id: path_lcd_backlight_pwm
     pin: GPIO0
     frequency: 1000Hz
+  # Panel RES, driven by lcd_hard_reset rather than the display's reset_pin.
+  # Starts low, so the panel is held in reset until the script releases it.
+  - platform: gpio
+    id: path_lcd_reset
+    pin: GPIO10
 
 font:
-  # 10 px keeps "Orkelljunga 16m Gamla" inside 128 pixels.
-  - file: "gfonts://Roboto"
-    id: path_font
-    size: 10
-    glyphs: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz -."
+  # One font for the 3x3 grid: 17 px fills a 20 px row, condensed bold so
+  # numbers fit their cell without scrolling. The bottom 4 px are the radar
+  # strip.
+  - file:
+      type: gfonts
+      family: Roboto Condensed
+      weight: 700
+    id: cell_font
+    size: 17
+    glyphs: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÅÄÖåäö -.°"
 
 text_sensor:
+  # Both radars' per-gate energies, once a second, for replaying in Home
+  # Assistant history: the 14 Oct test walk showed that moving energy only
+  # reaches 2-3 m, while static energy follows a person to both ends of the
+  # path (far gates 15-40 empty, 75-100 with someone there). Detection is to
+  # be rebuilt on per-gate excess over each gate's normal level, and this is
+  # the data to tune it on, including a windy night.
+  # Format: "m1:<9>;s1:<9>;m2:<9>;s2:<9>", gates 0-8, m = the second's peak
+  # moving energy, s = its mean static energy. 1 = street radar, 2 = door.
+  - platform: template
+    name: "Gate Energies"
+    id: gate_energies
+    entity_category: diagnostic
+    icon: mdi:chart-box-outline
+    update_interval: never
+  # What set off Path Person Detected, published as it turns on: each lit
+  # gate as radar+gate value/normal, e.g. "S3 43/12 S4 29/9" (S = street
+  # radar, D = door). For checking against the door camera's snapshots.
+  - platform: template
+    name: "Path Trigger"
+    id: path_trigger
+    entity_category: diagnostic
+    icon: mdi:target-account
+    update_interval: never
+  # Changes only, as for person_position above.
+  - id: !extend active_gate_sensor
+    filters:
+      - lambda: |-
+          static std::string last;
+          if (x == last) return {};
+          last = x;
+          return x;
+  - id: !extend gate_pattern_sensor
+    filters:
+      - lambda: |-
+          static std::string last;
+          if (x == last) return {};
+          last = x;
+          return x;
   - platform: homeassistant
     id: markaryd_minutes
     entity_id: sensor.journey_markaryd
@@ -72,6 +120,96 @@ text_sensor:
     internal: true
 
 sensor:
+  # The radar logic in frontpath/frontpath.yaml publishes position, active
+  # gate and gate pattern every ~100 ms whether or not they changed. Each one
+  # is an API message over a weak link (-81 dBm where the box is mounted).
+  # These filters, added with !extend, pass only changes. Home
+  # Assistant drops identical states anyway, so automations see no difference.
+  - id: !extend person_position
+    filters:
+      - delta: 0.01
+  # Per-gate energies, radar 1. The radar is put into engineering mode on
+  # connect (command 0x62 in frontpath.yaml), so every frame carries the
+  # moving and static energy of all nine gates -- what HLKRadarTool draws.
+  # sensor1_parser reads only the single target at the start of the frame;
+  # this second listener on the same characteristic keeps the rest.
+  # Engineering frame: F4 F3 F2 F1, len(2), type 0x01, 0xAA, state, moving
+  # dist(2), moving E, static dist(2), static E, detect dist(2), last moving
+  # gate N, last static gate M, N+1 moving energies, M+1 static energies, ...
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: ld2410_sensor1
+    service_uuid: '0000fff0-0000-1000-8000-00805f9b34fb'
+    characteristic_uuid: '0000fff1-0000-1000-8000-00805f9b34fb'
+    update_interval: never
+    notify: true
+    internal: true
+    id: sensor1_gate_energies
+    lambda: |-
+      if (x.size() < 23 || x[0] != 0xF4 || x[1] != 0xF3 || x[2] != 0xF2 || x[3] != 0xF1) return NAN;
+      static bool announced = false;
+      if (!announced) {
+        ESP_LOGI("gates", "S1: first frame %u bytes, type 0x%02X (0x01 = engineering)", (unsigned) x.size(), x[6]);
+        announced = true;
+      }
+      if (x[6] != 0x01) return NAN;
+      const int nm = x[17] > 8 ? 8 : x[17];
+      const int ns = x[18] > 8 ? 8 : x[18];
+      if (x.size() < (size_t) (19 + nm + 1 + ns + 1)) {
+        id(s1_short_frames)++;
+        return NAN;
+      }
+      for (int i = 0; i < 9; i++) {
+        id(s1_move_e)[i] = (i <= nm) ? x[19 + i] : 0;
+        id(s1_stat_e)[i] = (i <= ns) ? x[20 + nm + i] : 0;
+        // For the once-a-second Gate Energies summary.
+        if (id(s1_move_e)[i] > id(s1_m_max)[i]) id(s1_m_max)[i] = id(s1_move_e)[i];
+        id(s1_s_sum)[i] += id(s1_stat_e)[i];
+      }
+      id(s1_agg_n)++;
+      id(s1_eng_frames)++;
+      return NAN;
+  # Per-gate energies, radar 2. The radar is put into engineering mode on
+  # connect (command 0x62 in frontpath.yaml), so every frame carries the
+  # moving and static energy of all nine gates -- what HLKRadarTool draws.
+  # sensor2_parser reads only the single target at the start of the frame;
+  # this second listener on the same characteristic keeps the rest.
+  # Engineering frame: F4 F3 F2 F1, len(2), type 0x01, 0xAA, state, moving
+  # dist(2), moving E, static dist(2), static E, detect dist(2), last moving
+  # gate N, last static gate M, N+1 moving energies, M+1 static energies, ...
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: ld2410_sensor2
+    service_uuid: '0000fff0-0000-1000-8000-00805f9b34fb'
+    characteristic_uuid: '0000fff1-0000-1000-8000-00805f9b34fb'
+    update_interval: never
+    notify: true
+    internal: true
+    id: sensor2_gate_energies
+    lambda: |-
+      if (x.size() < 23 || x[0] != 0xF4 || x[1] != 0xF3 || x[2] != 0xF2 || x[3] != 0xF1) return NAN;
+      static bool announced = false;
+      if (!announced) {
+        ESP_LOGI("gates", "S2: first frame %u bytes, type 0x%02X (0x01 = engineering)", (unsigned) x.size(), x[6]);
+        announced = true;
+      }
+      if (x[6] != 0x01) return NAN;
+      const int nm = x[17] > 8 ? 8 : x[17];
+      const int ns = x[18] > 8 ? 8 : x[18];
+      if (x.size() < (size_t) (19 + nm + 1 + ns + 1)) {
+        id(s2_short_frames)++;
+        return NAN;
+      }
+      for (int i = 0; i < 9; i++) {
+        id(s2_move_e)[i] = (i <= nm) ? x[19 + i] : 0;
+        id(s2_stat_e)[i] = (i <= ns) ? x[20 + nm + i] : 0;
+        // For the once-a-second Gate Energies summary.
+        if (id(s2_move_e)[i] > id(s2_m_max)[i]) id(s2_m_max)[i] = id(s2_move_e)[i];
+        id(s2_s_sum)[i] += id(s2_stat_e)[i];
+      }
+      id(s2_agg_n)++;
+      id(s2_eng_frames)++;
+      return NAN;
   - platform: homeassistant
     id: hours_until_rain
     entity_id: input_number.front_path_hours_until_rain
@@ -82,9 +220,42 @@ sensor:
     internal: true
 
 binary_sensor:
+  # Wind gate. Mounted, the radar logic fired every minute or two in a gusty
+  # evening with nobody there: one to three neighbouring street gates (S3-S5,
+  # S1), rarely the door side. A person lights up more at once. So the
+  # radar logic's own sensor is renamed "Path Person Raw" (same entity in
+  # Home Assistant), and "Path Person Detected" -- the one the automations
+  # use -- is this template: on while Raw is on AND within the last 20 s the
+  # gate pattern showed one of:
+  #   - three or more gates on BOTH radars
+  #   - two or more far door gates (D5-D8)
+  #   - two or more far street gates (S6-S8)
+  # It is re-checked on every loop. The first version was a filter on the
+  # radar sensor, and ESPHome only runs a binary filter when its input
+  # changes: it was asked once, as Raw went on -- before a walker had spread
+  # across the gates -- and never again, so the 14 Oct test walk never got
+  # through. Replayed correctly on the night of 13-14 Oct: 14 false episodes,
+  # and the slow test walk caught.
+  - id: !extend person_detected
+    name: "Path Person Raw"
+    entity_category: diagnostic
+  #
+  # From 15 Oct, while engineering frames arrive, it is the per-gate rule in
+  # the 1 s interval instead (path_person_on); the wind gate above is only the
+  # fallback if they stop for 5 s. The night of 14-15 Oct showed why: a
+  # mystery source every 7-10 min from 18:00 to 23:00 lit every gate on both
+  # radars at once, and all 33 of the night's detections were that.
+  - platform: template
+    name: "Path Person Detected"
+    id: person_confirmed
+    device_class: occupancy
+    lambda: |-
+      if (id(path_eng_ms) != 0 && millis() - id(path_eng_ms) < 5000) return id(path_person_on);
+      const bool recent = id(person_confirm_ms) != 0 && millis() - id(person_confirm_ms) < 20000;
+      return id(person_detected).state && recent;
   # `diverted` is worked out in Home Assistant (JourneyTime.yaml): true when
   # a journey leaves its usual Gamla E4 for the E4. The pool line stands in
-  # for the drive to Ljungaskog.
+  # for a regular drive that goes that way.
   - platform: homeassistant
     id: markaryd_diverted
     entity_id: sensor.journey_markaryd
@@ -115,7 +286,95 @@ globals:
     type: int
     restore_value: no
     initial_value: '-1'
-  # Onboard LED: true while either journey is off its usual road.
+  # Wind gate (see person_confirmed): millis() of the last gate pattern
+  # that looked like a person. 0 = never.
+  - id: person_confirm_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # Per-gate rule (1 s interval): its verdict, and millis() of the last
+  # second that had engineering frames. 0 = never.
+  - id: path_person_on
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: path_eng_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # Radar 1: per-gate energies from engineering frames (sensor1_gate_energies).
+  - id: s1_move_e
+    type: int[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  - id: s1_stat_e
+    type: int[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  - id: s1_eng_frames
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: s1_short_frames
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # What the "Enable Sensor 1 BLE" switch asks for (see start_sensor1).
+  - id: s1_ble_wanted
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  # Radar 2: per-gate energies from engineering frames (sensor2_gate_energies).
+  - id: s2_move_e
+    type: int[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  - id: s2_stat_e
+    type: int[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  - id: s2_eng_frames
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: s2_short_frames
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # What the "Enable Sensor 2 BLE" switch asks for (see start_sensor2).
+  - id: s2_ble_wanted
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  # Radar 1: this second's peak moving and summed static energy per gate,
+  # and how many frames went in. Reset by the Gate Energies interval.
+  - id: s1_m_max
+    type: int[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  - id: s1_s_sum
+    type: int[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  - id: s1_agg_n
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Radar 2: this second's peak moving and summed static energy per gate,
+  # and how many frames went in. Reset by the Gate Energies interval.
+  - id: s2_m_max
+    type: int[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  - id: s2_s_sum
+    type: int[9]
+    restore_value: no
+    initial_value: '{0,0,0,0,0,0,0,0,0}'
+  - id: s2_agg_n
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Onboard LED: true while it is showing a pattern (diversion or ice).
   - id: route_diverted
     type: bool
     restore_value: no
@@ -139,7 +398,8 @@ number:
     min_value: 0
     max_value: 63
     step: 1
-    initial_value: 27
+    # WeAct's example sets contrast 200 of 255; u8g2 divides by 4, so 50.
+    initial_value: 50
     restore_value: true
     optimistic: true
     on_value:
@@ -153,7 +413,8 @@ number:
     min_value: 0
     max_value: 7
     step: 1
-    initial_value: 5
+    # 3 is WeAct's V0 resistor ratio (0x23) for this glass.
+    initial_value: 3
     restore_value: true
     optimistic: true
     on_value:
@@ -173,48 +434,279 @@ switch:
     turn_off_action:
       - lambda: 'id(path_lcd).set_all_pixels_on(false);'
 
+  # Streams both radars' per-gate energies to the log, 4 a second, for test
+  # walks: "S1 m .. s .. | S2 m .. s ..", gates 0-8, moving then static.
+  - platform: template
+    name: "Radar Gate Log"
+    id: radar_gate_log
+    entity_category: diagnostic
+    icon: mdi:chart-bar
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+  # Switching a radar's BLE off disconnected it, and the disconnect handler
+  # (start_sensorN in frontpath.yaml) turned it straight back on 1-4 s later,
+  # so HLKRadarTool could never get in. These remember what was asked for,
+  # and start_sensorN below honours it. ESPHome appends the actions here to
+  # the originals.
+  - id: !extend enable_sensor1_ble
+    turn_on_action:
+      - lambda: 'id(s1_ble_wanted) = true;'
+    turn_off_action:
+      - lambda: 'id(s1_ble_wanted) = false;'
+    lambda: 'return id(s1_ble_wanted);'
+  - id: !extend enable_sensor2_ble
+    turn_on_action:
+      - lambda: 'id(s2_ble_wanted) = true;'
+    turn_off_action:
+      - lambda: 'id(s2_ble_wanted) = false;'
+    lambda: 'return id(s2_ble_wanted);'
+
 button:
   - platform: template
     name: "Display Reinitialise"
     entity_category: config
     icon: mdi:restart
     on_press:
+      - script.execute: lcd_hard_reset
+
+script:
+  # CS is tied to GND, so the panel finds byte boundaries only by counting
+  # clock edges. SPI here is mode 3 (clock idles high), but the clock pin
+  # sits low until the first transfer, and that first low-to-high step is
+  # counted as a bit: every byte after it lands one bit off and the panel
+  # ignores the lot. The display's own reset_pin pulses before that first
+  # transfer, so it cannot help. Instead: send one throwaway command to park
+  # the clock high, then reset the panel, then initialise it.
+  - id: lcd_hard_reset
+    mode: restart
+    then:
+      - lambda: 'id(path_lcd).turn_off();'
+      - output.turn_off: path_lcd_reset
+      - delay: 20ms
+      - output.turn_on: path_lcd_reset
+      - delay: 20ms
+      # WeAct's own example (u8g2 ST7567_ENH_DG128064I, which is the AiP31567
+      # on this module) waits 50 ms between the three power-control steps.
+      # ESPHome sends them back to back, and the booster then never comes up:
+      # backlight on, glass blank, even with all pixels on. So send WeAct's
+      # sequence here, with its delays, then let ESPHome draw as usual.
+      # DC is GPIO2: low for a command.
       - lambda: |-
-          id(path_lcd).request_refresh();
+          auto *lcd = id(path_lcd);
+          auto cmd = [lcd](uint8_t c) {
+            gpio_set_level(GPIO_NUM_2, 0);
+            lcd->enable();
+            lcd->write_byte(c);
+            lcd->disable();
+          };
+          cmd(0xE2);  // soft reset
+          delay(5);
+          cmd(0xAE);  // display off
+          cmd(0x40);  // start line 0
+          cmd(0xA1);  // SEG reverse, as ESPHome's default mirror_x
+          cmd(0xC0);  // COM normal, as ESPHome's default mirror_y
+          cmd(0xA6);  // normal, not inverted
+          cmd(0xA2);  // bias 1/9
+          cmd(0x2C);  // booster on
+          delay(50);
+          cmd(0x2E);  // + regulator
+          delay(50);
+          cmd(0x2F);  // + follower
+          delay(50);
+      - lambda: |-
+          id(path_lcd).set_brightness((uint8_t) id(path_lcd_ratio).state);
+          id(path_lcd).set_contrast((uint8_t) id(path_lcd_contrast).state);
+          id(path_lcd).set_all_pixels_on(id(path_lcd_all_on).state);
           id(path_lcd).update();
+          id(path_lcd).turn_on();
+
+  # See enable_sensorN_ble above: after the reconnect delay, stay off if off
+  # was asked for.
+  - id: !extend start_sensor1
+    then:
+      - lambda: 'if (!id(s1_ble_wanted)) id(ld2410_sensor1)->set_enabled(false);'
+  - id: !extend start_sensor2
+    then:
+      - lambda: 'if (!id(s2_ble_wanted)) id(ld2410_sensor2)->set_enabled(false);'
 
 interval:
-  # Once, shortly after boot, apply the contrast and ratio from Home
-  # Assistant and run the refresh sequence: soft reset (0xE2), then the init
-  # registers. The hardware reset on GPIO10 has already happened, at setup.
+  # Once, shortly after boot, reset and initialise the panel (see
+  # lcd_hard_reset for why this cannot happen during setup).
   - interval: 5s
     then:
       - lambda: |-
           if (id(path_lcd_ready)) return;
           id(path_lcd_ready) = true;
-          id(path_lcd).set_brightness((uint8_t) id(path_lcd_ratio).state);
-          id(path_lcd).set_contrast((uint8_t) id(path_lcd_contrast).state);
-          id(path_lcd).request_refresh();
-          id(path_lcd).update();
+          id(lcd_hard_reset).execute();
+  # Gate Energies: publish this second's summary and start the next.
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(s1_agg_n) == 0 && id(s2_agg_n) == 0) return;
+          std::string out;
+          char buf[8];
+          auto add = [&](const char *tag, int *v, int div) {
+            out += tag;
+            for (int i = 0; i < 9; i++) {
+              snprintf(buf, sizeof(buf), i ? ",%d" : "%d", div > 0 ? v[i] / div : v[i]);
+              out += buf;
+            }
+          };
+          add("m1:", id(s1_m_max), 0);
+          add(";s1:", id(s1_s_sum), id(s1_agg_n));
+          add(";m2:", id(s2_m_max), 0);
+          add(";s2:", id(s2_s_sum), id(s2_agg_n));
+          id(gate_energies).publish_state(out);
+
+          // Person rule (15 Oct; replayed on 14:00 14 Oct - 07:43 15 Oct).
+          // Only moving energy separates a person from everything else:
+          // static rises with wind, with a fixed reflector at street gates
+          // 3-5, and for no visible reason at all. Moving energy only rises
+          // within 2-3 m of the box, so watch gates 2-4 (1.5-3.75 m) on each
+          // side. A gate is lit when this second's peak is at least 12 above
+          // its normal ceiling (the median of its last 10 per-minute peaks)
+          // and at least 25; a gate whose normal is 85+ is saturated and
+          // cannot vote. Lit for 3 s in a row = person, held 20 s.
+          // Interference lights every gate on both radars together; a
+          // person makes a track a gate or two wide. So ignore 40 s, and
+          // learn nothing, when 5+ gates on a radar reach 40, when 7+ of
+          // the 14 gates 2-8 rise 8 over their normal at once, or when 4+
+          // near gates light together. Replayed 18:00-07:38: 6 false (33
+          // before), and a 07:40 test walk caught; 1 false in the windy
+          // 10 minutes at 10:40 on 14 Oct.
+          static int ring[2][9][10];
+          static int ring_n = 0, ring_pos = 0;
+          static int cur[2][9];
+          static uint32_t minute = 0, burst_until = 0, last_lit = 0;
+          static int cand = 0;
+          const uint32_t now = millis() / 1000;
+          int *mx[2] = {id(s1_m_max), id(s2_m_max)};
+          const bool have[2] = {id(s1_agg_n) > 0, id(s2_agg_n) > 0};
+          id(path_eng_ms) = millis();
+          if (minute == 0) minute = now / 60 + 1;
+          if (now / 60 + 1 != minute) {
+            minute = now / 60 + 1;
+            for (int r = 0; r < 2; r++)
+              for (int g = 2; g < 9; g++) { ring[r][g][ring_pos] = cur[r][g]; cur[r][g] = 0; }
+            ring_pos = (ring_pos + 1) % 10;
+            if (ring_n < 10) ring_n++;
+          }
+          auto normal = [&](int r, int g) {
+            int v[10];
+            for (int i = 0; i < ring_n; i++) v[i] = ring[r][g][i];
+            std::sort(v, v + ring_n);
+            return ring_n % 2 ? v[ring_n / 2] : (v[ring_n / 2 - 1] + v[ring_n / 2]) / 2;
+          };
+          const bool learned = ring_n >= 3;
+          int strong = 0, raised = 0, radars = 0;
+          for (int r = 0; r < 2; r++) {
+            if (!have[r]) continue;
+            radars++;
+            int n40 = 0;
+            for (int g = 2; g < 9; g++) {
+              if (mx[r][g] >= 40) n40++;
+              if (learned && mx[r][g] >= normal(r, g) + 8) raised++;
+            }
+            if (n40 >= 5) strong++;
+          }
+          if (strong > 0 || (radars > 0 && raised >= (radars == 2 ? 7 : 4)))
+            burst_until = now + 40;
+          char why[64] = "";
+          int lit = 0;
+          if ((int32_t) (now - burst_until) >= 0) {
+            for (int r = 0; r < 2; r++) {
+              if (!have[r]) continue;
+              for (int g = 2; g < 9; g++) cur[r][g] = std::max(cur[r][g], mx[r][g]);
+              if (!learned) continue;
+              for (int g = 2; g <= 4; g++) {
+                const int ref = normal(r, g);
+                if (ref >= 85) continue;
+                if (mx[r][g] >= std::max(ref + 12, 25)) {
+                  lit++;
+                  const size_t n = strlen(why);
+                  snprintf(why + n, sizeof(why) - n, "%s%c%d %d/%d", n ? " " : "",
+                           r == 0 ? 'S' : 'D', g, mx[r][g], ref);
+                }
+              }
+            }
+            if (lit >= 4) { burst_until = now + 40; lit = 0; }
+          }
+          cand = lit > 0 ? cand + 1 : 0;
+          if (cand >= 3) {
+            if (!id(path_person_on)) {
+              id(path_person_on) = true;
+              id(path_trigger).publish_state(why);
+            }
+            last_lit = now;
+          }
+          if (id(path_person_on) && now - last_lit > 20) id(path_person_on) = false;
+
+          for (int i = 0; i < 9; i++) {
+            id(s1_m_max)[i] = 0; id(s1_s_sum)[i] = 0;
+            id(s2_m_max)[i] = 0; id(s2_s_sum)[i] = 0;
+          }
+          id(s1_agg_n) = 0;
+          id(s2_agg_n) = 0;
+  # Radar Gate Log: per-gate energies, and every 10 s how many engineering
+  # frames arrived (0 would mean the radars are still in basic mode).
+  - interval: 250ms
+    then:
+      - lambda: |-
+          if (!id(radar_gate_log).state) return;
+          char b[256];
+          int n = 0;
+          auto row = [&](const char *tag, int *v) {
+            n += snprintf(b + n, sizeof(b) - n, "%s", tag);
+            for (int i = 0; i < 9; i++) n += snprintf(b + n, sizeof(b) - n, " %3d", v[i]);
+          };
+          row("S1 m", id(s1_move_e)); row(" s", id(s1_stat_e));
+          row(" | S2 m", id(s2_move_e)); row(" s", id(s2_stat_e));
+          ESP_LOGI("gates", "%s", b);
+          static uint32_t last = 0;
+          if (millis() - last > 10000) {
+            last = millis();
+            ESP_LOGI("gates", "frames: S1 %lu engineering, %lu short | S2 %lu engineering, %lu short",
+                     (unsigned long) id(s1_eng_frames), (unsigned long) id(s1_short_frames),
+                     (unsigned long) id(s2_eng_frames), (unsigned long) id(s2_short_frames));
+          }
+  # Wind gate (see person_confirmed): note when the gate pattern last looked
+  # like a person. Pattern order: chars 0-8 street gates 8..0, 9-17 door 0..8.
+  - interval: 100ms
+    then:
+      - lambda: |-
+          const std::string &p = id(gate_pattern_sensor).state;
+          if (p.size() != 18) return;
+          int street_all = 0, door_all = 0, street_far = 0, door_far = 0;
+          for (int i = 0; i < 9; i++) if (p[i] == '1') { street_all++; if (i <= 2) street_far++; }
+          for (int i = 9; i < 18; i++) if (p[i] == '1') { door_all++; if (i >= 14) door_far++; }
+          if ((street_all >= 3 && door_all >= 3) || door_far >= 2 || street_far >= 2)
+            id(person_confirm_ms) = millis();
   # Onboard blue LED (GPIO8, the person_indicator_led output from
-  # frontpath.yaml) blinks at 1 Hz while either journey is off its usual road.
-  # Only writes on a change when not diverted, so the Home Assistant light
-  # entity for it still works the rest of the time.
+  # frontpath.yaml), seen from outside once mounted:
+  #   1 Hz blink         a journey is off its usual road (Gamla E4 -> E4)
+  #   blip every 3 s     frost expected, and no diversion
+  #   off                otherwise
+  # Only writes on a change when idle, so the Home Assistant light entity
+  # for it still works the rest of the time.
   - interval: 500ms
     then:
       - lambda: |-
           const bool diverted =
               (id(markaryd_diverted).has_state() && id(markaryd_diverted).state) ||
               (id(orkelljunga_diverted).has_state() && id(orkelljunga_diverted).state);
-          if (!diverted) {
+          const bool ice = id(ice_risk).has_state() && id(ice_risk).state;
+          static uint8_t tick = 0;
+          tick = (tick + 1) % 6;
+          bool on;
+          if (diverted) on = (tick % 2) == 0;
+          else if (ice) on = tick == 0;
+          else {
             if (id(route_diverted)) id(person_indicator_led).turn_off();
             id(route_diverted) = false;
             return;
           }
           id(route_diverted) = true;
-          static bool phase = false;
-          phase = !phase;
-          if (phase) id(person_indicator_led).turn_on();
+          if (on) id(person_indicator_led).turn_on();
           else id(person_indicator_led).turn_off();
   # Night and deep twilight need the lamp. The Dusk flag is only the blue
   # hour, so it is off again once the sky is properly dark.
@@ -245,9 +737,9 @@ display:
     id: path_lcd
     spi_id: path_lcd_spi
     dc_pin: GPIO2
-    # RES. The controller needs a low pulse after power-up; with RES only
-    # tied high it ignored everything, blank even with all pixels on.
-    reset_pin: GPIO10
+    # RES (GPIO10) is pulsed by lcd_hard_reset, not here: see that script.
+    # 1 MHz: a 1 KB frame takes about 9 ms, and it is forgiving of the loom.
+    data_rate: 1MHz
     # Panel CS is tied to GND. ESPHome 2026.9 still wants a cs_pin, so this
     # GPIO is software-only and must not be wired to the LCD (or a radar).
     # GPIO9 is BOOT: pulled up at reset, so idle-high CS cannot upset boot.
@@ -255,49 +747,108 @@ display:
     cs_pin:
       number: GPIO9
       ignore_strapping_warning: true
-    update_interval: 30s
+    # One frame per scroll pixel (MS_PER_PX below), so text steps a clean
+    # pixel at a time. A frame is 1 KB at 1 MHz, about 9 ms.
+    update_interval: 150ms
     lambda: |-
-      auto minutes_text = [](const std::string &raw, bool has) -> std::string {
-        if (!has || raw.empty() || raw == "unknown" || raw == "unavailable" || raw == "none") return "--";
-        const auto dot = raw.find('.');
-        if (dot == std::string::npos) return raw;
-        return raw.substr(0, dot);
+      // 3x3 grid, 128x60, then a 4 px radar strip. Each cell holds one value
+      // in a 17 px font. Text
+      // wider than its cell scrolls inside it as an endless loop, with a gap
+      // before it comes round again. Slow, because the STN glass smears.
+      // A warning is drawn inverted (diverted road, frost).
+      //
+      //   Markaryd     11   Gamla E4
+      //   Örkelljunga  16   Gamla E4
+      //   Rain         4h   6.5°
+      //   ▪ · · ▪▪ · · ·   gates, street end left, door end right   (y 60-61)
+      //   ━━━━━━━━         distance along the path while detected   (y 63)
+      static const int COL_X[3] = {0, 43, 86};
+      static const int COL_W[3] = {42, 42, 42};
+      static const int ROW_Y[3] = {0, 20, 40};
+      static const int ROW_H = 20;
+      static const uint32_t MS_PER_PX = 150;  // about 7 px/s: one pixel per frame
+      static const int LOOP_GAP = 14;        // blank pixels between repeats
+      const uint32_t now = millis();
+
+      auto cell = [&](int r, int c, const std::string &text, bool inverse) {
+        const int x = COL_X[c], y = ROW_Y[r], w = COL_W[c];
+        int bx, by, tw, th;
+        it.get_text_bounds(0, 0, text.c_str(), id(cell_font), TextAlign::TOP_LEFT, &bx, &by, &tw, &th);
+        const Color fg = inverse ? COLOR_OFF : COLOR_ON;
+        if (inverse) it.filled_rectangle(x, y, w, ROW_H, COLOR_ON);
+        it.start_clipping(display::Rect(x, y, w, ROW_H));
+        if (tw > w) {
+          // Two copies one loop apart, so the tail is always followed in.
+          const int loop = tw + LOOP_GAP;
+          const int dx = (now / MS_PER_PX) % loop;
+          it.print(x - dx, y, id(cell_font), fg, TextAlign::TOP_LEFT, text.c_str());
+          it.print(x - dx + loop, y, id(cell_font), fg, TextAlign::TOP_LEFT, text.c_str());
+        } else {
+          const int dx = (c == 1) ? (w - tw) / 2 : 0;  // numbers centred in the middle column
+          it.print(x + dx, y, id(cell_font), fg, TextAlign::TOP_LEFT, text.c_str());
+        }
+        it.end_clipping();
       };
-      auto road_tag = [](const std::string &raw, bool has) -> std::string {
-        if (!has) return "--";
-        if (raw == "E4") return "E4";
-        if (raw == "Gamla E4") return "Gamla";
+
+      auto minutes = [](text_sensor::TextSensor *s) -> std::string {
+        if (!s->has_state()) return "--";
+        const std::string &raw = s->state;
+        if (raw.empty() || raw == "unknown" || raw == "unavailable" || raw == "none") return "--";
+        const auto dot = raw.find('.');
+        return dot == std::string::npos ? raw : raw.substr(0, dot);
+      };
+      auto road = [](text_sensor::TextSensor *s) -> std::string {
+        if (!s->has_state()) return "--";
+        if (s->state == "E4" || s->state == "Gamla E4") return s->state;
         return "--";
       };
-      auto fit22 = [](std::string line) -> std::string {
-        if (line.size() > 22) line.resize(22);
-        return line;
-      };
-      const std::string markaryd = fit22(
-          std::string("Markaryd ") + minutes_text(id(markaryd_minutes).state, id(markaryd_minutes).has_state()) +
-          "m " + road_tag(id(markaryd_road).state, id(markaryd_road).has_state()));
-      const std::string orkelljunga = fit22(
-          std::string("Orkelljunga ") +
-          minutes_text(id(orkelljunga_minutes).state, id(orkelljunga_minutes).has_state()) + "m " +
-          road_tag(id(orkelljunga_road).state, id(orkelljunga_road).has_state()));
-      std::string rain = "Rain --";
-      if (id(hours_until_rain).has_state() && !isnan(id(hours_until_rain).state)) {
+      auto on = [](binary_sensor::BinarySensor *b) -> bool { return b->has_state() && b->state; };
+
+      cell(0, 0, "Markaryd", false);
+      cell(0, 1, minutes(id(markaryd_minutes)), false);
+      cell(0, 2, road(id(markaryd_road)), on(id(markaryd_diverted)));
+
+      cell(1, 0, "Örkelljunga", false);
+      cell(1, 1, minutes(id(orkelljunga_minutes)), false);
+      cell(1, 2, road(id(orkelljunga_road)), on(id(orkelljunga_diverted)));
+
+      std::string rain = "--";
+      if (id(hours_until_rain).has_state() && !std::isnan(id(hours_until_rain).state)) {
         const int hours = (int) (id(hours_until_rain).state + 0.5f);
-        if (hours >= 48) rain = "No rain";
-        else if (hours <= 0) rain = "Rain now";
-        else rain = std::string("Rain ") + std::to_string(hours) + "h";
+        if (hours >= 48) rain = "dry";
+        else if (hours <= 0) rain = "now";
+        else rain = std::to_string(hours) + "h";
       }
+      const bool ice = on(id(ice_risk));
       std::string temp = "--";
-      if (id(forecast_temp_next).has_state() && !isnan(id(forecast_temp_next).state) &&
+      if (id(forecast_temp_next).has_state() && !std::isnan(id(forecast_temp_next).state) &&
           id(forecast_temp_next).state < 90.0f) {
         const float rounded = roundf(id(forecast_temp_next).state * 10.0f) / 10.0f;
-        char buf[12];
-        if (fabsf(rounded - roundf(rounded)) < 0.05f) snprintf(buf, sizeof(buf), "%.0f C", rounded);
-        else snprintf(buf, sizeof(buf), "%.1f C", rounded);
+        char buf[16];
+        if (fabsf(rounded - roundf(rounded)) < 0.05f) snprintf(buf, sizeof(buf), "%.0f°", rounded);
+        else snprintf(buf, sizeof(buf), "%.1f°", rounded);
         temp = buf;
       }
-      if (id(ice_risk).state) temp += " ice";
-      it.print(0, 0, id(path_font), markaryd.c_str());
-      it.print(0, 16, id(path_font), orkelljunga.c_str());
-      it.print(0, 36, id(path_font), rain.c_str());
-      it.print(0, 50, id(path_font), temp.c_str());
+      if (ice) temp += " ice";
+      cell(2, 0, "Rain", false);
+      cell(2, 1, rain, false);
+      cell(2, 2, temp, ice);
+
+      // Radar strip. Gate Pattern Binary is 18 characters ordered street to
+      // door: the street radar's gates 8..0, then the door radar's 0..8 (see
+      // frontpath/frontpath.yaml). Active gate: a 6x2 block. Idle: one dot.
+      const std::string &pattern = id(gate_pattern_sensor).state;
+      for (int g = 0; g < 18 && g < (int) pattern.size(); g++) {
+        const int gx = 1 + g * 7;
+        if (pattern[g] == '1') it.filled_rectangle(gx, 60, 6, 2, COLOR_ON);
+        else it.draw_pixel_at(gx + 3, 61, COLOR_ON);
+      }
+      // Calculated position along the path, 0 = street end, path_length_m =
+      // door, as a bar from the left. Only while someone is detected.
+      if (id(person_confirmed).state && id(person_position).has_state() &&
+          !std::isnan(id(person_position).state) && id(path_length_m) > 0) {
+        int bar = (int) roundf(id(person_position).state / id(path_length_m) * 128.0f);
+        if (bar < 2) bar = 2;
+        if (bar > 128) bar = 128;
+        it.horizontal_line(0, 63, bar, COLOR_ON);
+      }

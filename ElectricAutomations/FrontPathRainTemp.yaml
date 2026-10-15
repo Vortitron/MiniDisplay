@@ -1,0 +1,78 @@
+# Hours until rain and the next hour's temperature, for the bottom row of
+# the FrontPath screen (esphome/FrontPath/frontpath-display.yaml).
+#
+# Writes the two helpers created live with ha_set_helper:
+#   input_number.front_path_hours_until_rain          48 = none in the window
+#   input_number.front_path_forecast_temp_next_hour   99 = no forecast
+#
+# This used to be part of frontpath_update_frost_forecast in
+# esphome/FrontPath/frontpath_lights_automations_simple.yaml, but that repo
+# copy was never deployed: it still carries frontpath_light_smoother, which
+# the live package (packages/frontpath_automations.yaml) dropped on
+# 2026-09-24 because it clashed with the UI copy. So this runs on its own,
+# from the same OpenWeatherMap hourly feed. Variable keys sort alphabetically
+# in dependency order, so a Vome read-back cannot reorder them into a break.
+#
+# Deployed with ha_set_automation, id frontpath_rain_temp_cache (2026-10-11).
+
+id: frontpath_rain_temp_cache
+alias: Front Path - Rain and next-hour temperature
+description: >-
+  Caches hours until rain (48 = none in the window) and the next hour's
+  temperature from the OpenWeatherMap hourly forecast, for the FrontPath
+  screen's bottom row.
+mode: single
+triggers:
+  - trigger: homeassistant
+    event: start
+  - trigger: time_pattern
+    minutes: /30
+actions:
+  - action: weather.get_forecasts
+    data:
+      type: hourly
+    target:
+      entity_id: weather.openweathermap
+    response_variable: forecast_response
+  - variables:
+      forecast_data: "{{ forecast_response['weather.openweathermap'].forecast }}"
+      forecast_temp_next: >-
+        {% set now_ts = as_timestamp(now()) %}
+        {% set ns = namespace(found=false, temp=99) %}
+        {% for entry in (forecast_data or []) %}
+          {% if not ns.found %}
+            {% set ts = as_timestamp(entry.datetime) %}
+            {% if ts is not none and ts >= now_ts and entry.temperature is defined and entry.temperature is not none %}
+              {% set ns.temp = entry.temperature | float %}
+              {% set ns.found = true %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.temp | round(1) }}
+      hours_until_rain: >-
+        {% set now_ts = as_timestamp(now()) %}
+        {% set rainy = ['rainy', 'pouring', 'lightning-rainy', 'hail', 'snowy', 'snowy-rainy'] %}
+        {% set ns = namespace(found=false, hours=48) %}
+        {% for entry in (forecast_data or []) %}
+          {% if not ns.found %}
+            {% set ts = as_timestamp(entry.datetime) %}
+            {% set precip = entry.precipitation | default(0) | float(0) %}
+            {% set cond = entry.condition | default('') %}
+            {% if ts is not none and ts >= now_ts and (precip >= 0.2 or cond in rainy) %}
+              {% set raw_hours = ((ts - now_ts) / 3600) | round(0, 'ceil') | int %}
+              {% set ns.hours = [raw_hours, 0] | max %}
+              {% set ns.found = true %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.hours }}
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.front_path_hours_until_rain
+    data:
+      value: "{{ hours_until_rain | float(48) }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.front_path_forecast_temp_next_hour
+    data:
+      value: "{{ forecast_temp_next | float(99) }}"

@@ -16,10 +16,10 @@
 # Measured with OSRM on 21 Sep 2026. The pool's first live reading was
 # 19.2 km and 16 min, which is the Gamla E4 side of that split.
 #
-# The pool stands in for the drive to SiS Ljungaskog, just up the road
-# from it, which goes by Gamla E4. Google would send Ljungaskog itself
-# down the E4 (26.3 km, quicker), so it can't show the old road being
-# blocked; the pool can. Both lines are normally Gamla E4, and `diverted`
+# The pool stands in for a regular drive just up the road from it, which
+# goes by Gamla E4. Google would send that destination itself down the
+# E4 (quicker), so it can't show the old road being blocked; the pool
+# can. Both lines are normally Gamla E4, and `diverted`
 # is true when Google moves one to the E4. The FrontPath onboard LED
 # blinks on it.
 #

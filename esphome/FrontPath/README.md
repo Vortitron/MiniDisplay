@@ -2,14 +2,15 @@
 
 ## Which files are actually in use
 
-Home Assistant device **FrontPath BLE Processing** (GamlaBio, Front Walkway, MAC `58:8C:81:AD:39:EC`, `frontpath.local`; DHCP, last seen at `192.168.1.161`) is the live box. The ESPHome dashboard should show **one** FrontPath config. Every top-level `.yaml` in `/config/esphome` appears there as a device, and these files all share `name: frontpath`, so stray copies show up as duplicates that go live and dark together. The building blocks live in `frontpath/`, which the dashboard does not scan.
+Home Assistant device **FrontPath BLE Processing** (Front Walkway, `frontpath.local`; DHCP, and its address moves (seen at .158 and .161), so use `frontpath.local`) is the live box. The ESPHome dashboard should show **one** FrontPath config. Every top-level `.yaml` in `/config/esphome` appears there as a device, and these files all share `name: frontpath`, so stray copies show up as duplicates that go live and dark together. The building blocks live in `frontpath/`, which the dashboard does not scan.
 
 | Role | File | Notes |
 |------|------|--------|
 | **Flash this** | `frontpath-display.yaml` | Screen and a passive Bluetooth proxy. Includes the colour overlay. |
 | **Colour + radar** | `frontpath/frontpath-rgb.yaml` | Rollback without the panel. This is what the box was running before the screen. Copy it to the top level to flash it. |
 | **Radar base** | `frontpath/frontpath.yaml` | BLE processing v3. Included by the overlay; keep this as the TEMT6000 rollback. |
-| **Live lighting package** | `frontpath_lights_automations_simple.yaml` | Loaded on HA as `packages/frontpath_automations.yaml`. Also caches hours-until-rain and the next-hour temperature. |
+| **Live lighting package** | `frontpath_lights_automations_simple.yaml` | Loaded on HA as `packages/frontpath_automations.yaml`. **Out of sync:** this repo copy still has `frontpath_light_smoother`, which the live copy dropped on 2026-09-24, so do not deploy it as is. |
+| **Rain + next-hour temperature** | `ElectricAutomations/FrontPathRainTemp.yaml` | Automation `frontpath_rain_temp_cache`. Feeds the screen's bottom row. |
 
 `FrontPath_BLE_Processing_v3.yaml` is an alias of `frontpath-display.yaml` so old flash commands still hit the current stack.
 
@@ -32,6 +33,48 @@ This configuration uses an ESP32-C3 SuperMini board with two LD2410C millimetre-
 - **Sensor 2**: `14:AA:8C:58:66:02` - Points towards the **door end** (`door_1..door_8`)
 
 Both sensors are mounted in the same box at the path's midpoint, pointing in opposite directions to provide full coverage of the 12m path length and enable direction/position tracking.
+
+### Wind gate (frontpath-display.yaml, 2026-10-13, fixed 14 Oct)
+
+Mounted on 13 Oct, the v3 logic below fired every minute or two on a gusty evening with nobody there (wind 5.6 m/s, gusts 11): one to three neighbouring street gates (S3-S5) or S1, rarely the door side. So v3's own sensor is renamed **Path Person Raw** (diagnostic; same Home Assistant entity), and **Path Person Detected** — the one the automations use, same entity as before — is a template in `frontpath-display.yaml`: on while Raw is on *and* within the last 20 s the gate pattern showed three or more gates on both radars, two or more of door gates 5-8, or two or more of street gates 6-8.
+
+The first version (13 Oct) was a filter on v3's sensor. ESPHome runs a binary-sensor filter only when its input *changes*, so it was evaluated once, as Raw went on — before a walker spreads across the gates — and the 14 Oct test walk never got through. Replayed with the corrected logic: 14 false episodes on the windy night of 13-14 Oct, and the slow test walk caught (the quick one was not).
+
+**Coverage is the real limit.** In the 14 Oct test walk a person along the whole path reached at most street gate 6 and door gate 4: about 4.5 m one way and 3 m the other, of the ±6 m the gates cover. And v3 reads the LD2410s in basic mode: one moving target per radar, the strongest, mapped to its gate. Plants moving at 3 m can therefore hide a person further out. Engineering mode (per-gate energies for all nine gates every frame, as HLKRadarTool shows) is the proper fix.
+
+### Engineering mode: per-gate energies (14 Oct)
+
+The radars were always put into engineering mode on connect (command 0x62), but v3's parser read only the single target at the start of each frame. `frontpath-display.yaml` now adds a second listener per radar that keeps all nine gates' moving and static energies (about 10 frames a second each), plus:
+
+- **Gate Energies** (diagnostic text sensor, once a second): `m1:<9>;s1:<9>;m2:<9>;s2:<9>` — the second's peak moving and mean static energy per gate, 1 = street radar, 2 = door. Kept in Home Assistant history for replaying rules offline.
+- **Radar Gate Log** (switch): streams the raw per-gate values to the log 4 times a second, for test walks.
+- **Enable Sensor 1/2 BLE** now stay off when switched off (the disconnect handler used to re-enable them within seconds), so HLKRadarTool can connect.
+
+What the 14 Oct test walk showed: moving energy only rises within 2-3 m of the box, while static energy follows a person to both ends (far gates about 15-40 with the path empty, 75-100 with someone there). Static at the far street gates also swings 30-98 with nobody there, probably wind in the plants, so the replacement detection (per-gate excess over each gate's own normal level) is to be tuned on a night of Gate Energies history before it goes in.
+
+### What detection has to get right (14 Oct)
+
+- **Arriving:** the porch light should brighten as someone approaches the door. The approach is what matters. The street end matters little, and if readings go fuzzy right at the door, the approach already says someone is there.
+- **Leaving:** people linger at the door to lock it, so a short-lived target does not need catching.
+- So weight the **door radar** and movement **towards the door**. The street radar is the noisy one in wind (its static saturates at gates 6-7 and it has a fixed reflector at gates 3-5), and its far end is the least useful anyway.
+
+### Person rule (15 Oct, replaces the wind gate)
+
+The night of 14-15 Oct: every one of the 33 detections was interference. From about 18:00 to 23:00, every 7-10 minutes, every gate on both radars rose in the same second for 4-6 s. The source is still unknown. Nothing on HA's power meters lines up: not the freezer, the washing machine plug, the air fryer (L1, 18:01-19:35), the hot water or Sam.
+
+Static energy turned out useless for telling people apart: wind, the fixed reflector at street gates 3-5, and unexplained night swings all drive it to 100. **Path Person Detected** now uses only moving energy at gates 2-4 (about 1.5-3.75 m each side of the box). The rule:
+
+- A gate counts when this second's peak is at least 12 above its normal, and at least 25. Its normal is the median of its last 10 per-minute peaks. A gate whose normal is 85 or more is saturated and can't count.
+- 3 s lit in a row means a person, held for 20 s.
+- Whole-box events are ignored for 40 s, and nothing is learned during them: 5+ gates on a radar at 40, or 7 of the 14 gates 2-8 rising 8 at once, or 4+ near gates lit together.
+
+The wind gate is kept only as the fallback when engineering frames stop for 5 s.
+
+Replayed 18:00-07:38: 6 false episodes, and a 07:40 test walk was caught as he passed the box. **Path Trigger** names the gates behind each detection. `ElectricAutomations/FrontPathSnapshot.yaml` saves a Saga photo of each one for labelling. Retune it by replaying Gate Energies history.
+
+### PathFly (experiment, from 2026-10-13)
+
+A second HouseFly instance, **PathFly** (config entry `01M4V69SDQDZH2FXJTC9N3Q1NW`), watches `Gate Pattern Binary`, the 36-value `Gate Energies` (HouseFly 2.18.0 reads each value as its own channel with its own range), plus the Skånes-Fagerhult wind speed and max wind speed, ticks every second, takes its day from this box's illuminance, and cannot actuate anything. HouseFly 2.17.0 reads an 8-64 character 0/1 state as one detector per position, so each radar gate is its own glomerulus. The idea: wind repeats a few patterns hundreds of times an hour and should habituate, while people are rare and varied and should stay novel. `sensor.pathfly_familiarity` (= (1 - novelty) x 100) is the reading to compare with **Path Person Raw** and the wind-gated **Path Person Detected**. It passes no judgement in its first day. Stage 2, if novelty is not enough: reward it (`fly_house.feed`) when Bermuda places a family phone on the path during a detection.
 
 ### Windy-day noise hardening (on-device, v3)
 
@@ -84,16 +127,23 @@ SDA is on GPIO3, not GPIO2. The module pulls SDA down with 33 kΩ, and GPIO2 is 
 
 The panel is transflective, so the backlight stays off in daylight. It comes on at about 40% when the VEML reads under 15 lx, and goes off again above 40 lx. The light is named **Path Display Backlight** if you want to set it by hand; the next time the light level crosses a threshold it follows the sensor again. Refresh of the pixels is every 30 seconds, not in the radar path.
 
-**Do not plug in radar TX/RX yet.** `frontpath-display.yaml` still speaks to the LD2410s as BLE clients. Connecting UART makes the modules stop advertising, and this firmware will lose them. The pins above are the wiring to build to. Logger baud is 0 so GPIO20/21 stay quiet.
+**Radar TX/RX are wired, but this firmware does not read them.** It still talks to the LD2410s as BLE clients. Logger baud is 0 so GPIO20/21 stay quiet, and nothing in the display build drives a radar pin (the software CS moved off GPIO21 for that reason).
 
 ### What the screen and LED do
 
-Four lines. Place names are ASCII, so Örkelljunga is written Orkelljunga:
+A 3x3 grid in a 17 px bold condensed font, over a 4 px radar strip. Text wider than its cell scrolls inside the cell as an endless loop at about 7 px/s, one pixel per frame (slow, because the STN glass smears); short values sit still.
 
-1. `Markaryd 11m Gamla` — from `sensor.journey_markaryd` attributes `minutes` and `road`
-2. `Orkelljunga 16m Gamla` — from `sensor.journey_orkelljunga`, the pool. It stands in for the drive to SiS Ljungaskog, which goes by Gamla E4; Google would route Ljungaskog itself down the E4
-3. `Rain 4h`, `Rain now`, or `No rain`
-4. Next-hour temperature, with `ice` appended when frost is expected
+| | | |
+|---|---|---|
+| Markaryd | minutes | road |
+| Örkelljunga | minutes | road |
+| Rain | `4h` / `now` / `dry` | next-hour temperature |
+
+- Rows 1 and 2 come from `sensor.journey_markaryd` and `sensor.journey_orkelljunga` (`minutes`, `road`). The Örkelljunga line is the pool: it stands in for a regular drive just up the road that goes by Gamla E4, which Google would route down the E4 if asked directly.
+- A road cell is drawn **inverted** when that journey's `diverted` is true. The temperature cell is inverted, with `ice` appended, when frost is expected.
+- **Radar strip** (bottom 4 px): 18 gate marks, street end on the left and door end on the right, in the order of `Gate Pattern Binary` (street radar gates 8..0, then door radar 0..8). An active gate is a solid block, an idle one a dot. Under it, while someone is detected, a bar from the left to the calculated position along the path (`Path Person Position` over `path_length_m`, 16 m).
+- The screen redraws every 150 ms, once per scroll pixel.
+- `Path Person Position`, `Active Gate` and `Gate Pattern Binary` are sent to Home Assistant only when they change (filters added with `!extend` in `frontpath-display.yaml`). The radar logic publishes them every ~100 ms, which was most of the box's Wi-Fi traffic.
 
 `road` is compared exactly. `Gamla E4` is the old road. `E4` means that journey has diverted.
 
@@ -107,7 +157,7 @@ Bluetooth proxy is on, advertisements only (`active: false`), so phone presence 
 
 2. **Logging**: UART logging is off (`baud_rate: 0`) so GPIO20/21 stay free for the street radar. Logs still come over the Home Assistant API, and over USB-JTAG on the C3.
 
-3. **Onboard LED**: GPIO8 blinks at 1 Hz while either journey is off its usual road: both are normally Gamla E4, so it blinks when Google moves one to the E4. The `diverted` attribute on each journey sensor decides it (`ElectricAutomations/JourneyTime.yaml`). Ice is shown on the screen only (`ice` after the temperature).
+3. **Onboard LED**: GPIO8 blinks at 1 Hz while either journey is off its usual road: both are normally Gamla E4, so it blinks when Google moves one to the E4. The `diverted` attribute on each journey sensor decides it (`ElectricAutomations/JourneyTime.yaml`). With no diversion, it gives a short blip every 3 s when frost is expected.
 
 4. **BLE**: This firmware is still a client of the two radars, plus a passive proxy. It is not the old `FrontPathUART.yaml` detection stack — do not flash that file.
 
