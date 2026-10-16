@@ -17,6 +17,16 @@
   What it answers: what resolution and night quality the Saga's camera gives
   a web page, compared with the 352x288 frames Fully Kiosk hands to HA.
   "Send to HA" posts the last photo to camera.saga_web (Push camera).
+
+  Remote tests: add &auto=1 and the page starts the camera, waits for the
+  exposure to settle, then takes and sends a full-sensor photo and a night
+  stack, with no one at the tablet (Chrome must already have the camera
+  permission for the site). &facing=environment or &facing=user picks a
+  camera by direction; otherwise the one last chosen here is used.
+  Uploads are named <mode>-<width>x<height>.jpg, and Home Assistant keeps
+  each one (automation saga_web_keep) in /config/frontpath_snapshots.
+  Status lines also go to webhook <id>_log, which automation saga_web_log
+  writes to the logbook. A new hash (say &t=2) starts another remote run.
 -->
 <style>
   :root {
@@ -52,7 +62,7 @@
 <h1>Saga camera test</h1>
 
 <div class="row">
-  <select id="cams"><option>Cameras appear after Start</option></select>
+  <select id="cams"><option value="">Cameras appear after Start</option></select>
   <button class="primary" id="start">Start camera</button>
   <span id="status">Not started.</span>
 </div>
@@ -85,13 +95,41 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let stream = null, track = null, lastBlob = null;
+let stream = null, track = null, lastBlob = null, lastName = "saga.jpg";
+
+function param(name) {
+  const m = location.hash.match(new RegExp("[#&]" + name + "=([A-Za-z0-9_-]+)"));
+  return m ? m[1] : null;
+}
+function remembered(key, value) {
+  try {
+    if (value !== undefined) localStorage.setItem(key, value);
+    return localStorage.getItem(key);
+  } catch (e) { return null; }
+}
 
 function status(msg, cls) {
   const s = $("status");
   s.textContent = msg;
   s.className = cls || "";
+  report(msg);
 }
+
+// Every status line also goes to Home Assistant's logbook ("Saga camera
+// page"), so a remote run that fails can be seen from there.
+function report(msg) {
+  const id = hook();
+  if (!id) return;
+  try {
+    fetch("/api/webhook/" + encodeURIComponent(id + "_log"), {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msg: String(msg).slice(0, 250) }),
+    }).catch(() => {});
+  } catch (e) {}
+}
+window.addEventListener("error", e => report("Page error: " + e.message));
+window.addEventListener("unhandledrejection", e => report("Page error: " + (e.reason && e.reason.message || e.reason)));
 
 // The webhook id: from '#hook=...' if given, else what this device remembered.
 function hook() {
@@ -128,22 +166,38 @@ async function start() {
     return;
   }
   if (stream) stream.getTracks().forEach(t => t.stop());
-  const deviceId = $("cams").value && $("cams").value.length > 20 ? $("cams").value : undefined;
+  const picked = $("cams").value && $("cams").value.length > 20 ? $("cams").value : remembered("sagaCam");
+  const facing = param("facing");
+  const deviceId = facing ? undefined : (picked || undefined);
   status("Asking for the camera...");
+  const ask = id => navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      deviceId: id ? { exact: id } : undefined,
+      facingMode: facing ? { exact: facing } : undefined,
+      width: { ideal: 4096 }, height: { ideal: 3072 },
+    },
+  });
+  // Another tab holding the camera can leave this waiting for ever.
+  const within = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(
+    () => no(new Error("no camera after " + ms / 1000 + " s: another tab or app may hold it")), ms))]);
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
-        width: { ideal: 4096 }, height: { ideal: 3072 },
-      },
-    });
+    try {
+      stream = await within(ask(deviceId), 15000);
+    } catch (e) {
+      if (!deviceId || e.name !== "OverconstrainedError") throw e;
+      stream = await ask(undefined);   // the remembered camera has gone
+    }
   } catch (e) {
     status("Camera refused: " + e.name + " " + e.message, "err");
     return;
   }
   track = stream.getVideoTracks()[0];
   $("video").srcObject = stream;
+  // Photos need a playing video: wait (up to 5 s) until it has a picture.
+  try { await $("video").play(); } catch (e) {}
+  for (let i = 0; i < 50 && !$("video").videoWidth; i++) await new Promise(r => setTimeout(r, 100));
+  if (track.getSettings().deviceId) remembered("sagaCam", track.getSettings().deviceId);
   await listCameras(track.getSettings().deviceId);
   await keepAwake();
   await describe();
@@ -220,9 +274,11 @@ async function apply(constraint) {
 
 function show(blob, how) {
   lastBlob = blob;
+  lastName = how.split(" ")[0];
   const url = URL.createObjectURL(blob);
   const img = $("last");
   img.onload = () => {
+    lastName = `${lastName}-${img.naturalWidth}x${img.naturalHeight}.jpg`;
     $("lastTitle").textContent = `Last photo: ${how}, ${img.naturalWidth}x${img.naturalHeight}, ${Math.round(blob.size / 1024)} KB`;
   };
   img.src = url;
@@ -240,7 +296,7 @@ async function photoFrame() {
   const c = document.createElement("canvas");
   c.width = v.videoWidth; c.height = v.videoHeight;
   c.getContext("2d").drawImage(v, 0, 0);
-  show(await canvasBlob(c), "video frame");
+  show(await canvasBlob(c), "frame video");
 }
 
 async function photoFull() {
@@ -263,14 +319,16 @@ async function photoFull() {
 async function photoStack() {
   if (!track) return status("Start the camera first.", "err");
   const v = $("video");
-  const w = v.videoWidth, h = v.videoHeight, N = 8;
+  // At most 1920 wide: eight full-sensor frames would not fit a tablet's memory.
+  const k = Math.min(1, 1920 / v.videoWidth);
+  const w = Math.round(v.videoWidth * k), h = Math.round(v.videoHeight * k), N = 8;
   const c = document.createElement("canvas");
   c.width = w; c.height = h;
   const ctx = c.getContext("2d", { willReadFrequently: true });
   const sum = new Float32Array(w * h * 3);
   for (let n = 0; n < N; n++) {
     status(`Stacking frame ${n + 1} of ${N}...`);
-    ctx.drawImage(v, 0, 0);
+    ctx.drawImage(v, 0, 0, w, h);
     const d = ctx.getImageData(0, 0, w, h).data;
     for (let i = 0, j = 0; i < d.length; i += 4, j += 3) {
       sum[j] += d[i]; sum[j + 1] += d[i + 1]; sum[j + 2] += d[i + 2];
@@ -282,7 +340,30 @@ async function photoStack() {
     out.data[i] = sum[j] / N; out.data[i + 1] = sum[j + 1] / N; out.data[i + 2] = sum[j + 2] / N; out.data[i + 3] = 255;
   }
   ctx.putImageData(out, 0, 0);
-  show(await canvasBlob(c), "night stack of 8");
+  show(await canvasBlob(c), "stack of 8 frames");
+}
+
+// The Vome hosted address refuses uploads of about 1 MB or more (413), and
+// this page has to be on it for Chrome to allow the camera. So squeeze a
+// big photo under 950 KB: lower JPEG quality first, then the size.
+const LIMIT = 950 * 1024;
+async function fit(blob) {
+  if (blob.size <= LIMIT) return { blob, w: 0, h: 0 };
+  const bmp = await createImageBitmap(blob);
+  let w = bmp.width, h = bmp.height;
+  for (let pass = 0; pass < 12; pass++) {
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    for (const q of [0.9, 0.8, 0.7]) {
+      const out = await new Promise(res => c.toBlob(res, "image/jpeg", q));
+      if (out.size <= LIMIT) { bmp.close(); c.width = c.height = 0; return { blob: out, w, h, q }; }
+    }
+    c.width = c.height = 0;
+    w = Math.round(w * 0.85); h = Math.round(h * 0.85);
+  }
+  bmp.close();
+  return { blob, w: 0, h: 0 };
 }
 
 async function send() {
@@ -290,14 +371,57 @@ async function send() {
   if (!id) return status("No webhook id: open the page with #hook=<id> after the address.", "err");
   if (!lastBlob) return status("Take a photo first.", "err");
   status("Sending to Home Assistant...");
+  let body = lastBlob, name = lastName;
+  if (lastBlob.size > LIMIT) {
+    const f = await fit(lastBlob);
+    body = f.blob;
+    if (f.w) {
+      name = lastName.replace(/-\d+x\d+\.jpg$/, "") + `-${f.w}x${f.h}-q${Math.round(f.q * 100)}.jpg`;
+      status(`Squeezed ${Math.round(lastBlob.size / 1024)} KB to ${Math.round(body.size / 1024)} KB (${f.w}x${f.h}, quality ${f.q}) for the 1 MB upload limit.`);
+    }
+  }
   const form = new FormData();
-  form.append("image", lastBlob, "saga.jpg");
+  form.append("image", body, name);
   try {
     const r = await fetch("/api/webhook/" + encodeURIComponent(id), { method: "POST", body: form });
-    status(r.ok ? "Sent: camera.saga_web has it." : "Home Assistant said " + r.status, r.ok ? "ok" : "err");
+    status(r.ok ? "Sent " + name + ": camera.saga_web has it." : "Home Assistant said " + r.status, r.ok ? "ok" : "err");
+    return r.ok;
   } catch (e) {
     status("Send failed: " + e.message, "err");
+    return false;
   }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Wait until the image has loaded, so lastName carries the size.
+const loaded = () => new Promise(r => { const i = $("last"); i.complete ? r() : (i.onload = (f => () => { f && f(); r(); })(i.onload)); });
+
+// One run at a time: a page opened by a link with '#...' can also get a
+// hashchange, and a second start() stops the first run's camera (16 Oct:
+// "source width is 0", "Requested device not found").
+let autoRunning = false;
+async function auto() {
+  if (autoRunning) return;
+  autoRunning = true;
+  try { await autoRun(); } finally { autoRunning = false; }
+}
+
+async function autoRun() {
+  await start();
+  if (!track) return;
+  status("Auto: letting the exposure settle...");
+  await sleep(4000);
+  // The stack first: after a 12 MP full-sensor photo the tab can run out of
+  // memory part-way through it (16 Oct: it stopped at frame 1, twice).
+  await photoStack();
+  await sleep(500); await loaded(); await send();
+  await sleep(3000);
+  lastBlob = null;
+  if ("ImageCapture" in window) await photoFull();
+  if (!lastBlob) await photoFrame();
+  await sleep(500); await loaded(); await send();
+  lastBlob = null;
+  status("Auto test done: two photos sent.", "ok");
 }
 
 $("start").onclick = start;
@@ -307,6 +431,18 @@ $("photo").onclick = photoFull;
 $("stack").onclick = photoStack;
 $("send").onclick = send;
 if (!hook()) status("Tip: open with #hook=<webhook id> so photos can be sent to HA.");
+else if (param("auto") === "1") auto();
+// Chrome does not reload a page it already has open when only the part
+// after '#' changes, so a second remote run arrives as a hash change.
+window.addEventListener("hashchange", () => { if (param("auto") === "1") auto(); });
+// Let go of the camera when this tab is hidden or closed, so the next run
+// (often a new tab) can have it.
+function release() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; track = null;
+}
+window.addEventListener("pagehide", release);
+document.addEventListener("visibilitychange", () => { if (document.hidden && !autoRunning) release(); });
 </script>
 </body>
 </html>
