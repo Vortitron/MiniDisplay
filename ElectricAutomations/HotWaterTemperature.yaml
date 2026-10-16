@@ -10,6 +10,10 @@ description: >-
        pipe past 48°C (e.g. a 16:30 shower that peaked at ~44°C yet left the
        pipe sitting at ~19°C afterwards). A cold pipe = cold mains water in a
        depleted tank; a full, idle tank holds the pipe around 33-37°C.
+  Fallback: if the probe is offline (unknown/unavailable) for 30 minutes,
+  neither signal can fire, so assume the hot water has been used — set the
+  flag once when it drops out and re-arm it daily at 11:00 (after the usual
+  morning draws) for as long as it stays offline.
   A separate (currently disabled) "Hot water, isn't" alarm fires if the pipe
   runs cold during active use. The flag is cleared by HotWaterReheatTracker
   after 2 cumulative hours of boiler heating, NOT by the pipe warming back up.
@@ -46,6 +50,22 @@ triggers:
       minutes: 10
       seconds: 0
     id: tank_depleted
+  # Probe-offline fallback. The ESPHome filter turns a failed probe into
+  # unknown 5 min after its last good read; transient dropouts have lasted up
+  # to ~25 min, so wait 30 before assuming the probe is gone.
+  - trigger: state
+    entity_id: sensor.manifoldtemperature_hot_water_boiler_temp
+    to:
+      - unknown
+      - unavailable
+    for:
+      hours: 0
+      minutes: 30
+      seconds: 0
+    id: sensor_offline
+  - trigger: time
+    at: "11:00:00"
+    id: sensor_offline_daily
 conditions: []
 actions:
   - choose:
@@ -65,14 +85,15 @@ actions:
               message: >-
                 Sustained warm pipe (>48°C for 3 min) detected — tank likely
                 depleted. Reheat timer started (2h cumulative).
+          - action: counter.increment
+            target:
+              entity_id: counter.hot_water_used
           - action: notify.persistent_notification
             data:
               message: "Hot water used ×{{ (states('counter.hot_water_used') | int(0)) + 1 }}"
               data:
                 notification_id: hot_water
-          - action: counter.increment
-            target:
-              entity_id: counter.hot_water_used
+            enabled: false
       - conditions:
           - condition: trigger
             id: tank_depleted
@@ -98,6 +119,48 @@ actions:
           - action: counter.increment
             target:
               entity_id: counter.hot_water_used
+      # Probe offline: we can't see draws, so assume the tank was used and
+      # schedule the normal 2h reheat. Doesn't bump counter.hot_water_used —
+      # that counts real, detected uses.
+      - conditions:
+          - condition: trigger
+            id:
+              - sensor_offline
+              - sensor_offline_daily
+          # Offline for 30+ min (state conditions can't use 'for' with a
+          # list of states, hence the template).
+          - condition: template
+            value_template: >-
+              {% set s = states.sensor.manifoldtemperature_hot_water_boiler_temp %}
+              {{ s is none or (s.state in ['unknown', 'unavailable']
+                 and now() - s.last_changed >= timedelta(minutes=30)) }}
+          - condition: state
+            entity_id: input_boolean.hot_water_notified
+            state: "off"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.hot_water_notified
+          - action: logbook.log
+            data:
+              name: Hot Water
+              message: >-
+                Pipe temperature probe offline — assuming hot water was used.
+                Reheat scheduled (2h cumulative).
+          - if:
+              - condition: trigger
+                id: sensor_offline
+            then:
+              - action: notify.persistent_notification
+                data:
+                  title: Hot water sensor offline
+                  message: >-
+                    sensor.manifoldtemperature_hot_water_boiler_temp is
+                    {{ states('sensor.manifoldtemperature_hot_water_boiler_temp') }}.
+                    Assuming hot water is used daily (reheat re-armed at
+                    11:00) until the probe is fixed.
+                  data:
+                    notification_id: hot_water_sensor
       - conditions:
           - condition: trigger
             id: cold_alarm

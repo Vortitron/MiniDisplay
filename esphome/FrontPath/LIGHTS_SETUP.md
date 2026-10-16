@@ -13,7 +13,7 @@ Controls your front porch and path lights based on:
   - `binary_sensor.frontpath_path_person_detected` (person detected)
   - `sun.sun` (sun state - built into HA)
   - `light.front_porch` (your front porch light)
-  - `light.zl_1w3h_aw` (your path light)
+  - `light.fairy_lights` (your path light)
 
 ## Installation Options
 
@@ -66,7 +66,7 @@ For users who prefer Node-RED (requires Node-RED add-on):
      - `binary_sensor.frontpath_path_person_detected` - Person detected
      - `sun.sun` - Sun state (should exist by default)
      - `light.front_porch` - Your front porch light
-     - `light.zl_1w3h_aw` - Your path light
+     - `light.fairy_lights` - Your path light
 
 4. **Deploy**:
    - Click the "Deploy" button (top right)
@@ -147,7 +147,7 @@ automation:
         target:
           entity_id:
             - light.front_porch
-            - light.zl_1w3h_aw
+            - light.fairy_lights
         data:
           brightness_pct: 30
   
@@ -160,7 +160,7 @@ automation:
         target:
           entity_id:
             - light.front_porch
-            - light.zl_1w3h_aw
+            - light.fairy_lights
   
   - alias: "Front Path Lights Position Control"
     trigger:
@@ -175,7 +175,7 @@ automation:
         target:
           entity_id:
             - light.front_porch
-            - light.zl_1w3h_aw
+            - light.fairy_lights
         data:
           brightness_pct: >
             {% set pos = states('sensor.frontpath_path_person_position') | float(0) %}

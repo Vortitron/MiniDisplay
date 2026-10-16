@@ -106,7 +106,9 @@ Monitors `sensor.manifoldtemperature_hot_water_boiler_temp` (pipe-mounted sensor
 
 Why two signals? The pipe getting hot is a reliable *hot-draw* signal, but the peak height varies — a shorter or cooler shower can top out around 44°C and slip under the 48°C threshold. The cold baseline **after** the draw is the unambiguous *depletion* signal.
 
-Both branches post the **"Hot water used ×N"** persistent notification with a stable `notification_id: hot_water` (so it replaces rather than stacks) and bump `counter.hot_water_used`. See **`README_NotificationCounters.md`**.
+**Probe-offline fallback** (added Oct 2026, after the boiler DS18B20 `0xbc0000006a8e5228` started returning an all-`FF` scratchpad on 2026-10-09): with the sensor `unknown`/`unavailable`, neither signal above can fire and no reheat would ever be scheduled. So once the probe has been offline for **30 minutes** (transient dropouts have lasted up to ~25 min), the automation assumes the hot water has been used and sets the flag. It also posts a "Hot water sensor offline" persistent notification (`notification_id: hot_water_sensor`). It then **re-arms the flag daily at 11:00**, after the usual morning draws, for as long as the probe stays offline. Assumed uses don't bump `counter.hot_water_used`. Note that the 30-minute trigger needs a state *change* to start, so after an automation reload with the probe already dead, only the 11:00 re-arm fires.
+
+The draw and depletion branches post the **"Hot water used ×N"** persistent notification with a stable `notification_id: hot_water` (so it replaces rather than stacks) and bump `counter.hot_water_used`. See **`README_NotificationCounters.md`**.
 
 There is also a **disabled** `cold_alarm` (`<20°C for 10s`) which, if enabled, pings a phone with "Hot water, isn't" during a cold draw — a different purpose from `tank_depleted`.
 

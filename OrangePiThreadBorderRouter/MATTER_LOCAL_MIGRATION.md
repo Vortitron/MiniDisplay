@@ -29,6 +29,11 @@ unticked from CHAP's add-on list in the Vome portal, or it comes back at
 about :40 past each hour. If Matter goes flaky, check the add-on's state
 first.
 
+It came back once more with the HA restart of 2026-10-13 15:17 (cause not
+found), so on 2026-10-14 the add-on was **uninstalled** from GamlaBio
+Hosted. To roll back, reinstall it and restore the backup below (Matter
+Server only) after `matter_local.sh stop`.
+
 Rollback material: HA backup `matter-to-pi` (slug `a94179b7`) and a root-only
 copy at `/root/otbr/matter_migration/matter-to-pi.tar` on the Pi.
 
