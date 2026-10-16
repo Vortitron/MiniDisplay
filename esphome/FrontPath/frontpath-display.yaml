@@ -565,15 +565,20 @@ interval:
           // within 2-3 m of the box, so watch gates 2-4 (1.5-3.75 m) on each
           // side. A gate is lit when this second's peak is at least 12 above
           // its normal ceiling (the median of its last 10 per-minute peaks)
-          // and at least 25; a gate whose normal is 85+ is saturated and
-          // cannot vote. Lit for 3 s in a row = person, held 20 s.
+          // and at least 25 on the door side, 40 on the street side; a gate
+          // whose normal is 85+ is saturated and cannot vote. Lit for 3 s in
+          // a row = person, held 20 s. One spike of 50+, 30 over normal, on
+          // any near gate is a person at once: walking past the box gives
+          // one (D2 66 on 15 Oct at 07:40), and nothing else did in two nights.
+          // Street 40, not 25: on 15-16 Oct something sat 2.5-3.5 m out on the
+          // street side (street static S3-S4 at 100, moving 25-44, nothing
+          // else), probably a cat, and set it off 20 times between 23:00 and
+          // 06:00. Replayed over both nights: 2 + 13 false, the walk caught.
           // Interference lights every gate on both radars together; a
           // person makes a track a gate or two wide. So ignore 40 s, and
           // learn nothing, when 5+ gates on a radar reach 40, when 7+ of
           // the 14 gates 2-8 rise 8 over their normal at once, or when 4+
-          // near gates light together. Replayed 18:00-07:38: 6 false (33
-          // before), and a 07:40 test walk caught; 1 false in the windy
-          // 10 minutes at 10:40 on 14 Oct.
+          // near gates light together.
           static int ring[2][9][10];
           static int ring_n = 0, ring_pos = 0;
           static int cur[2][9];
@@ -593,9 +598,10 @@ interval:
           }
           auto normal = [&](int r, int g) {
             int v[10];
-            for (int i = 0; i < ring_n; i++) v[i] = ring[r][g][i];
-            std::sort(v, v + ring_n);
-            return ring_n % 2 ? v[ring_n / 2] : (v[ring_n / 2 - 1] + v[ring_n / 2]) / 2;
+            const int n = std::min(ring_n, 10);
+            for (int i = 0; i < n; i++) v[i] = ring[r][g][i];
+            std::sort(v, v + n);
+            return n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
           };
           const bool learned = ring_n >= 3;
           int strong = 0, raised = 0, radars = 0;
@@ -613,6 +619,7 @@ interval:
             burst_until = now + 40;
           char why[64] = "";
           int lit = 0;
+          bool spike = false;
           if ((int32_t) (now - burst_until) >= 0) {
             for (int r = 0; r < 2; r++) {
               if (!have[r]) continue;
@@ -621,7 +628,8 @@ interval:
               for (int g = 2; g <= 4; g++) {
                 const int ref = normal(r, g);
                 if (ref >= 85) continue;
-                if (mx[r][g] >= std::max(ref + 12, 25)) {
+                if (mx[r][g] >= std::max(ref + 30, 50)) spike = true;
+                if (mx[r][g] >= std::max(ref + 12, r == 0 ? 40 : 25)) {
                   lit++;
                   const size_t n = strlen(why);
                   snprintf(why + n, sizeof(why) - n, "%s%c%d %d/%d", n ? " " : "",
@@ -629,9 +637,10 @@ interval:
                 }
               }
             }
-            if (lit >= 4) { burst_until = now + 40; lit = 0; }
+            if (lit >= 4) { burst_until = now + 40; lit = 0; spike = false; }
           }
           cand = lit > 0 ? cand + 1 : 0;
+          if (spike) cand = std::max(cand, 3);
           if (cand >= 3) {
             if (!id(path_person_on)) {
               id(path_person_on) = true;

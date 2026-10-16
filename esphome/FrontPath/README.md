@@ -65,12 +65,13 @@ The night of 14-15 Oct: every one of the 33 detections was interference. From ab
 Static energy turned out useless for telling people apart: wind, the fixed reflector at street gates 3-5, and unexplained night swings all drive it to 100. **Path Person Detected** now uses only moving energy at gates 2-4 (about 1.5-3.75 m each side of the box). The rule:
 
 - A gate counts when this second's peak is at least 12 above its normal, and at least 25. Its normal is the median of its last 10 per-minute peaks. A gate whose normal is 85 or more is saturated and can't count.
-- 3 s lit in a row means a person, held for 20 s.
+- Street-side gates need a peak of at least 40, door-side 25 (16 Oct: something cat-sized sitting 2.5-3.5 m out on the street side set the 25 off 20 times in a night).
+- 3 s lit in a row means a person, held for 20 s. A single spike of 50+, 30 over normal, on any near gate counts at once: walking past the box makes one, and nothing else did in two nights.
 - Whole-box events are ignored for 40 s, and nothing is learned during them: 5+ gates on a radar at 40, or 7 of the 14 gates 2-8 rising 8 at once, or 4+ near gates lit together.
 
 The wind gate is kept only as the fallback when engineering frames stop for 5 s.
 
-Replayed 18:00-07:38: 6 false episodes, and a 07:40 test walk was caught as he passed the box. **Path Trigger** names the gates behind each detection. `ElectricAutomations/FrontPathSnapshot.yaml` saves a Saga photo of each one for labelling. Retune it by replaying Gate Energies history.
+Replayed over the nights of 14-15 and 15-16 Oct: 2 and 13 false episodes from 18:00 (33 and 36 before), and a 07:40 test walk caught as it passed the box. **Path Trigger** names the gates behind each detection. `ElectricAutomations/FrontPathSnapshot.yaml` saves a Saga photo of each one for labelling. Retune it by replaying Gate Energies history.
 
 ### PathFly (experiment, from 2026-10-13)
 
