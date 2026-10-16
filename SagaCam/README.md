@@ -42,3 +42,13 @@ input_button.saga_cam_test_shot. Each one gets three photos, detect<HHMMSS>-a
   down, so Fully's motion detection never takes the camera from Chrome.
 - `saga_web_night_test` presses the test-shot button at 20:00 and 23:30 until
   18 Oct.
+
+Door view (16 Oct evening): live mode now shows the front-door dashboard
+(`/front-door/door`) full screen in an iframe, with the camera running
+underneath, so the Saga no longer needs Fully Kiosk. Chrome on the Saga is
+logged in to HA as the Saga camera user. The dot in the bottom-right corner
+is green when the camera is on and HA connected; tap it for the camera tools.
+`input_button.saga_cam_reload` reloads the page in place after an update.
+Photos go up full size first and are only squeezed after a 413, so a higher
+upload limit on the Vome hosted route takes effect by itself (still about
+1 MB when tested on 16 Oct at 20:16, despite the announced 8 MB).

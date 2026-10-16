@@ -68,9 +68,20 @@
     border-radius: 8px; padding: 10px 14px; font: inherit; min-width: 0; flex: 1 1 16em;
   }
   .ok { color: var(--good); } .err { color: var(--bad); }
+  /* Door view (live mode): the front-door dashboard fills the screen, the
+     camera keeps running underneath, and the dot in the corner shows its
+     state (green = camera on and HA connected). Tap the dot for the tools. */
+  #dash { position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; z-index: 10; background: var(--bg); display: none; }
+  body.door #dash { display: block; }
+  #dot { position: fixed; right: 8px; bottom: 8px; z-index: 11; width: 18px; height: 18px; border-radius: 50%;
+         background: var(--bad); opacity: .75; display: none; border: 2px solid var(--bg); }
+  #dot.good { background: var(--good); }
+  body.live #dot { display: block; }
 </style>
 </head>
 <body>
+<iframe id="dash" title="Front door"></iframe>
+<div id="dot" title="Camera / Home Assistant status: tap for the camera tools"></div>
 <h1>Saga camera test</h1>
 
 <div class="row">
@@ -379,10 +390,13 @@ async function photoStack() {
   show(await canvasBlob(c), "stack of 8 frames");
 }
 
-// The Vome hosted address refuses uploads of about 1 MB or more (413), and
-// this page has to be on it for Chrome to allow the camera. So squeeze a
-// big photo under 950 KB: lower JPEG quality first, then the size.
+// The Vome hosted address refused uploads of about 1 MB or more (413, 16 Oct),
+// and this page has to be on it for Chrome to allow the camera. Each photo
+// goes up full size first; after a 413 the page squeezes everything under
+// 950 KB (lower JPEG quality first, then the size) until it is reloaded.
+// So when the limit is raised, full-size photos start arriving by themselves.
 const LIMIT = 950 * 1024;
+let squeeze = false;
 async function fit(blob) {
   if (blob.size <= LIMIT) return { blob, w: 0, h: 0 };
   const bmp = await createImageBitmap(blob);
@@ -408,6 +422,16 @@ async function send() {
   if (!lastBlob) return status("Take a photo first.", "err");
   status("Sending to Home Assistant...");
   let body = lastBlob, name = lastName;
+  if (!squeeze && lastBlob.size > LIMIT) {
+    const first = new FormData();
+    first.append("image", lastBlob, lastName);
+    try {
+      const r0 = await fetch("/api/webhook/" + encodeURIComponent(id), { method: "POST", body: first });
+      if (r0.ok) { status("Sent " + name + ": camera.saga_web has it.", "ok"); return true; }
+      if (r0.status === 413) { squeeze = true; status("Upload limit hit (413): squeezing photos from now on."); }
+      else { status("Home Assistant said " + r0.status, "err"); return false; }
+    } catch (e) { status("Send failed: " + e.message, "err"); return false; }
+  }
   if (lastBlob.size > LIMIT) {
     const f = await fit(lastBlob);
     body = f.blob;
@@ -548,8 +572,14 @@ async function live() {
   wantW = 2592; wantH = 1944;
   $("live").textContent = "Live mode on";
   $("live").disabled = true;
+  document.body.classList.add("live", "door");
+  $("dash").src = "/" + (param("dash") || "front-door/door").replace(/_/g, "-");
   await start();
   connect();
+  setInterval(() => {
+    const ok = track && track.readyState === "live" && ws && ws.readyState === 1;
+    $("dot").className = ok ? "good" : "";
+  }, 5000);
   setInterval(() => report("Live: alive, camera " + (track && track.readyState === "live" ? "on" : "off") +
     ", HA " + (ws && ws.readyState === 1 ? "connected" : "not connected")), 10 * 60 * 1000);
   // Restart the camera if it is gone, or if its picture has stopped
@@ -588,6 +618,7 @@ $("forgetToken").onclick = () => {
   haStatus("token forgotten");
 };
 $("live").onclick = live;
+$("dot").onclick = () => document.body.classList.toggle("door");
 $("start").onclick = start;
 $("cams").onchange = start;
 $("frame").onclick = photoFrame;
