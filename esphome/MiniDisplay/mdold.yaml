@@ -25,7 +25,7 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "yvY99rlLAA8Xsa1wX4aVqYtBJrv3NovUoy61MOzH1Lo="
+    key: !secret minidisplay_api_key
   reboot_timeout: 0s
   on_client_connected:
     then:
@@ -43,7 +43,7 @@ time:
 # OTA updates
 ota:
   platform: esphome
-  password: "6702401779ea71ccf3a1fb2b93113405"
+  password: !secret minidisplay_ota_password
 
 # WiFi configuration
 wifi:

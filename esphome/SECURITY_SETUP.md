@@ -56,7 +56,7 @@ Open `c:\dev\MiniDisplay\esphome\secrets.yaml` and replace ALL the `GENERATE_NEW
 boilercontrol_encryption_key: "GENERATE_NEW_KEY_1"
 
 # After (use YOUR generated key!):
-boilercontrol_encryption_key: "xK8vN2pQ7mR4tY9wZ3aB6cD1eF5gH0iJ8kL4mN7oP2qR="
+boilercontrol_encryption_key: "<your generated 44-character key>"
 ```
 
 ---
@@ -144,7 +144,7 @@ If this is personal infrastructure, consider making your GitHub repo private:
 ```yaml
 api:
   encryption:
-    key: "FpSU4uWfdjSNc0dAxtMGojEgLKCgl6bhTWJxpMT6mXE="  # Exposed!
+    key: "<base64 key pasted in plain text>"  # Exposed!
 ```
 
 ### After (SECURE):

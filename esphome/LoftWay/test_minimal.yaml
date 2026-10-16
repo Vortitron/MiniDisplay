@@ -21,11 +21,11 @@ logger:
 
 api:
   encryption:
-    key: "bbPqKzlRqaDwTVSkjY4EQ7Qk2b4abgkozeDiwwEWI5w="
+    key: !secret loftway_api_key
 
 ota:
   - platform: esphome
-    password: "629ce264867a48aca47fe3655f629c81"
+    password: !secret loftway_ota_password
 
 wifi:
   ssid: !secret wifi_ssid

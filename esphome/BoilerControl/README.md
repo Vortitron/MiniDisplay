@@ -137,7 +137,7 @@ If the relays don't respond:
 
 ### No WiFi Connection
 - Check your secrets.yaml credentials
-- Connect to the fallback AP: "Boiler-Control-Fallback" (password: changeme123)
+- Connect to the fallback AP, if one is configured (the current BoilerControl.yaml has no `ap:` section; add one with a `!secret` password)
 - Configure WiFi through the captive portal
 
 ### Relays Not Switching

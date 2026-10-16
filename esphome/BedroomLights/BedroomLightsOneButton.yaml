@@ -22,7 +22,7 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "R5ce2+sAWu+P64UfkenRwn2nVHHSHXP5v4hd8oSQ2Ao="
+    key: !secret bedroomlights_api_key
   on_client_connected:
     - delay: 3s
     - lambda: |-
@@ -32,7 +32,7 @@ api:
 
 ota:
   - platform: esphome
-    password: "3743fce26550feb4b84274ac957685ca"
+    password: !secret bedroomlights_onebutton_ota_password
 
 wifi:
   ssid: !secret wifi_ssid
