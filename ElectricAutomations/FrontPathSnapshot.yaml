@@ -1,6 +1,9 @@
 # A Saga still for every FrontPath "Path Person Detected", for labelling the
 # radar rule's hits (person / cat / nothing). Photos land in
-# /media/frontpath/<YYYYmmdd-HHMMSS>.jpg (Media > My media > frontpath), and a
+# /config/frontpath_snapshots/<YYYYmmdd-HHMMSS>.jpg, where the Vome config-file
+# tools can read them back for review (/media is out of their reach; the
+# folder is in allowlist_external_dirs, and not under www, so it is not
+# served without a login). frontpath_snapshot_cleanup keeps a week. And a
 # logbook line names the photo and the gates that set the rule off, from
 # sensor ..._path_trigger ("S3 43/12" = street radar gate 3, peak 43 against
 # a normal of 12). No notification: automation.front_door_snapshot (off until
@@ -15,7 +18,7 @@ id: frontpath_trigger_snapshot
 alias: Front Path - Snapshot each detection
 description: >-
   Labelling aid for the FrontPath radar rule (15 Oct): a Saga still for every
-  Path Person Detected, saved to /media/frontpath/<time>.jpg, plus a logbook
+  Path Person Detected, saved to /config/frontpath_snapshots/<time>.jpg, plus a logbook
   line with the gates that set it off. No notification, and leaves the porch
   light to the path-lights automation.
 mode: single
@@ -49,7 +52,7 @@ actions:
     target:
       entity_id: camera.saga
     data:
-      filename: "/media/frontpath/{{ stamp }}.jpg"
+      filename: "/config/frontpath_snapshots/{{ stamp }}.jpg"
   - action: switch.turn_off
     target:
       entity_id: switch.saga_motion_detection
@@ -58,3 +61,26 @@ actions:
       name: FrontPath snapshot
       message: "{{ stamp }}.jpg  {{ why }}"
       entity_id: binary_sensor.frontpath_ble_processing_path_person_detected
+
+---
+# Daily clear-out. Needs, in configuration.yaml:
+#   homeassistant:
+#     allowlist_external_dirs:
+#       - /config/frontpath_snapshots
+#   shell_command:
+#     frontpath_snapshot_cleanup: "find /config/frontpath_snapshots -name '*.jpg' -mtime +7 -delete"
+# Deployed with ha_set_automation, id frontpath_snapshot_cleanup (2026-10-16).
+
+id: frontpath_snapshot_cleanup
+alias: Front Path - Clear old snapshots
+description: >-
+  Keeps a week of FrontPath detection snapshots: daily, deletes .jpg files
+  older than 7 days from /config/frontpath_snapshots
+  (shell_command.frontpath_snapshot_cleanup).
+mode: single
+triggers:
+  - trigger: time
+    at: "03:30:00"
+actions:
+  - action: shell_command.frontpath_snapshot_cleanup
+    continue_on_error: true
