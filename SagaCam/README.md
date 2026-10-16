@@ -23,3 +23,10 @@ The id is not in this repo or in the page. It lives in `configuration.yaml`
 
 16 Oct 2026, by day: the rear camera gives the page 4096x3072 (Fully Kiosk's
 snapshots are 352x288).
+
+Night comparison, 16-18 Oct: automation `saga_web_night_test` at 20:00 and
+23:30 sends `command_screen_on`, opens the page with `auto=1` (a fresh `?v=`
+each time), and two minutes later `command_launch_app`
+`io.homeassistant.companion.android` returns the Saga to the HA app, its
+launcher. The Saga has no screen lock, so waking it lands straight on Chrome.
+Tested by day on 16 Oct: both photos saved, Saga back on HA.
