@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Saga Camera Test</title>
+<!--
+  Saga camera test (16 Oct 2026). Served by Home Assistant from
+  /config/www/saga-cam/index.html at /local/saga-cam/index.html.
+
+  Open it on the Saga in Chrome over HTTPS (the camera needs a secure page),
+  with the Push camera's webhook id after '#':
+      .../local/saga-cam/index.html#hook=<webhook id>
+  The id is never written into this file: /local is served without a login.
+  It is remembered on that device only (localStorage).
+
+  What it answers: what resolution and night quality the Saga's camera gives
+  a web page, compared with the 352x288 frames Fully Kiosk hands to HA.
+  "Send to HA" posts the last photo to camera.saga_web (Push camera).
+-->
+<style>
+  :root {
+    --bg: #101214; --panel: #1a1d21; --line: #2c3036; --text: #e8eaed;
+    --muted: #9aa0a6; --accent: #8ab4f8; --good: #81c995; --bad: #f28b82;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, sans-serif; padding: 16px;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+  button, select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 14px; font: inherit;
+  }
+  button:active { background: var(--line); }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; min-width: 0; }
+  .panel h2 { font-size: 13px; color: var(--muted); margin: 0 0 8px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  video, img { width: 100%; height: auto; background: #000; border-radius: 6px; display: block; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: var(--muted); max-height: 260px; overflow: auto; }
+  .slider { display: grid; grid-template-columns: 9em 1fr 5em; gap: 8px; align-items: center; margin: 4px 0; }
+  .slider input { width: 100%; }
+  #status { font-size: 13px; color: var(--muted); }
+  .ok { color: var(--good); } .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<h1>Saga camera test</h1>
+
+<div class="row">
+  <select id="cams"><option>Cameras appear after Start</option></select>
+  <button class="primary" id="start">Start camera</button>
+  <span id="status">Not started.</span>
+</div>
+
+<div class="row">
+  <button id="frame">Photo: video frame</button>
+  <button id="photo">Photo: full sensor</button>
+  <button id="stack">Photo: night stack (8 frames)</button>
+  <button class="primary" id="send" disabled>Send to HA</button>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Live</h2>
+    <video id="video" playsinline muted autoplay></video>
+  </div>
+  <div class="panel">
+    <h2 id="lastTitle">Last photo</h2>
+    <img id="last" alt="">
+  </div>
+  <div class="panel">
+    <h2>Exposure</h2>
+    <div id="controls"><pre>Start the camera to see what it lets a web page adjust.</pre></div>
+  </div>
+  <div class="panel">
+    <h2>What the camera reports</h2>
+    <pre id="info"></pre>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let stream = null, track = null, lastBlob = null;
+
+function status(msg, cls) {
+  const s = $("status");
+  s.textContent = msg;
+  s.className = cls || "";
+}
+
+// The webhook id: from '#hook=...' if given, else what this device remembered.
+function hook() {
+  const m = location.hash.match(/hook=([A-Za-z0-9_-]+)/);
+  try {
+    if (m) localStorage.setItem("sagaHook", m[1]);
+    return m ? m[1] : localStorage.getItem("sagaHook");
+  } catch (e) {
+    return m ? m[1] : null;
+  }
+}
+
+async function keepAwake() {
+  try { if ("wakeLock" in navigator) await navigator.wakeLock.request("screen"); } catch (e) {}
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) keepAwake(); });
+
+async function listCameras(selected) {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+  const sel = $("cams");
+  sel.innerHTML = "";
+  devices.forEach((d, i) => {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || `Camera ${i + 1}`;
+    if (d.deviceId === selected) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+async function start() {
+  if (!window.isSecureContext) {
+    status("Not a secure page: open it over https, or Chrome will not allow the camera.", "err");
+    return;
+  }
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  const deviceId = $("cams").value && $("cams").value.length > 20 ? $("cams").value : undefined;
+  status("Asking for the camera...");
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        deviceId: deviceId ? { exact: deviceId } : undefined,
+        width: { ideal: 4096 }, height: { ideal: 3072 },
+      },
+    });
+  } catch (e) {
+    status("Camera refused: " + e.name + " " + e.message, "err");
+    return;
+  }
+  track = stream.getVideoTracks()[0];
+  $("video").srcObject = stream;
+  await listCameras(track.getSettings().deviceId);
+  await keepAwake();
+  await describe();
+  const s = track.getSettings();
+  status(`Streaming ${s.width}x${s.height}.`, "ok");
+}
+
+async function describe() {
+  const info = { settings: track.getSettings() };
+  try { info.capabilities = track.getCapabilities(); } catch (e) {}
+  if ("ImageCapture" in window) {
+    try { info.photoCapabilities = await new ImageCapture(track).getPhotoCapabilities(); }
+    catch (e) { info.photoCapabilities = "unavailable: " + e.message; }
+  } else {
+    info.photoCapabilities = "ImageCapture not supported in this browser";
+  }
+  $("info").textContent = JSON.stringify(info, null, 1);
+  buildControls(info.capabilities || {}, info.settings);
+}
+
+// Sliders for whatever exposure settings the camera exposes to the page.
+function buildControls(caps, settings) {
+  const box = $("controls");
+  box.innerHTML = "";
+  const names = ["exposureCompensation", "exposureTime", "iso", "brightness", "contrast", "sharpness", "zoom"];
+  if (caps.exposureMode) {
+    const row = document.createElement("div");
+    row.className = "row";
+    caps.exposureMode.forEach(mode => {
+      const b = document.createElement("button");
+      b.textContent = "Exposure: " + mode;
+      b.onclick = () => apply({ exposureMode: mode });
+      row.appendChild(b);
+    });
+    box.appendChild(row);
+  }
+  let any = false;
+  names.forEach(name => {
+    const c = caps[name];
+    if (!c || typeof c.min !== "number") return;
+    any = true;
+    const row = document.createElement("div");
+    row.className = "slider";
+    const label = document.createElement("span");
+    label.textContent = name;
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = c.min; input.max = c.max; input.step = c.step || (c.max - c.min) / 100;
+    input.value = settings[name] !== undefined ? settings[name] : c.min;
+    const val = document.createElement("span");
+    val.textContent = input.value;
+    input.onchange = () => {
+      val.textContent = input.value;
+      const extra = name === "exposureTime" || name === "iso" ? { exposureMode: "manual" } : {};
+      apply({ ...extra, [name]: Number(input.value) });
+    };
+    row.append(label, input, val);
+    box.appendChild(row);
+  });
+  if (!any && !caps.exposureMode) {
+    box.innerHTML = "<pre>This camera lets the page adjust nothing: the browser picks exposure itself.</pre>";
+  }
+}
+
+async function apply(constraint) {
+  try {
+    await track.applyConstraints({ advanced: [constraint] });
+    status("Applied " + JSON.stringify(constraint), "ok");
+    await describe();
+  } catch (e) {
+    status("Could not apply " + JSON.stringify(constraint) + ": " + e.message, "err");
+  }
+}
+
+function show(blob, how) {
+  lastBlob = blob;
+  const url = URL.createObjectURL(blob);
+  const img = $("last");
+  img.onload = () => {
+    $("lastTitle").textContent = `Last photo: ${how}, ${img.naturalWidth}x${img.naturalHeight}, ${Math.round(blob.size / 1024)} KB`;
+  };
+  img.src = url;
+  $("send").disabled = false;
+  status("Photo taken (" + how + ").", "ok");
+}
+
+function canvasBlob(canvas) {
+  return new Promise(res => canvas.toBlob(res, "image/jpeg", 0.92));
+}
+
+async function photoFrame() {
+  if (!track) return status("Start the camera first.", "err");
+  const v = $("video");
+  const c = document.createElement("canvas");
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext("2d").drawImage(v, 0, 0);
+  show(await canvasBlob(c), "video frame");
+}
+
+async function photoFull() {
+  if (!track) return status("Start the camera first.", "err");
+  if (!("ImageCapture" in window)) return status("This browser has no ImageCapture: use the video frame.", "err");
+  status("Taking a full-sensor photo...");
+  try {
+    const ic = new ImageCapture(track);
+    const pc = await ic.getPhotoCapabilities();
+    const opts = pc.imageWidth ? { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max } : {};
+    show(await ic.takePhoto(opts), "full sensor");
+  } catch (e) {
+    status("Full-sensor photo failed: " + e.message, "err");
+  }
+}
+
+// Average 8 frames ~120 ms apart. Sensor noise is random from frame to
+// frame and averages away; a still scene does not. Roughly a 2.8x cut in
+// noise, for a night shot of a path where nothing moves fast.
+async function photoStack() {
+  if (!track) return status("Start the camera first.", "err");
+  const v = $("video");
+  const w = v.videoWidth, h = v.videoHeight, N = 8;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  const sum = new Float32Array(w * h * 3);
+  for (let n = 0; n < N; n++) {
+    status(`Stacking frame ${n + 1} of ${N}...`);
+    ctx.drawImage(v, 0, 0);
+    const d = ctx.getImageData(0, 0, w, h).data;
+    for (let i = 0, j = 0; i < d.length; i += 4, j += 3) {
+      sum[j] += d[i]; sum[j + 1] += d[i + 1]; sum[j + 2] += d[i + 2];
+    }
+    await new Promise(r => setTimeout(r, 120));
+  }
+  const out = ctx.createImageData(w, h);
+  for (let i = 0, j = 0; i < out.data.length; i += 4, j += 3) {
+    out.data[i] = sum[j] / N; out.data[i + 1] = sum[j + 1] / N; out.data[i + 2] = sum[j + 2] / N; out.data[i + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+  show(await canvasBlob(c), "night stack of 8");
+}
+
+async function send() {
+  const id = hook();
+  if (!id) return status("No webhook id: open the page with #hook=<id> after the address.", "err");
+  if (!lastBlob) return status("Take a photo first.", "err");
+  status("Sending to Home Assistant...");
+  const form = new FormData();
+  form.append("image", lastBlob, "saga.jpg");
+  try {
+    const r = await fetch("/api/webhook/" + encodeURIComponent(id), { method: "POST", body: form });
+    status(r.ok ? "Sent: camera.saga_web has it." : "Home Assistant said " + r.status, r.ok ? "ok" : "err");
+  } catch (e) {
+    status("Send failed: " + e.message, "err");
+  }
+}
+
+$("start").onclick = start;
+$("cams").onchange = start;
+$("frame").onclick = photoFrame;
+$("photo").onclick = photoFull;
+$("stack").onclick = photoStack;
+$("send").onclick = send;
+if (!hook()) status("Tip: open with #hook=<webhook id> so photos can be sent to HA.");
+</script>
+</body>
+</html>
