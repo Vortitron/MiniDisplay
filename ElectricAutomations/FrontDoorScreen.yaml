@@ -1,73 +1,73 @@
-# Saga door display: dark unless something wakes it or there is a message.
+# Saga door display brightness.
 #
-# Fully's own Screen Off Timer (60 s) turns the screen off after the last
-# touch or proximity wave; waking on those is set in Fully, not here.
-# This automation adds:
+# Since 16 Oct 2026 the Saga's screen stays on: Chrome shows the camera page
+# (SagaCam/) with the front-door dashboard inside it, and the camera needs
+# the page visible. So brightness does the job Fully's screen on/off did, and
+# keeps the charger ahead of the drain:
 #
-#   sensor.door_message non-empty   screen on, off-timer disabled, so the
-#                                   message stays up (bins, input_text)
-#   message cleared                 timer back to 60 s, screen off
-#   FrontPath person                screen on; the 60 s timer ends it
+#                                   by day   after sunset
+#   idle                              10          1
+#   sensor.door_message non-empty    150         60
+#   FrontPath person (for a minute)  150         60
+#
+# Re-applied at sunset and sunrise. Needs the HA app's "Modify system
+# settings" permission on the Saga, and auto brightness off
+# (command_auto_screen_brightness: turn_off, sent once on 16 Oct).
 #
 # sensor.door_message is a UI template helper, source in
 # door_message_template.jinja.
+#
+# Deployed with ha_set_automation, id front_door_screen (2026-10-16).
 id: front_door_screen
 alias: Front door screen
 description: >-
-  Keeps the Saga door display on while sensor.door_message has text,
-  wakes it for FrontPath visitors, and otherwise leaves it to Fully's
-  60 s screen-off timer.
-mode: queued
-max: 5
+  Saga door display brightness (the screen stays on, holding the camera page
+  and the front-door dashboard, so brightness replaces Fully's screen on/off
+  and keeps the charger ahead). Idle: 10 by day, 1 after sunset. A door
+  message or a FrontPath detection (for a minute): 150 by day, 60 after
+  sunset. Re-applied at sunset and sunrise. Uses the HA app's
+  command_screen_brightness_level (0-255).
+mode: restart
 triggers:
   - trigger: template
-    value_template: >-
-      {{ states('sensor.door_message') not in ['', 'unknown', 'unavailable'] }}
+    value_template: "{{ states('sensor.door_message') not in ['', 'unknown', 'unavailable'] }}"
     id: message
   - trigger: template
-    value_template: >-
-      {{ states('sensor.door_message') in ['', 'unknown', 'unavailable'] }}
+    value_template: "{{ states('sensor.door_message') in ['', 'unknown', 'unavailable'] }}"
     id: message
   - trigger: homeassistant
     event: start
     id: message
+  - trigger: sun
+    event: sunset
+    id: message
+  - trigger: sun
+    event: sunrise
+    id: message
   - trigger: state
-    entity_id:
-      - binary_sensor.frontpath_path_person_detected
-      - binary_sensor.frontpath_ble_processing_path_person_detected
+    entity_id: binary_sensor.frontpath_ble_processing_path_person_detected
     from: "off"
     to: "on"
     id: visitor
 variables:
-  has_message: >-
-    {{ states('sensor.door_message') not in ['', 'unknown', 'unavailable'] }}
+  dark: "{{ is_state('sun.sun', 'below_horizon') }}"
+  bright: "{{ 60 if dark else 150 }}"
+  idle: "{{ 1 if dark else 10 }}"
 actions:
-  - choose:
-      - conditions:
-          - condition: trigger
-            id: visitor
-        sequence:
-          - action: switch.turn_on
-            target:
-              entity_id: switch.saga_screen
-      - conditions:
-          - condition: template
-            value_template: "{{ has_message }}"
-        sequence:
-          - action: number.set_value
-            target:
-              entity_id: number.saga_screen_off_timer
-            data:
-              value: 0
-          - action: switch.turn_on
-            target:
-              entity_id: switch.saga_screen
-    default:
-      - action: number.set_value
-        target:
-          entity_id: number.saga_screen_off_timer
+  - if:
+      - condition: trigger
+        id: visitor
+    then:
+      - action: notify.mobile_app_saga
         data:
-          value: 60
-      - action: switch.turn_off
-        target:
-          entity_id: switch.saga_screen
+          message: command_screen_brightness_level
+          data:
+            command: "{{ bright }}"
+      - delay:
+          seconds: 60
+  - action: notify.mobile_app_saga
+    data:
+      message: command_screen_brightness_level
+      data:
+        command: >-
+          {{ bright if states('sensor.door_message') not in ['', 'unknown', 'unavailable'] else idle }}
