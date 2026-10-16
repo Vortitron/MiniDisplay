@@ -23,10 +23,18 @@
   stack, with no one at the tablet (Chrome must already have the camera
   permission for the site). &facing=environment or &facing=user picks a
   camera by direction; otherwise the one last chosen here is used.
-  Uploads are named <mode>-<width>x<height>.jpg, and Home Assistant keeps
-  each one (automation saga_web_keep) in /config/frontpath_snapshots.
-  Status lines also go to webhook <id>_log, which automation saga_web_log
-  writes to the logbook. A new hash (say &t=2) starts another remote run.
+  Live mode (&live=1, or the button): keeps the camera running, connects to
+  Home Assistant with the access token typed into the box on the page (kept
+  in this browser only, never in the file or the address), and on every
+  "Path Person Detected" takes a frame at once, a night stack a second later
+  and another frame after that, named detect<HHMMSS>-a/b/c-... It also takes
+  a test shot whenever input_button.saga_cam_test_shot is pressed, and says
+  "Live: alive ..." every 10 minutes (automation saga_web_watchdog reopens
+  the page if that stops). Use a token from a non-admin user.
+  Uploads are named <mode>-<width>x<height>.jpg. Status lines go to webhook
+  <id>_log: automation saga_web_log writes them to the logbook, marks
+  input_datetime.saga_cam_last_seen, and on "Sent <name>.jpg" saves the
+  photo to /config/frontpath_snapshots/web-<time>-<name>.
 -->
 <style>
   :root {
@@ -54,7 +62,11 @@
   pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; color: var(--muted); max-height: 260px; overflow: auto; }
   .slider { display: grid; grid-template-columns: 9em 1fr 5em; gap: 8px; align-items: center; margin: 4px 0; }
   .slider input { width: 100%; }
-  #status { font-size: 13px; color: var(--muted); }
+  #status, #haStatus { font-size: 13px; color: var(--muted); }
+  input[type=password] {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 14px; font: inherit; min-width: 0; flex: 1 1 16em;
+  }
   .ok { color: var(--good); } .err { color: var(--bad); }
 </style>
 </head>
@@ -65,6 +77,14 @@
   <select id="cams"><option value="">Cameras appear after Start</option></select>
   <button class="primary" id="start">Start camera</button>
   <span id="status">Not started.</span>
+</div>
+
+<div class="row">
+  <input id="token" type="password" autocomplete="off" placeholder="Home Assistant access token (Saga camera user)">
+  <button id="saveToken">Save token</button>
+  <button id="forgetToken">Forget token</button>
+  <button class="primary" id="live">Start live mode</button>
+  <span id="haStatus">HA: not connected</span>
 </div>
 
 <div class="row">
@@ -96,6 +116,8 @@
 <script>
 const $ = id => document.getElementById(id);
 let stream = null, track = null, lastBlob = null, lastName = "saga.jpg";
+// Tests ask for the sensor's best; live mode, running for days, asks for 5 MP.
+let wantW = 4096, wantH = 3072;
 
 function param(name) {
   const m = location.hash.match(new RegExp("[#&]" + name + "=([A-Za-z0-9_-]+)"));
@@ -175,7 +197,7 @@ async function start() {
     video: {
       deviceId: id ? { exact: id } : undefined,
       facingMode: facing ? { exact: facing } : undefined,
-      width: { ideal: 4096 }, height: { ideal: 3072 },
+      width: { ideal: wantW }, height: { ideal: wantH },
     },
   });
   // Another tab holding the camera can leave this waiting for ever.
@@ -424,6 +446,108 @@ async function autoRun() {
   status("Auto test done: two photos sent.", "ok");
 }
 
+// ---- Live mode -----------------------------------------------------------
+const DETECT = "binary_sensor.frontpath_ble_processing_path_person_detected";
+const WHY = "sensor.front_walkway_frontpath_ble_processing_path_trigger";
+const TEST = "input_button.saga_cam_test_shot";
+let ws = null, wsId = 1, liveOn = false, why = "", lastShot = 0, shooting = false;
+
+function haStatus(msg, cls) {
+  $("haStatus").textContent = "HA: " + msg;
+  $("haStatus").className = cls || "";
+}
+
+function connect() {
+  const tok = remembered("sagaToken");
+  if (!tok) { haStatus("no token saved", "err"); return; }
+  if (ws && ws.readyState <= 1) return;
+  haStatus("connecting...");
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/websocket");
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "auth_required") ws.send(JSON.stringify({ type: "auth", access_token: tok }));
+    else if (m.type === "auth_invalid") { haStatus("token refused", "err"); report("Live: Home Assistant refused the token"); ws.close(); }
+    else if (m.type === "auth_ok") {
+      haStatus("connected, watching", "ok");
+      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, WHY, TEST] }));
+      report("Live: connected to Home Assistant, watching for detections");
+    } else if (m.type === "event" && m.event) onEntities(m.event);
+  };
+  ws.onclose = () => {
+    haStatus("disconnected, retrying", "err");
+    if (liveOn) setTimeout(connect, 10000);
+  };
+}
+
+// subscribe_entities: "a" is the first full state, "c" the changes since.
+function onEntities(e) {
+  for (const [id, st] of Object.entries(e.a || {})) if (id === WHY) why = st.s;
+  for (const [id, ch] of Object.entries(e.c || {})) {
+    const s = ch["+"] && ch["+"].s;
+    if (s === undefined) continue;
+    if (id === WHY) why = s;
+    else if (id === DETECT && s === "on") burst("detect");
+    else if (id === TEST) burst("test");
+  }
+}
+
+function hhmmss() { return new Date().toTimeString().slice(0, 8).replace(/:/g, ""); }
+
+async function shoot(prefix, kind) {
+  if (!track || track.readyState !== "live") { await start(); if (!track) return; }
+  lastBlob = null;
+  if (kind === "stack") await photoStack(); else await photoFrame();
+  if (!lastBlob) return;
+  await sleep(300); await loaded();
+  lastName = prefix + "-" + lastName;
+  await send();
+}
+
+// A frame at once (someone may be gone in seconds), a night stack, then a
+// frame a few seconds on, when someone walking up is nearer the door.
+async function burst(kind) {
+  if (shooting || Date.now() - lastShot < 15000) return;
+  shooting = true; lastShot = Date.now();
+  const tag = kind + hhmmss();
+  try {
+    await shoot(tag + "-a", "frame");
+    report(`Live: ${kind} ${tag}, gates: ${why || "?"}`);
+    await sleep(500);
+    await shoot(tag + "-b", "stack");
+    await sleep(2000);
+    await shoot(tag + "-c", "frame");
+  } finally { shooting = false; }
+}
+
+async function live() {
+  if (liveOn) return;
+  liveOn = true;
+  wantW = 2592; wantH = 1944;
+  $("live").textContent = "Live mode on";
+  $("live").disabled = true;
+  await start();
+  connect();
+  setInterval(() => report("Live: alive, camera " + (track && track.readyState === "live" ? "on" : "off") +
+    ", HA " + (ws && ws.readyState === 1 ? "connected" : "not connected")), 10 * 60 * 1000);
+  setInterval(async () => {
+    if (!shooting && (!track || track.readyState !== "live")) { report("Live: camera lost, restarting it"); await start(); }
+  }, 60000);
+}
+
+$("saveToken").onclick = () => {
+  const v = $("token").value.trim();
+  if (!v) return haStatus("paste the token first", "err");
+  remembered("sagaToken", v);
+  $("token").value = "";
+  haStatus("token saved on this device");
+  if (liveOn) connect();
+};
+$("forgetToken").onclick = () => {
+  try { localStorage.removeItem("sagaToken"); } catch (e) {}
+  if (ws) ws.close();
+  haStatus("token forgotten");
+};
+$("live").onclick = live;
 $("start").onclick = start;
 $("cams").onchange = start;
 $("frame").onclick = photoFrame;
@@ -431,6 +555,7 @@ $("photo").onclick = photoFull;
 $("stack").onclick = photoStack;
 $("send").onclick = send;
 if (!hook()) status("Tip: open with #hook=<webhook id> so photos can be sent to HA.");
+else if (param("live") === "1") live();
 else if (param("auto") === "1") auto();
 // Chrome does not reload a page it already has open when only the part
 // after '#' changes, so a second remote run arrives as a hash change.
@@ -442,7 +567,7 @@ function release() {
   stream = null; track = null;
 }
 window.addEventListener("pagehide", release);
-document.addEventListener("visibilitychange", () => { if (document.hidden && !autoRunning) release(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden && !autoRunning && !liveOn) release(); });
 </script>
 </body>
 </html>

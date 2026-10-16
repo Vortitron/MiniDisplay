@@ -30,3 +30,15 @@ each time), and two minutes later `command_launch_app`
 `io.homeassistant.companion.android` returns the Saga to the HA app, its
 launcher. The Saga has no screen lock, so waking it lands straight on Chrome.
 Tested by day on 16 Oct: both photos saved, Saga back on HA.
+
+Live mode (16 Oct): the page stays open on the Saga with the camera running
+and, with an access token pasted into its box (a non-admin HA user's token,
+kept in the Saga's browser only), subscribes to Path Person Detected and
+input_button.saga_cam_test_shot. Each one gets three photos, detect<HHMMSS>-a
+(a frame at once), -b (night stack), -c (a frame ~3 s on).
+- `saga_web_watchdog`: every 5 min, if `input_datetime.saga_cam_last_seen` is
+  over 25 min old, wakes the Saga and reopens the page with `live=1`.
+- `frontpath_trigger_snapshot` (Fully still) now runs only while the page is
+  down, so Fully's motion detection never takes the camera from Chrome.
+- `saga_web_night_test` presses the test-shot button at 20:00 and 23:30 until
+  18 Oct.
