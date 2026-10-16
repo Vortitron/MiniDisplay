@@ -312,12 +312,22 @@ function canvasBlob(canvas) {
   return new Promise(res => canvas.toBlob(res, "image/jpeg", 0.92));
 }
 
+// A frame straight from the camera track. The <video> element can stop
+// updating while the camera runs on (16 Oct 20:03: two "frames" 6 s apart
+// were byte-identical), so it is only the fallback.
+async function grab() {
+  if (!("ImageCapture" in window) || !track || track.readyState !== "live") return null;
+  try { return await new ImageCapture(track).grabFrame(); } catch (e) { return null; }
+}
+
 async function photoFrame() {
   if (!track) return status("Start the camera first.", "err");
   const v = $("video");
+  const bmp = await grab();
   const c = document.createElement("canvas");
-  c.width = v.videoWidth; c.height = v.videoHeight;
-  c.getContext("2d").drawImage(v, 0, 0);
+  c.width = bmp ? bmp.width : v.videoWidth; c.height = bmp ? bmp.height : v.videoHeight;
+  c.getContext("2d").drawImage(bmp || v, 0, 0);
+  if (bmp) bmp.close();
   show(await canvasBlob(c), "frame video");
 }
 
@@ -341,16 +351,20 @@ async function photoFull() {
 async function photoStack() {
   if (!track) return status("Start the camera first.", "err");
   const v = $("video");
+  const st = track.getSettings();
+  const fw = st.width || v.videoWidth, fh = st.height || v.videoHeight;
   // At most 1920 wide: eight full-sensor frames would not fit a tablet's memory.
-  const k = Math.min(1, 1920 / v.videoWidth);
-  const w = Math.round(v.videoWidth * k), h = Math.round(v.videoHeight * k), N = 8;
+  const k = Math.min(1, 1920 / fw);
+  const w = Math.round(fw * k), h = Math.round(fh * k), N = 8;
   const c = document.createElement("canvas");
   c.width = w; c.height = h;
   const ctx = c.getContext("2d", { willReadFrequently: true });
   const sum = new Float32Array(w * h * 3);
   for (let n = 0; n < N; n++) {
     status(`Stacking frame ${n + 1} of ${N}...`);
-    ctx.drawImage(v, 0, 0, w, h);
+    const bmp = await grab();
+    ctx.drawImage(bmp || v, 0, 0, w, h);
+    if (bmp) bmp.close();
     const d = ctx.getImageData(0, 0, w, h).data;
     for (let i = 0, j = 0; i < d.length; i += 4, j += 3) {
       sum[j] += d[i]; sum[j + 1] += d[i + 1]; sum[j + 2] += d[i + 2];
@@ -450,6 +464,7 @@ async function autoRun() {
 const DETECT = "binary_sensor.frontpath_ble_processing_path_person_detected";
 const WHY = "sensor.front_walkway_frontpath_ble_processing_path_trigger";
 const TEST = "input_button.saga_cam_test_shot";
+const RELOAD = "input_button.saga_cam_reload";
 let ws = null, wsId = 1, liveOn = false, why = "", lastShot = 0, shooting = false;
 
 function haStatus(msg, cls) {
@@ -469,7 +484,7 @@ function connect() {
     else if (m.type === "auth_invalid") { haStatus("token refused", "err"); report("Live: Home Assistant refused the token"); ws.close(); }
     else if (m.type === "auth_ok") {
       haStatus("connected, watching", "ok");
-      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, WHY, TEST] }));
+      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, WHY, TEST, RELOAD] }));
       report("Live: connected to Home Assistant, watching for detections");
     } else if (m.type === "event" && m.event) onEntities(m.event);
   };
@@ -488,12 +503,20 @@ function onEntities(e) {
     if (id === WHY) why = s;
     else if (id === DETECT && s === "on") burst("detect");
     else if (id === TEST) burst("test");
+    // Pressed after the page is updated: reload in this tab, so no second
+    // tab ends up fighting this one for the camera.
+    else if (id === RELOAD) {
+      report("Live: reloading the page");
+      release();
+      location.replace(location.pathname + "?v=" + Date.now() + location.hash);
+    }
   }
 }
 
 function hhmmss() { return new Date().toTimeString().slice(0, 8).replace(/:/g, ""); }
 
 async function shoot(prefix, kind) {
+  if (document.hidden) return;   // a background tab: the visible one shoots
   if (!track || track.readyState !== "live") { await start(); if (!track) return; }
   lastBlob = null;
   if (kind === "stack") await photoStack(); else await photoFrame();
@@ -506,7 +529,7 @@ async function shoot(prefix, kind) {
 // A frame at once (someone may be gone in seconds), a night stack, then a
 // frame a few seconds on, when someone walking up is nearer the door.
 async function burst(kind) {
-  if (shooting || Date.now() - lastShot < 15000) return;
+  if (document.hidden || shooting || Date.now() - lastShot < 15000) return;
   shooting = true; lastShot = Date.now();
   const tag = kind + hhmmss();
   try {
@@ -529,8 +552,25 @@ async function live() {
   connect();
   setInterval(() => report("Live: alive, camera " + (track && track.readyState === "live" ? "on" : "off") +
     ", HA " + (ws && ws.readyState === 1 ? "connected" : "not connected")), 10 * 60 * 1000);
+  // Restart the camera if it is gone, or if its picture has stopped
+  // changing: sensor noise makes every real frame differ a little.
+  let lastSig = "", same = 0;
   setInterval(async () => {
-    if (!shooting && (!track || track.readyState !== "live")) { report("Live: camera lost, restarting it"); await start(); }
+    if (shooting || document.hidden) return;
+    if (!track || track.readyState !== "live") { report("Live: camera lost, restarting it"); await start(); return; }
+    const bmp = await grab();
+    if (!bmp) return;
+    // A 64x48 patch at full resolution: shrinking the whole frame would
+    // average the noise away and make a still night look frozen.
+    const c = document.createElement("canvas");
+    c.width = 64; c.height = 48;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(bmp, (bmp.width - 64) >> 1, (bmp.height - 48) >> 1, 64, 48, 0, 0, 64, 48);
+    bmp.close();
+    const sig = Array.from(ctx.getImageData(0, 0, 64, 48).data).join(",");
+    same = sig === lastSig ? same + 1 : 0;
+    lastSig = sig;
+    if (same >= 2) { same = 0; report("Live: picture frozen, restarting the camera"); await start(); }
   }, 60000);
 }
 
@@ -567,7 +607,12 @@ function release() {
   stream = null; track = null;
 }
 window.addEventListener("pagehide", release);
-document.addEventListener("visibilitychange", () => { if (document.hidden && !autoRunning && !liveOn) release(); });
+// Live mode too: a hidden tab cannot take photos, and holding the camera
+// would lock out the tab that can. It takes the camera back when shown.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && !autoRunning) release();
+  else if (!document.hidden && liveOn && !track) start();
+});
 </script>
 </body>
 </html>
