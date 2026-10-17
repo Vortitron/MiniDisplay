@@ -184,34 +184,49 @@ async function load() {
   events.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
   if (!events.length) { status("No photos yet."); return; }
 
-  // Why each detection fired: the Path Trigger at that moment.
-  status("Looking up why each one fired...");
-  const t0 = Math.min(...events.map(e => when(e.date, e.time))) - 60;
+  // Show the cards straight away; notes follow. A note never changes once
+  // known, so they are kept in this browser and only new events are looked up.
+  let notes = {};
+  try { notes = JSON.parse(localStorage.getItem("galleryNotes") || "{}"); } catch (e) {}
+  for (const e of events) if (notes[e.key]) { e.why = notes[e.key].why; e.kind = notes[e.key].kind; }
+  render();
+  const todo = events.filter(e => !notes[e.key] && (e.kind === "detect" || e.kind === "test"));
+  const count = () => `${events.length} events, ${events.reduce((n, e) => n + e.photos.length, 0)} photos.`;
+  if (!todo.length) { status(count()); return; }
+  status(count() + " Looking up why " + todo.length + " fired...");
+  const t0 = Math.min(...todo.map(e => when(e.date, e.time))) - 60;
+  const span = { start_time: new Date(t0 * 1000).toISOString(), end_time: new Date().toISOString() };
+  let trig = [], bursts = [], gotTrig = false, gotBursts = false;
   try {
-    const h = await call({ type: "history/history_during_period", start_time: new Date(t0 * 1000).toISOString(),
-      end_time: new Date().toISOString(), entity_ids: [WHY], minimal_response: true, no_attributes: true,
-      significant_changes_only: false });
-    const trig = (h[WHY] || []).map(x => ({ t: x.lu || x.lc, s: x.s }));
-    for (const e of events) {
-      if (e.kind !== "detect") continue;
-      const t = when(e.date, e.time);
+    // Why each detection fired: the Path Trigger at that moment.
+    const h = await call({ type: "history/history_during_period", ...span, entity_ids: [WHY],
+      minimal_response: true, no_attributes: true, significant_changes_only: false });
+    trig = (h[WHY] || []).map(x => ({ t: x.lu || x.lc, s: x.s }));
+    gotTrig = true;
+  } catch (e) {}
+  try {
+    // Test shots that frontpath_burst_photo took (its logbook line is
+    // attached to the test-shot button, so only that entity is asked for).
+    const lb = await call({ type: "logbook/get_events", ...span, entity_ids: ["input_button.saga_cam_test_shot"] });
+    bursts = lb.filter(x => x.name === "FrontPath burst photo").map(x => x.when);
+    gotBursts = true;
+  } catch (e) {}
+  const recent = Date.now() / 1000 - 120;   // the newest may not be logged yet
+  for (const e of todo) {
+    const t = when(e.date, e.time);
+    if (e.kind === "detect" && gotTrig) {
       let best = null;
       for (const x of trig) if (Math.abs(x.t - t) <= 6 && (!best || Math.abs(x.t - t) < Math.abs(best.t - t))) best = x;
       if (best) e.why = "gates " + best.s;
-    }
-  } catch (e) { /* notes are a bonus */ }
-  // Test shots the burst automation took.
-  try {
-    const lb = await call({ type: "logbook/get_events", start_time: new Date(t0 * 1000).toISOString(), end_time: new Date().toISOString() });
-    const bursts = lb.filter(x => x.name === "FrontPath burst photo").map(x => x.when);
-    for (const e of events) {
-      if (e.kind !== "test") continue;
-      const t = when(e.date, e.time);
+      if (t < recent) notes[e.key] = { why: e.why, kind: e.kind };
+    } else if (e.kind === "test" && gotBursts) {
       if (bursts.some(b => Math.abs(b - t) <= 15)) { e.kind = "burst"; e.why = "every gate lit at once"; }
+      if (t < recent) notes[e.key] = { why: e.why, kind: e.kind };
     }
-  } catch (e) {}
+  }
+  try { localStorage.setItem("galleryNotes", JSON.stringify(notes)); } catch (e) {}
   render();
-  status(`${events.length} events, ${events.reduce((n, e) => n + e.photos.length, 0)} photos.`);
+  status(count());
 }
 
 const KIND = { detect: "Detection", test: "Test shot", burst: "Radar burst", fully: "Fully still" };

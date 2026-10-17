@@ -38,5 +38,7 @@ actions:
       message: >-
         Radar burst at {{ now().strftime('%H:%M:%S') }}: test shot taken. Gates:
         {{ states('sensor.front_walkway_frontpath_ble_processing_gate_energies') }}
+      # Logged against the button, so the gallery finds these cheaply.
+      entity_id: input_button.saga_cam_test_shot
   - delay:
       minutes: 10
