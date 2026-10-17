@@ -1,0 +1,90 @@
+# Living-room flood mimics the sunset (17 Oct 2026).
+#
+# From an hour before sunset, light.led_flood_light fades up from 3% to
+# max_pct, reaching it at sunset, in the colour the FrontPath VEML6040 sees
+# outside. Every 30 s until 20 min after sunset; the light is left on.
+#
+# Colour: the sensor's raw R, G, B counts are white-balanced against midday
+# daylight (R/G 1.04, B/G 0.38 at noon on 16 and 17 Oct), so daylight is
+# white, and then the difference from grey is multiplied by `boost`: the raw
+# shift is real but small (17 Oct, half an hour before sunset: R 1.02, G 1,
+# B 0.77 after balancing, a pale warm white). The box faces away from the
+# sunset, so on a clear evening it sees the sky going blue rather than the
+# orange glow (16 Oct: B/G rose from 0.37 to 0.49 through sunset), and on a
+# hazy one it goes warm (17 Oct: 0.39 to 0.29). The flood follows either.
+#
+# Below 15 lx the colour is frozen: the counts get noisy and FrontPath's own
+# path lights come on (at 15 lx) and tint what it sees.
+#
+# Only starts if the flood is off and someone is home. Stops (leaving the
+# light alone) as soon as the flood is turned off or its brightness is not
+# what this run set: a BILRESA button, "Flood off on phone charge",
+# SuperExpensive load shedding, or a hand on the app.
+#
+# Deployed with ha_set_automation, id sunset_flood.
+id: sunset_flood
+alias: Sunset flood
+description: >-
+  From an hour before sunset, fades the living-room LED flood up (3% to 70% at
+  sunset) in the colour the FrontPath colour sensor sees outside,
+  white-balanced to midday and with the colour shift doubled. Updates every
+  30 s until 20 min after sunset and leaves the light on. Starts only if the
+  flood is off and someone is home; stops if anyone changes or turns off the
+  flood. Colour frozen below 15 lx (path lights).
+mode: single
+triggers:
+  - trigger: sun
+    event: sunset
+    offset: "-01:00:00"
+conditions:
+  - condition: state
+    entity_id: light.led_flood_light
+    state: "off"
+  - condition: template
+    value_template: "{{ states('zone.home') | int(0) > 0 }}"
+variables:
+  set_ts: "{{ as_timestamp(state_attr('sun.sun', 'next_setting')) }}"
+  max_pct: 70
+  boost: 2
+actions:
+  - repeat:
+      sequence:
+        - variables:
+            pct: >-
+              {% set frac = 1 - (set_ts - as_timestamp(now())) / 3600 %}
+              {{ (3 + (max_pct - 3) * ([0, [frac, 1] | min] | max)) | round(0) | int }}
+            lux: "{{ states('sensor.front_walkway_frontpath_ble_processing_illuminance') | float(0) }}"
+            rgb: >-
+              {% set r = states('sensor.front_walkway_frontpath_ble_processing_light_red') | float(0) / 1.04 %}
+              {% set g = states('sensor.front_walkway_frontpath_ble_processing_light_green') | float(0) %}
+              {% set b = states('sensor.front_walkway_frontpath_ble_processing_light_blue') | float(0) / 0.38 %}
+              {% set m = (r + g + b) / 3 %}
+              {% if m <= 0 %}[255, 255, 255]{% else %}
+              {% set c = [[0, m + boost * (r - m)] | max, [0, m + boost * (g - m)] | max, [0, m + boost * (b - m)] | max] %}
+              {% set top = c | max %}
+              {{ [(255 * c[0] / top) | round(0) | int, (255 * c[1] / top) | round(0) | int, (255 * c[2] / top) | round(0) | int] }}
+              {% endif %}
+        - if:
+            - condition: template
+              value_template: "{{ lux >= 15 }}"
+          then:
+            - action: light.turn_on
+              target:
+                entity_id: light.led_flood_light
+              data:
+                rgb_color: "{{ rgb }}"
+                brightness_pct: "{{ pct }}"
+          else:
+            - action: light.turn_on
+              target:
+                entity_id: light.led_flood_light
+              data:
+                brightness_pct: "{{ pct }}"
+        - delay:
+            seconds: 30
+      until:
+        - condition: template
+          value_template: >-
+            {{ as_timestamp(now()) > set_ts + 1200
+               or not is_state('light.led_flood_light', 'on')
+               or ((state_attr('light.led_flood_light', 'brightness') | int(0)) - pct * 2.55) | abs > 8 }}
