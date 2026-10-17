@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Front Path Photos</title>
+<!--
+  Gallery of the FrontPath photos (17 Oct 2026). Served by Home Assistant from
+  /config/www/saga-cam/gallery.html at /local/saga-cam/gallery.html.
+
+  The photos live in /config/frontpath_snapshots, which configuration.yaml
+  adds as the media folder "frontpath". This page lists them through Home
+  Assistant's websocket API (media_source/browse_media, resolve_media) with
+  the login of the browser it is opened in: the HA frontend's saved tokens
+  (localStorage "hassTokens", same origin), or the Saga camera page's token.
+  Nothing secret is stored in this file.
+
+  Each detection is one card (its photos a = frame at once, b = night stack,
+  c = a frame a few seconds on). The note says why it fired: the FrontPath
+  Path Trigger gates at that moment (history), or "radar burst" for a test
+  shot that frontpath_burst_photo took (logbook).
+-->
+<style>
+  :root {
+    --bg: #101214; --panel: #1a1d21; --line: #2c3036; --text: #e8eaed;
+    --muted: #9aa0a6; --accent: #8ab4f8; --warn: #fdd663; --bad: #f28b82;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, sans-serif; }
+  header { padding: 14px 16px 6px; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; }
+  h1 { font-size: 19px; margin: 0; }
+  #status { color: var(--muted); font-size: 13px; }
+  .filters { display: flex; gap: 6px; flex-wrap: wrap; }
+  .filters button, .lb button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer;
+  }
+  .filters button.on { border-color: var(--accent); color: var(--accent); }
+  section { padding: 4px 16px 16px; }
+  section h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 14px 0 8px;
+               text-transform: uppercase; letter-spacing: .04em; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; }
+  .card .thumb { aspect-ratio: 4 / 3; background: #000; display: block; width: 100%; object-fit: cover; }
+  .card .meta { padding: 6px 9px 8px; font-size: 13px; }
+  .card .time { font-weight: 600; }
+  .card .kind { color: var(--muted); }
+  .card .kind.burst { color: var(--warn); }
+  .card .why { color: var(--muted); font-size: 12px; }
+  .lb { position: fixed; inset: 0; background: rgba(0,0,0,.94); display: none; flex-direction: column; z-index: 5; }
+  .lb.open { display: flex; }
+  .lb .bar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; flex-wrap: wrap; }
+  .lb .cap { flex: 1 1 auto; min-width: 0; font-size: 14px; }
+  .lb .cap small { color: var(--muted); display: block; }
+  .lb .stage { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; }
+  .lb .stage img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .lb .side { position: absolute; top: 0; bottom: 0; width: 18%; border: 0; background: transparent; cursor: pointer; }
+  .lb .side.l { left: 0; } .lb .side.r { right: 0; }
+  .lb .strip { display: flex; gap: 6px; padding: 6px 12px 12px; justify-content: center; }
+  .lb .strip img { height: 56px; border: 2px solid transparent; border-radius: 4px; cursor: pointer; opacity: .7; }
+  .lb .strip img.cur { border-color: var(--accent); opacity: 1; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Front path photos</h1>
+  <div class="filters">
+    <button data-f="all" class="on">All</button>
+    <button data-f="detect">Detections</button>
+    <button data-f="burst">Radar bursts</button>
+    <button data-f="test">Tests</button>
+  </div>
+  <span id="status">Connecting to Home Assistant...</span>
+</header>
+<main id="days"></main>
+
+<div class="lb" id="lb">
+  <div class="bar">
+    <button id="prev" title="Previous (left arrow)">&#8592; Prev</button>
+    <button id="next" title="Next (right arrow)">Next &#8594;</button>
+    <div class="cap" id="cap"></div>
+    <a id="open" target="_blank" rel="noopener"><button>Full size</button></a>
+    <button id="close" title="Close (Esc)">&#10005;</button>
+  </div>
+  <div class="stage">
+    <img id="big" alt="">
+    <button class="side l" id="sideL" aria-label="Previous"></button>
+    <button class="side r" id="sideR" aria-label="Next"></button>
+  </div>
+  <div class="strip" id="strip"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const FOLDER = "media-source://media_source/frontpath/.";
+const WHY = "sensor.front_walkway_frontpath_ble_processing_path_trigger";
+let ws, nextId = 1;
+const pending = new Map();
+let events = [];      // newest first: {key, date, time, kind, why, photos: [{file, id, part, label, url}]}
+let flat = [];        // every photo in display order, for Prev / Next
+let cur = -1, filter = "all";
+
+function status(msg, cls) { $("status").textContent = msg; $("status").className = cls || ""; }
+
+// The login this browser already has: the HA frontend's tokens (refreshed if
+// stale), else the token pasted into the Saga camera page.
+async function token() {
+  try {
+    const t = JSON.parse(localStorage.getItem("hassTokens") || "null");
+    if (t && t.access_token) {
+      if (Date.now() < (t.expires || 0) - 30000) return t.access_token;
+      const body = new URLSearchParams({ grant_type: "refresh_token", client_id: t.clientId, refresh_token: t.refresh_token });
+      const r = await fetch("/auth/token", { method: "POST", body });
+      if (r.ok) {
+        const j = await r.json();
+        t.access_token = j.access_token; t.expires = Date.now() + j.expires_in * 1000;
+        localStorage.setItem("hassTokens", JSON.stringify(t));
+        return t.access_token;
+      }
+    }
+  } catch (e) {}
+  try { return localStorage.getItem("sagaToken"); } catch (e) { return null; }
+}
+
+function connect() {
+  return new Promise(async (ok, fail) => {
+    const tok = await token();
+    if (!tok) return fail(new Error("Not logged in: open Home Assistant in this browser first, then come back."));
+    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/websocket");
+    ws.onmessage = ev => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "auth_required") ws.send(JSON.stringify({ type: "auth", access_token: tok }));
+      else if (m.type === "auth_ok") ok();
+      else if (m.type === "auth_invalid") fail(new Error("Home Assistant refused the login: log in again."));
+      else if (m.type === "result" && pending.has(m.id)) {
+        const p = pending.get(m.id); pending.delete(m.id);
+        m.success ? p.ok(m.result) : p.fail(new Error((m.error && m.error.message) || "error"));
+      }
+    };
+    ws.onerror = () => fail(new Error("Could not reach Home Assistant."));
+  });
+}
+
+function call(msg) {
+  return new Promise((ok, fail) => {
+    const id = nextId++;
+    pending.set(id, { ok, fail });
+    ws.send(JSON.stringify({ id, ...msg }));
+  });
+}
+
+// web-20261016-213631-detect213622-a-frame-2592x1944.jpg
+// 20261016-105200.jpg (Fully)
+function parse(file) {
+  let m = file.match(/^web-(\d{8})-(\d{6})-(detect|test)(\d{6})-([abc])-([a-z]+)-(\d+x\d+)/);
+  if (m) return { date: m[1], saved: m[2], kind: m[3], time: m[4], part: m[5], how: m[6], size: m[7] };
+  m = file.match(/^web-(\d{8})-(\d{6})-([a-z]+)-(\d+x\d+)/);
+  if (m) return { date: m[1], saved: m[2], kind: "test", time: m[2], part: "", how: m[3], size: m[4] };
+  m = file.match(/^(\d{8})-(\d{6})\.jpg$/);
+  if (m) return { date: m[1], saved: m[2], kind: "fully", time: m[2], part: "", how: "Fully still", size: "352x288" };
+  return null;
+}
+
+const hms = s => s.slice(0, 2) + ":" + s.slice(2, 4) + ":" + s.slice(4, 6);
+const ymd = s => s.slice(0, 4) + "-" + s.slice(4, 6) + "-" + s.slice(6, 8);
+const when = (d, t) => new Date(`${ymd(d)}T${hms(t)}`).getTime() / 1000;
+const HOW = { frame: "frame", stack: "night stack", full: "full sensor", "Fully still": "Fully still" };
+
+async function load() {
+  status("Listing photos...");
+  const res = await call({ type: "media_source/browse_media", media_content_id: FOLDER });
+  const files = (res.children || []).filter(c => /\.jpe?g$/i.test(c.title));
+  const byKey = new Map();
+  for (const c of files) {
+    const p = parse(c.title);
+    if (!p) continue;
+    const key = p.kind === "fully" ? "fully" + p.date + p.time : p.kind + p.date + p.time;
+    if (!byKey.has(key)) byKey.set(key, { key, date: p.date, time: p.time, kind: p.kind, why: "", photos: [] });
+    byKey.get(key).photos.push({ file: c.title, id: c.media_content_id, part: p.part, how: HOW[p.how] || p.how, size: p.size });
+  }
+  events = [...byKey.values()];
+  events.forEach(e => e.photos.sort((a, b) => a.part.localeCompare(b.part) || a.file.localeCompare(b.file)));
+  events.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+  if (!events.length) { status("No photos yet."); return; }
+
+  // Why each detection fired: the Path Trigger at that moment.
+  status("Looking up why each one fired...");
+  const t0 = Math.min(...events.map(e => when(e.date, e.time))) - 60;
+  try {
+    const h = await call({ type: "history/history_during_period", start_time: new Date(t0 * 1000).toISOString(),
+      end_time: new Date().toISOString(), entity_ids: [WHY], minimal_response: true, no_attributes: true,
+      significant_changes_only: false });
+    const trig = (h[WHY] || []).map(x => ({ t: x.lu || x.lc, s: x.s }));
+    for (const e of events) {
+      if (e.kind !== "detect") continue;
+      const t = when(e.date, e.time);
+      let best = null;
+      for (const x of trig) if (Math.abs(x.t - t) <= 6 && (!best || Math.abs(x.t - t) < Math.abs(best.t - t))) best = x;
+      if (best) e.why = "gates " + best.s;
+    }
+  } catch (e) { /* notes are a bonus */ }
+  // Test shots the burst automation took.
+  try {
+    const lb = await call({ type: "logbook/get_events", start_time: new Date(t0 * 1000).toISOString(), end_time: new Date().toISOString() });
+    const bursts = lb.filter(x => x.name === "FrontPath burst photo").map(x => x.when);
+    for (const e of events) {
+      if (e.kind !== "test") continue;
+      const t = when(e.date, e.time);
+      if (bursts.some(b => Math.abs(b - t) <= 15)) { e.kind = "burst"; e.why = "every gate lit at once"; }
+    }
+  } catch (e) {}
+  render();
+  status(`${events.length} events, ${events.reduce((n, e) => n + e.photos.length, 0)} photos.`);
+}
+
+const KIND = { detect: "Detection", test: "Test shot", burst: "Radar burst", fully: "Fully still" };
+
+function render() {
+  const days = $("days");
+  days.innerHTML = "";
+  flat = [];
+  const shown = events.filter(e => filter === "all" || e.kind === filter || (filter === "test" && e.kind === "fully"));
+  let day = "", grid = null;
+  for (const e of shown) {
+    if (e.date !== day) {
+      day = e.date;
+      const s = document.createElement("section");
+      const d = new Date(ymd(day) + "T12:00:00");
+      s.innerHTML = `<h2>${d.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}</h2>`;
+      grid = document.createElement("div"); grid.className = "grid";
+      s.appendChild(grid); days.appendChild(s);
+    }
+    const first = flat.length;
+    e.photos.forEach(p => flat.push({ e, p }));
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<img class="thumb" loading="lazy" alt="">
+      <div class="meta"><span class="time">${hms(e.time)}</span>
+      <span class="kind ${e.kind}"> · ${KIND[e.kind]}</span>
+      <div class="why">${e.why || "&nbsp;"}</div></div>`;
+    card.onclick = () => open(first);
+    grid.appendChild(card);
+    lazyUrl(card.querySelector("img"), e.photos[0]);
+  }
+  if (!shown.length) days.innerHTML = '<section><p>No photos for this filter.</p></section>';
+}
+
+// Signed image addresses, fetched only when a thumbnail scrolls into view.
+const io = new IntersectionObserver(entries => {
+  for (const en of entries) if (en.isIntersecting) { io.unobserve(en.target); en.target._load(); }
+}, { rootMargin: "400px" });
+function lazyUrl(img, p) { img._load = async () => { img.src = await url(p); }; io.observe(img); }
+async function url(p) {
+  if (!p.url) {
+    const r = await call({ type: "media_source/resolve_media", media_content_id: p.id, expires: 6 * 3600 });
+    p.url = r.url;
+  }
+  return p.url;
+}
+
+async function open(i) {
+  if (i < 0 || i >= flat.length) return;
+  cur = i;
+  const { e, p } = flat[i];
+  $("lb").classList.add("open");
+  $("cap").innerHTML = `${ymd(e.date)} ${hms(e.time)} · ${KIND[e.kind]}${e.why ? " · " + e.why : ""}
+    <small>${p.part ? "(" + p.part + ") " : ""}${p.how}, ${p.size} · ${i + 1} of ${flat.length}</small>`;
+  const u = await url(p);
+  if (cur !== i) return;
+  $("big").src = u;
+  $("open").href = u;
+  const strip = $("strip");
+  strip.innerHTML = "";
+  for (const q of e.photos) {
+    const im = document.createElement("img");
+    im.className = q === p ? "cur" : "";
+    url(q).then(v => { im.src = v; });
+    im.onclick = () => open(flat.findIndex(f => f.p === q));
+    strip.appendChild(im);
+  }
+  // Warm the next photo so Next is instant.
+  if (flat[i + 1]) url(flat[i + 1].p).then(v => { new Image().src = v; });
+}
+function close() { $("lb").classList.remove("open"); cur = -1; }
+$("prev").onclick = $("sideL").onclick = () => open(cur - 1);
+$("next").onclick = $("sideR").onclick = () => open(cur + 1);
+$("close").onclick = close;
+document.addEventListener("keydown", ev => {
+  if (cur < 0) return;
+  if (ev.key === "ArrowLeft") open(cur - 1);
+  else if (ev.key === "ArrowRight") open(cur + 1);
+  else if (ev.key === "Escape") close();
+});
+let x0 = null;
+$("lb").addEventListener("touchstart", ev => { x0 = ev.touches[0].clientX; }, { passive: true });
+$("lb").addEventListener("touchend", ev => {
+  if (x0 === null) return;
+  const dx = ev.changedTouches[0].clientX - x0; x0 = null;
+  if (Math.abs(dx) > 50) open(cur + (dx < 0 ? 1 : -1));
+});
+document.querySelectorAll(".filters button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".filters button").forEach(x => x.classList.toggle("on", x === b));
+  filter = b.dataset.f; render();
+});
+
+connect().then(load).catch(e => status(e.message, "err"));
+</script>
+</body>
+</html>

@@ -52,3 +52,15 @@ is green when the camera is on and HA connected; tap it for the camera tools.
 Photos go up full size first and are only squeezed after a 413, so a higher
 upload limit on the Vome hosted route takes effect by itself (still about
 1 MB when tested on 16 Oct at 20:16, despite the announced 8 MB).
+
+Gallery (17 Oct): `gallery.html`, served at `/local/saga-cam/gallery.html`.
+Photos by date, newest first; one card per detection or test (photos a/b/c);
+tap for a large view with Prev / Next (buttons, arrow keys, swipe). Notes say
+why each fired: the FrontPath Path Trigger gates at that moment (history),
+or "radar burst" for test shots taken by `frontpath_burst_photo` (logbook).
+It lists the photos through HA's media source, so configuration.yaml adds
+`/config/frontpath_snapshots` as the media folder `frontpath` (keeping
+`local: /media`), and it signs in with the browser's own HA login
+(`hassTokens`) or the Saga camera token. The front-door dashboard shows
+`camera.saga_web` (latest photo: tap to enlarge, hold for a fresh one) and a
+"Photo gallery" button.
