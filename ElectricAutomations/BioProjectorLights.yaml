@@ -1,49 +1,159 @@
-# Bio lights down for the projector (17 Oct 2026).
+# Bio lights and heat follow the projector (17 Oct 2026).
 #
-# sensor.bio_power_power (Tuya Local plug feeding the bio AV) reads 60-100 W
-# with everything idle (probably the amp on standby; to be checked with the
-# old Sam plug), 350-365 W with the projector playing, and ~250-295 W when it
-# has sat paused a while and dims its lamp. Over 200 W for 30 s = projector
-# on (paused or not, and the lamp dimming never re-fires it): before 20:00 the bio lights that are on go to 10% (what was
-# chosen by hand for the 17 Oct evening film), from 20:00 they all go off.
-# Nothing is put back when the projector goes off.
+# sensor.bio_power_power (Tuya Local plug feeding the bio AV, amp included;
+# the amp alone is sensor.energy_monitoring_smartplug_power, ~71 W on):
+#   standby, everything idle         60-100 W
+#   playing                          325-365 W
+#   paused a while, lamp dimmed      ~215 W (17 Oct 17:07-17:13), through
+#                                    ~280 W on the way down
+# input_select.bio_projector (off / playing / paused) remembers which, so
+# the lamp warming up through the paused band at start-up is not a pause.
+#
+#   off -> playing (over 300 W for 5 s): a film starts. Bio lights that are
+#     on go to 10% before 20:00 (what was chosen by hand for the 17 Oct
+#     evening film), all off from 20:00. Sam's desired temperature goes up
+#     to 20 C if lower and not on holiday, as the BILRESA bio button does
+#     (replaces "Sam TV Comfort", which watched the LG TV no longer used).
+#   playing -> paused (200-290 W for 20 s): the bio lights are saved
+#     (scene.bio_before_pause) and the gold lights fade up to 40% red.
+#   paused -> playing: the saved lights come straight back.
+#   -> off (under 150 W for 60 s): just the state; lights left as they are.
 #
 # The sunset lights (SunsetFlood.yaml) leave the bio flood out while the
 # projector is on, and a sunset run already going stops by itself when its
 # light is dimmed or turned off.
 #
-# Deployed with ha_set_automation, id bio_projector_lights.
+# Deployed with ha_set_automation, id bio_projector_lights;
+# input_select.bio_projector made with ha_set_helper.
 id: bio_projector_lights
 alias: Bio projector lights
 description: >-
-  When the bio projector comes on (sensor.bio_power_power over 200 W for
-  30 s; playing is 350-365 W, paused with the lamp dimmed 250-295 W, standby
-  60-100 W): before 20:00 the bio lights that are on go to 10%, from 20:00
-  all bio lights go off.
-mode: single
+  Follows sensor.bio_power_power through input_select.bio_projector. Film
+  starts (over 300 W from off): bio lights that are on go to 10% before
+  20:00, off from 20:00, and Sam's desired temperature up to 20 C. Paused
+  with the lamp dimmed (200-290 W for 20 s): lights saved, gold lights fade
+  up to 40% red. Playing again: saved lights restored. Under 150 W for 60 s:
+  off.
+mode: queued
+max: 5
 triggers:
   - trigger: numeric_state
     entity_id: sensor.bio_power_power
-    above: 200
+    above: 300
     for:
-      seconds: 30
+      seconds: 5
+    id: playing
+  - trigger: numeric_state
+    entity_id: sensor.bio_power_power
+    above: 200
+    below: 290
+    for:
+      seconds: 20
+    id: paused
+  - trigger: numeric_state
+    entity_id: sensor.bio_power_power
+    below: 150
+    for:
+      seconds: 60
+    id: "off"
 variables:
-  bio_on: >-
-    {{ area_entities('bio') | select('match', 'light\.') | select('is_state', 'on') | list }}
-conditions:
-  - condition: template
-    value_template: "{{ bio_on | count > 0 }}"
+  state_now: "{{ states('input_select.bio_projector') }}"
+  bio_lights: >-
+    {{ area_entities('bio') | select('match', 'light\.')
+       | reject('eq', 'light.gold_light') | list }}
+  gold: light.gold_light
+  home_temp_c: 20
 actions:
-  - if:
-      - condition: time
-        before: "20:00:00"
-    then:
-      - action: light.turn_on
-        target:
-          entity_id: "{{ bio_on }}"
-        data:
-          brightness_pct: 10
-    else:
-      - action: light.turn_off
-        target:
-          entity_id: "{{ bio_on }}"
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: playing
+          - condition: template
+            value_template: "{{ state_now == 'paused' }}"
+        sequence:
+          - action: scene.turn_on
+            target:
+              entity_id: scene.bio_before_pause
+            continue_on_error: true
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.bio_projector
+            data:
+              option: playing
+      - conditions:
+          - condition: trigger
+            id: playing
+          - condition: template
+            value_template: "{{ state_now == 'off' }}"
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.bio_projector
+            data:
+              option: playing
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ is_state('input_boolean.holiday_mode', 'off')
+                     and states('input_number.sam_desired_temperature') | float(99) < home_temp_c }}
+            then:
+              - action: input_number.set_value
+                continue_on_error: true
+                target:
+                  entity_id: input_number.sam_desired_temperature
+                data:
+                  value: "{{ home_temp_c }}"
+          - variables:
+              lit: "{{ bio_lights | select('is_state', 'on') | list }}"
+          - if:
+              - condition: template
+                value_template: "{{ lit | count > 0 }}"
+            then:
+              - if:
+                  - condition: time
+                    before: "20:00:00"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ lit }}"
+                    data:
+                      brightness_pct: 10
+                else:
+                  - action: light.turn_off
+                    target:
+                      entity_id: "{{ lit }}"
+      - conditions:
+          - condition: trigger
+            id: paused
+          - condition: template
+            value_template: "{{ state_now == 'playing' }}"
+        sequence:
+          - action: scene.create
+            data:
+              scene_id: bio_before_pause
+              snapshot_entities: "{{ bio_lights }}"
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.bio_projector
+            data:
+              option: paused
+          - repeat:
+              for_each: [10, 20, 30, 40]
+              sequence:
+                - action: light.turn_on
+                  target:
+                    entity_id: "{{ gold }}"
+                  data:
+                    rgb_color: [255, 0, 0]
+                    brightness_pct: "{{ repeat.item }}"
+                - delay:
+                    milliseconds: 500
+      - conditions:
+          - condition: trigger
+            id: "off"
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.bio_projector
+            data:
+              option: "off"
