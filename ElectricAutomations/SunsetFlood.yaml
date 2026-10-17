@@ -1,5 +1,13 @@
 # Colour lights mimic the sunset (17 Oct 2026).
 #
+# White-spectrum lights (the Kajplats in the living room and loft) follow it
+# as colour temperature: the same boosted colour converted to kelvin
+# (sRGB -> CIE xy -> McCamy), clamped to the bulb's range, so a neutral sky
+# is 6500 K, 17 Oct's warm one ~4100 K and a blue one the bulb's coolest.
+# From sunset they fade to their warmest over the 20 min, ending fully warm,
+# with the bulb's own 25 s transitions. (They list xy as a colour mode but
+# are white-only bulbs, so they are named, not detected.)
+#
 # From an hour before sunset each light fades up towards max_pct, reaching it
 # at sunset, in the colour the FrontPath VEML6040 sees outside. Every 30 s
 # until 20 min after sunset; the lights are left on.
@@ -58,6 +66,11 @@ fields:
         min: 0
         max: 4000000000
         mode: box
+  white:
+    description: A white-spectrum light, driven by colour temperature.
+    default: false
+    selector:
+      boolean:
 variables:
   max_pct: 70
   boost: 2
@@ -85,9 +98,40 @@ sequence:
               {% set top = c | max %}
               {{ [(255 * c[0] / top) | round(0) | int, (255 * c[1] / top) | round(0) | int, (255 * c[2] / top) | round(0) | int] }}
               {% endif %}
+            # White-spectrum: the sky's kelvin until sunset (the warmest once
+            # the sensor is too dark to trust), then towards the warmest.
+            kelvin: >-
+              {% set kmin = state_attr(light, 'min_color_temp_kelvin') | int(2200) %}
+              {% set kmax = state_attr(light, 'max_color_temp_kelvin') | int(6500) %}
+              {% set sky = namespace(k=kmin) %}
+              {% if lux >= 15 %}
+                {% set lin = namespace(v=[]) %}
+                {% for v in rgb %}{% set q = v / 255 %}{% set lin.v = lin.v + [q / 12.92 if q <= 0.04045 else ((q + 0.055) / 1.055) ** 2.4] %}{% endfor %}
+                {% set X = 0.4124 * lin.v[0] + 0.3576 * lin.v[1] + 0.1805 * lin.v[2] %}
+                {% set Y = 0.2126 * lin.v[0] + 0.7152 * lin.v[1] + 0.0722 * lin.v[2] %}
+                {% set Z = 0.0193 * lin.v[0] + 0.1192 * lin.v[1] + 0.9505 * lin.v[2] %}
+                {% set x = X / (X + Y + Z) %}{% set y = Y / (X + Y + Z) %}
+                {% set n = (x - 0.3320) / (0.1858 - y) if y != 0.1858 else 10 %}
+                {% set sky.k = 449 * n ** 3 + 3525 * n ** 2 + 6823.3 * n + 5520.33 %}
+                {% if sky.k < 0 or sky.k > kmax %}{% set sky.k = kmax %}{% endif %}
+              {% endif %}
+              {% set f = [0, [(as_timestamp(now()) - set_ts) / 1200, 1] | min] | max %}
+              {% set k = sky.k * (1 - f) + kmin * f %}
+              {{ [kmin, [k, kmax] | min] | max | round(0) | int }}
         - if:
             - condition: template
-              value_template: "{{ lux >= 15 }}"
+              value_template: "{{ white }}"
+          then:
+            - action: light.turn_on
+              target:
+                entity_id: "{{ light }}"
+              data:
+                color_temp_kelvin: "{{ kelvin }}"
+                brightness_pct: "{{ pct }}"
+                transition: 25
+        - if:
+            - condition: template
+              value_template: "{{ not white and lux >= 15 }}"
           then:
             - action: light.turn_on
               target:
@@ -95,7 +139,10 @@ sequence:
               data:
                 rgb_color: "{{ rgb }}"
                 brightness_pct: "{{ pct }}"
-          else:
+        - if:
+            - condition: template
+              value_template: "{{ not white and lux < 15 }}"
+          then:
             - action: light.turn_on
               target:
                 entity_id: "{{ light }}"
@@ -116,10 +163,12 @@ id: sunset_flood
 alias: Sunset flood
 description: >-
   An hour before sunset (or at HA start inside the hour before to 20 min
-  after), if someone is home, starts script.sunset_light for each colour
-  light: living-room LED flood, bio flood, living office stand. They fade up
-  to 70% at sunset, never dimmer than they already are, in the colour the
-  FrontPath sensor sees outside.
+  after), if someone is home, starts script.sunset_light for each light:
+  colour (living-room LED flood, bio flood, living office stand) and
+  white-spectrum (Kajplats: living room, loft north and south). They fade up
+  to 70% at sunset, never dimmer than they already are, in the colour (or
+  colour temperature) the FrontPath sensor sees outside; the white ones go
+  to their warmest over the 20 min after sunset.
 mode: single
 triggers:
   - trigger: sun
@@ -133,10 +182,14 @@ variables:
   set_ts: >-
     {% set n = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
     {{ n if n - as_timestamp(now()) < 43200 else n - 86400 }}
-  lights:
+  colour_lights:
     - light.led_flood_light
     - light.bio_floodlight
     - light.living_office_stand
+  white_lights:
+    - light.kajplats_e14_ws_globe_806lm_2   # Living Room Spot Kajplats
+    - light.kajplats_e14_ws_globe_806lm     # North spot kajplats (loft)
+    - light.loft_desk_kajplats              # South Spot KAJPLATS (loft)
 conditions:
   - condition: template
     value_template: "{{ states('zone.home') | int(0) > 0 }}"
@@ -144,7 +197,7 @@ conditions:
     value_template: "{{ set_ts - 3660 <= as_timestamp(now()) <= set_ts + 1200 }}"
 actions:
   - repeat:
-      for_each: "{{ lights }}"
+      for_each: "{{ colour_lights + white_lights }}"
       sequence:
         - action: script.turn_on
           target:
@@ -153,3 +206,4 @@ actions:
             variables:
               light: "{{ repeat.item }}"
               set_ts: "{{ set_ts }}"
+              white: "{{ repeat.item in white_lights }}"
