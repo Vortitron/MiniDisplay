@@ -1,8 +1,13 @@
-# Living-room flood mimics the sunset (17 Oct 2026).
+# Colour lights mimic the sunset (17 Oct 2026).
 #
-# From an hour before sunset, light.led_flood_light fades up from 3% to
-# max_pct, reaching it at sunset, in the colour the FrontPath VEML6040 sees
-# outside. Every 30 s until 20 min after sunset; the light is left on.
+# From an hour before sunset each light fades up towards max_pct, reaching it
+# at sunset, in the colour the FrontPath VEML6040 sees outside. Every 30 s
+# until 20 min after sunset; the lights are left on.
+#
+# Never dims: each step sets the higher of the ramp and the light's own
+# brightness, so a light already at 50% stays at 50% while the ramp is below
+# it, and a light someone turns up mid-way carries on from there. Lights
+# already on are included (their colour follows the sky too).
 #
 # Colour: the sensor's raw R, G, B counts are white-balanced against midday
 # daylight (R/G 1.04, B/G 0.38 at noon on 16 and 17 Oct), so daylight is
@@ -11,48 +16,64 @@
 # B 0.77 after balancing, a pale warm white). The box faces away from the
 # sunset, so on a clear evening it sees the sky going blue rather than the
 # orange glow (16 Oct: B/G rose from 0.37 to 0.49 through sunset), and on a
-# hazy one it goes warm (17 Oct: 0.39 to 0.29). The flood follows either.
+# hazy one it goes warm (17 Oct: 0.39 to 0.29). The lights follow either.
 #
 # Below 15 lx the colour is frozen: the counts get noisy and FrontPath's own
 # path lights come on (at 15 lx) and tint what it sees.
 #
-# Only starts if the flood is off and someone is home. Stops (leaving the
-# light alone) as soon as the flood is turned off or its brightness is not
-# what this run set: a BILRESA button, "Flood off on phone charge",
-# SuperExpensive load shedding, or a hand on the app.
+# A light drops out (and is left alone) when it is turned off or dimmed below
+# what the script set: a BILRESA button, "Flood off on phone charge",
+# SuperExpensive load shedding, a hand on the app. An unavailable light (the
+# office stand, switched off at the wall) is skipped.
 #
-# Deployed with ha_set_automation, id sunset_flood.
-id: sunset_flood
-alias: Sunset flood
+# A restart kills running scripts (it did on 17 Oct at 15:33), so the
+# automation also runs at HA start inside the window; the ramp is worked out
+# from the clock, so it picks up where it was.
+#
+# Deployed with ha_set_script (sunset_light) and ha_set_automation
+# (sunset_flood).
+
+# script.sunset_light
+alias: Sunset light
 description: >-
-  From an hour before sunset, fades the living-room LED flood up (3% to 70% at
-  sunset) in the colour the FrontPath colour sensor sees outside,
-  white-balanced to midday and with the colour shift doubled. Updates every
-  30 s until 20 min after sunset and leaves the light on. Starts only if the
-  flood is off and someone is home; stops if anyone changes or turns off the
-  flood. Colour frozen below 15 lx (path lights).
-mode: single
-triggers:
-  - trigger: sun
-    event: sunset
-    offset: "-01:00:00"
-conditions:
-  - condition: state
-    entity_id: light.led_flood_light
-    state: "off"
-  - condition: template
-    value_template: "{{ states('zone.home') | int(0) > 0 }}"
+  One light follows the sunset (see automation sunset_flood): every 30 s,
+  brightness = the higher of a 3% to max_pct ramp (reaching max_pct at
+  set_ts) and the light's own, colour = the FrontPath sensor's, white-balanced
+  and boosted. Stops 20 min after set_ts, or when the light is turned off or
+  dimmed below what it set.
+mode: parallel
+max: 10
+fields:
+  light:
+    description: The light to drive.
+    required: true
+    selector:
+      entity:
+        domain: light
+  set_ts:
+    description: Sunset, as a Unix timestamp.
+    required: true
+    selector:
+      number:
+        min: 0
+        max: 4000000000
+        mode: box
 variables:
-  set_ts: "{{ as_timestamp(state_attr('sun.sun', 'next_setting')) }}"
   max_pct: 70
   boost: 2
-actions:
+sequence:
+  - condition: template
+    value_template: "{{ states(light) not in ['unavailable', 'unknown'] }}"
   - repeat:
       sequence:
         - variables:
-            pct: >-
+            ramp: >-
               {% set frac = 1 - (set_ts - as_timestamp(now())) / 3600 %}
               {{ (3 + (max_pct - 3) * ([0, [frac, 1] | min] | max)) | round(0) | int }}
+            own: >-
+              {{ ((state_attr(light, 'brightness') | int(0)) / 2.55) | round(0) | int
+                 if is_state(light, 'on') else 0 }}
+            pct: "{{ [ramp, own] | max }}"
             lux: "{{ states('sensor.front_walkway_frontpath_ble_processing_illuminance') | float(0) }}"
             rgb: >-
               {% set r = states('sensor.front_walkway_frontpath_ble_processing_light_red') | float(0) / 1.04 %}
@@ -70,14 +91,14 @@ actions:
           then:
             - action: light.turn_on
               target:
-                entity_id: light.led_flood_light
+                entity_id: "{{ light }}"
               data:
                 rgb_color: "{{ rgb }}"
                 brightness_pct: "{{ pct }}"
           else:
             - action: light.turn_on
               target:
-                entity_id: light.led_flood_light
+                entity_id: "{{ light }}"
               data:
                 brightness_pct: "{{ pct }}"
         - delay:
@@ -86,5 +107,49 @@ actions:
         - condition: template
           value_template: >-
             {{ as_timestamp(now()) > set_ts + 1200
-               or not is_state('light.led_flood_light', 'on')
-               or ((state_attr('light.led_flood_light', 'brightness') | int(0)) - pct * 2.55) | abs > 8 }}
+               or not is_state(light, 'on')
+               or (state_attr(light, 'brightness') | int(0)) < pct * 2.55 - 8 }}
+
+---
+# automation.sunset_flood
+id: sunset_flood
+alias: Sunset flood
+description: >-
+  An hour before sunset (or at HA start inside the hour before to 20 min
+  after), if someone is home, starts script.sunset_light for each colour
+  light: living-room LED flood, bio flood, living office stand. They fade up
+  to 70% at sunset, never dimmer than they already are, in the colour the
+  FrontPath sensor sees outside.
+mode: single
+triggers:
+  - trigger: sun
+    event: sunset
+    offset: "-01:00:00"
+  - trigger: homeassistant
+    event: start
+variables:
+  # After sunset next_setting is tomorrow's; a day back is within a few
+  # minutes of today's, near enough for the window.
+  set_ts: >-
+    {% set n = as_timestamp(state_attr('sun.sun', 'next_setting')) %}
+    {{ n if n - as_timestamp(now()) < 43200 else n - 86400 }}
+  lights:
+    - light.led_flood_light
+    - light.bio_floodlight
+    - light.living_office_stand
+conditions:
+  - condition: template
+    value_template: "{{ states('zone.home') | int(0) > 0 }}"
+  - condition: template
+    value_template: "{{ set_ts - 3660 <= as_timestamp(now()) <= set_ts + 1200 }}"
+actions:
+  - repeat:
+      for_each: "{{ lights }}"
+      sequence:
+        - action: script.turn_on
+          target:
+            entity_id: script.sunset_light
+          data:
+            variables:
+              light: "{{ repeat.item }}"
+              set_ts: "{{ set_ts }}"
