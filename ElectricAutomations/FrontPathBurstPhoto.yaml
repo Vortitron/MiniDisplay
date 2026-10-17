@@ -1,0 +1,42 @@
+# Temporary: photograph the FrontPath "whole-box" radar bursts to find their
+# source. A burst is every distance gate on a radar lighting up at once for
+# 4-6 s, every 7-10 minutes, on some evenings and mornings (14 Oct
+# 18:00-23:00, 17 Oct 05:11-07:49). Ruled out so far: Sam (off during the
+# 17 Oct bursts), anything on HA's power meters, the string lights (steady
+# during bursts, and on all evening on bursts-free nights), anything visible
+# (the box's light sensor is flat through them), and anything house-wide (the
+# Allrum LD2410 indoors stays quiet). The box hangs on a tree, so not
+# vibration from an appliance. Candidates left: a 24 GHz source near the
+# street (a streetlight or car sensor), or the shared USB supply.
+#
+# Deployed with ha_set_automation, id frontpath_burst_photo (2026-10-17).
+# Delete once the source is found.
+id: frontpath_burst_photo
+alias: Front Path - Photo of each radar burst
+description: >-
+  Investigating the FrontPath whole-box bursts. When 5+ moving gates on either
+  radar reach 40 in one second, press the Saga camera's test-shot button and
+  log it, at most every 10 minutes. Delete once the source is found.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: template
+    value_template: >-
+      {% set p = states('sensor.front_walkway_frontpath_ble_processing_gate_energies').split(';') %}
+      {% if p | count == 4 %}
+        {% set m1 = (p[0].split(':')[1].split(',') | map('int') | list)[2:] %}
+        {% set m2 = (p[2].split(':')[1].split(',') | map('int') | list)[2:] %}
+        {{ (m1 | select('>=', 40) | list | count) >= 5 or (m2 | select('>=', 40) | list | count) >= 5 }}
+      {% else %}false{% endif %}
+actions:
+  - action: input_button.press
+    target:
+      entity_id: input_button.saga_cam_test_shot
+  - action: logbook.log
+    data:
+      name: FrontPath burst photo
+      message: >-
+        Radar burst at {{ now().strftime('%H:%M:%S') }}: test shot taken. Gates:
+        {{ states('sensor.front_walkway_frontpath_ble_processing_gate_energies') }}
+  - delay:
+      minutes: 10
