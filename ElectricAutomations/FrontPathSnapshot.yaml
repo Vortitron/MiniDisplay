@@ -67,8 +67,18 @@ actions:
 #   homeassistant:
 #     allowlist_external_dirs:
 #       - /config/frontpath_snapshots
+#     media_dirs:
+#       local: /media
+#       frontpath: /config/frontpath_snapshots
 #   shell_command:
 #     frontpath_snapshot_cleanup: "find /config/frontpath_snapshots -name '*.jpg' -mtime +7 -delete"
+#     frontpath_photos: "python3 /config/scripts/frontpath_photos.py"
+# and the Local File integration (UI only since HA 2024; YAML is refused),
+# "FrontPath latest" on /config/frontpath_snapshots/latest.jpg, which makes
+# camera.frontpath_latest.
+# `find` is recursive, so the gallery thumbnails in thumbs/ go with their
+# photos. shell_command.frontpath_photos (SagaCam/frontpath_photos.py, run by
+# saga_web_log after each saved photo) makes those thumbnails and latest.jpg.
 # Deployed with ha_set_automation, id frontpath_snapshot_cleanup (2026-10-16).
 
 id: frontpath_snapshot_cleanup

@@ -61,6 +61,18 @@ or "radar burst" for test shots taken by `frontpath_burst_photo` (logbook).
 It lists the photos through HA's media source, so configuration.yaml adds
 `/config/frontpath_snapshots` as the media folder `frontpath` (keeping
 `local: /media`), and it signs in with the browser's own HA login
-(`hassTokens`) or the Saga camera token. The front-door dashboard shows
-`camera.saga_web` (latest photo: tap to enlarge, hold for a fresh one) and a
-"Photo gallery" button.
+(`hassTokens`) or the Saga camera token.
+
+Later on 17 Oct: the gallery shows one day at a time (Older / Newer, a date
+list, the day kept after `#` in the address), and its cards and strip use
+480 px thumbnails made on the server, so a phone away from home only
+downloads a full-size photo when one is opened. `frontpath_photos.py` (in HA
+at `/config/scripts/`, run as `shell_command.frontpath_photos` by
+`saga_web_log` after each saved photo) makes the missing thumbnails in
+`frontpath_snapshots/thumbs/` and copies the newest photo to `latest.jpg`.
+A Local File integration entry (added in the UI: HA no longer takes it in
+YAML), `camera.frontpath_latest`, shows that file, so the
+latest photo survives a restart (the Push camera keeps its image in memory
+only). The front-door dashboard shows it (tap to enlarge, hold for a fresh
+one), with "Take photo" (presses `input_button.saga_cam_test_shot`, for a
+laptop with no long press) and "Photo gallery" buttons.
