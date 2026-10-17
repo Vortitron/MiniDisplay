@@ -26,8 +26,16 @@
 # orange glow (16 Oct: B/G rose from 0.37 to 0.49 through sunset), and on a
 # hazy one it goes warm (17 Oct: 0.39 to 0.29). The lights follow either.
 #
-# Below 15 lx the colour is frozen: the counts get noisy and FrontPath's own
-# path lights come on (at 15 lx) and tint what it sees.
+# Below 15 lx every light goes to a set warm white (its warmest kelvin:
+# floods 2700 K, Kajplats 2202 K): by then what the sensor sees is mostly the
+# streetlamp and FrontPath's own path lights (on at 15 lx), and near dark the
+# counts are noise (0.4 lx on 17 Oct read as magenta, 249/136/255). Between
+# sunset and that, colours blend towards warm (2700 K-ish 255/166/87 for the
+# floods, the warmest kelvin for the Kajplats) over the 20 min after sunset.
+# Going cool at the start is fine.
+#
+# If the bio projector is on (sensor.bio_power_power over 200 W), the bio
+# flood is left out (see BioProjectorLights.yaml).
 #
 # A light drops out (and is left alone) when it is turned off or dimmed below
 # what the script set: a BILRESA button, "Flood off on phone charge",
@@ -46,9 +54,11 @@ alias: Sunset light
 description: >-
   One light follows the sunset (see automation sunset_flood): every 30 s,
   brightness = the higher of a 3% to max_pct ramp (reaching max_pct at
-  set_ts) and the light's own, colour = the FrontPath sensor's, white-balanced
-  and boosted. Stops 20 min after set_ts, or when the light is turned off or
-  dimmed below what it set.
+  set_ts) and the light's own; colour = the FrontPath sensor's,
+  white-balanced and boosted (as kelvin for a white-spectrum light), drifting
+  warm over the 20 min after sunset, and the light's warmest white below
+  15 lx. Stops 20 min after set_ts, or when the light is turned off or dimmed
+  below what it set.
 mode: parallel
 max: 10
 fields:
@@ -70,7 +80,7 @@ fields:
     description: A white-spectrum light, driven by colour temperature.
     default: false
     selector:
-      boolean:
+      boolean: {}
 variables:
   max_pct: 70
   boost: 2
@@ -98,8 +108,16 @@ sequence:
               {% set top = c | max %}
               {{ [(255 * c[0] / top) | round(0) | int, (255 * c[1] / top) | round(0) | int, (255 * c[2] / top) | round(0) | int] }}
               {% endif %}
-            # White-spectrum: the sky's kelvin until sunset (the warmest once
-            # the sensor is too dark to trust), then towards the warmest.
+            # After sunset, the colour lights' colour drifts to a warm white.
+            tint: >-
+              {% set f = [0, [(as_timestamp(now()) - set_ts) / 1200, 1] | min] | max %}
+              {% set w = [255, 166, 87] %}
+              {{ [(rgb[0] * (1 - f) + w[0] * f) | round(0) | int,
+                  (rgb[1] * (1 - f) + w[1] * f) | round(0) | int,
+                  (rgb[2] * (1 - f) + w[2] * f) | round(0) | int] }}
+            # The sky's kelvin until sunset (the warmest once the sensor is
+            # too dark to trust), then towards the warmest. Colour lights use
+            # it only in the dark, where it is always their warmest.
             kelvin: >-
               {% set kmin = state_attr(light, 'min_color_temp_kelvin') | int(2200) %}
               {% set kmax = state_attr(light, 'max_color_temp_kelvin') | int(6500) %}
@@ -137,7 +155,7 @@ sequence:
               target:
                 entity_id: "{{ light }}"
               data:
-                rgb_color: "{{ rgb }}"
+                rgb_color: "{{ tint }}"
                 brightness_pct: "{{ pct }}"
         - if:
             - condition: template
@@ -147,6 +165,7 @@ sequence:
               target:
                 entity_id: "{{ light }}"
               data:
+                color_temp_kelvin: "{{ kelvin }}"
                 brightness_pct: "{{ pct }}"
         - delay:
             seconds: 30
@@ -167,8 +186,9 @@ description: >-
   colour (living-room LED flood, bio flood, living office stand) and
   white-spectrum (Kajplats: living room, loft north and south). They fade up
   to 70% at sunset, never dimmer than they already are, in the colour (or
-  colour temperature) the FrontPath sensor sees outside; the white ones go
-  to their warmest over the 20 min after sunset.
+  colour temperature) the FrontPath sensor sees outside, drifting warm over
+  the 20 min after sunset and a set warm white once it is dark (below 15 lx,
+  streetlamp). Bio flood left out while the projector is on.
 mode: single
 triggers:
   - trigger: sun
@@ -197,7 +217,11 @@ conditions:
     value_template: "{{ set_ts - 3660 <= as_timestamp(now()) <= set_ts + 1200 }}"
 actions:
   - repeat:
-      for_each: "{{ colour_lights + white_lights }}"
+      # The bio flood stays out of it while the projector is on.
+      for_each: >-
+        {% set all = colour_lights + white_lights %}
+        {{ all | reject('eq', 'light.bio_floodlight') | list
+           if states('sensor.bio_power_power') | float(0) > 200 else all }}
       sequence:
         - action: script.turn_on
           target:

@@ -1,0 +1,49 @@
+# Bio lights down for the projector (17 Oct 2026).
+#
+# sensor.bio_power_power (Tuya Local plug feeding the bio AV) reads 60-100 W
+# with everything idle (probably the amp on standby; to be checked with the
+# old Sam plug), 350-365 W with the projector playing, and ~250-295 W when it
+# has sat paused a while and dims its lamp. Over 200 W for 30 s = projector
+# on (paused or not, and the lamp dimming never re-fires it): before 20:00 the bio lights that are on go to 10% (what was
+# chosen by hand for the 17 Oct evening film), from 20:00 they all go off.
+# Nothing is put back when the projector goes off.
+#
+# The sunset lights (SunsetFlood.yaml) leave the bio flood out while the
+# projector is on, and a sunset run already going stops by itself when its
+# light is dimmed or turned off.
+#
+# Deployed with ha_set_automation, id bio_projector_lights.
+id: bio_projector_lights
+alias: Bio projector lights
+description: >-
+  When the bio projector comes on (sensor.bio_power_power over 200 W for
+  30 s; playing is 350-365 W, paused with the lamp dimmed 250-295 W, standby
+  60-100 W): before 20:00 the bio lights that are on go to 10%, from 20:00
+  all bio lights go off.
+mode: single
+triggers:
+  - trigger: numeric_state
+    entity_id: sensor.bio_power_power
+    above: 200
+    for:
+      seconds: 30
+variables:
+  bio_on: >-
+    {{ area_entities('bio') | select('match', 'light\.') | select('is_state', 'on') | list }}
+conditions:
+  - condition: template
+    value_template: "{{ bio_on | count > 0 }}"
+actions:
+  - if:
+      - condition: time
+        before: "20:00:00"
+    then:
+      - action: light.turn_on
+        target:
+          entity_id: "{{ bio_on }}"
+        data:
+          brightness_pct: 10
+    else:
+      - action: light.turn_off
+        target:
+          entity_id: "{{ bio_on }}"
