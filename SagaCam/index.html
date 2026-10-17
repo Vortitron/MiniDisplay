@@ -209,6 +209,10 @@ async function start() {
       deviceId: id ? { exact: id } : undefined,
       facingMode: facing ? { exact: facing } : undefined,
       width: { ideal: wantW }, height: { ideal: wantH },
+      // 17 Oct: uncapped (30 fps by day) the Saga lost ~9%/h on its charger
+      // and went flat; at night the camera slows itself for long exposures
+      // and it held. 10 fps is plenty for a still and for the night stack.
+      frameRate: { ideal: 10, max: 10 },
     },
   });
   // Another tab holding the camera can leave this waiting for ever.
@@ -490,6 +494,9 @@ const WHY = "sensor.front_walkway_frontpath_ble_processing_path_trigger";
 const TEST = "input_button.saga_cam_test_shot";
 const RELOAD = "input_button.saga_cam_reload";
 let ws = null, wsId = 1, liveOn = false, why = "", lastShot = 0, shooting = false;
+// Live mode lets go of the camera at 15% battery and takes it back at 35%,
+// so a charger that cannot keep up does not run the Saga flat (17 Oct).
+let lowBattery = false;
 
 function haStatus(msg, cls) {
   $("haStatus").textContent = "HA: " + msg;
@@ -540,7 +547,7 @@ function onEntities(e) {
 function hhmmss() { return new Date().toTimeString().slice(0, 8).replace(/:/g, ""); }
 
 async function shoot(prefix, kind) {
-  if (document.hidden) return;   // a background tab: the visible one shoots
+  if (document.hidden || lowBattery) return;   // a background tab: the visible one shoots
   if (!track || track.readyState !== "live") { await start(); if (!track) return; }
   lastBlob = null;
   if (kind === "stack") await photoStack(); else await photoFrame();
@@ -577,7 +584,7 @@ async function live() {
   await start();
   connect();
   setInterval(() => {
-    const ok = track && track.readyState === "live" && ws && ws.readyState === 1;
+    const ok = !lowBattery && track && track.readyState === "live" && ws && ws.readyState === 1;
     $("dot").className = ok ? "good" : "";
   }, 5000);
   setInterval(() => report("Live: alive, camera " + (track && track.readyState === "live" ? "on" : "off") +
@@ -586,7 +593,7 @@ async function live() {
   // changing: sensor noise makes every real frame differ a little.
   let lastSig = "", same = 0;
   setInterval(async () => {
-    if (shooting || document.hidden) return;
+    if (shooting || document.hidden || lowBattery) return;
     if (!track || track.readyState !== "live") { report("Live: camera lost, restarting it"); await start(); return; }
     const bmp = await grab();
     if (!bmp) return;
@@ -602,6 +609,28 @@ async function live() {
     lastSig = sig;
     if (same >= 2) { same = 0; report("Live: picture frozen, restarting the camera"); await start(); }
   }, 60000);
+  watchBattery();
+}
+
+async function watchBattery() {
+  if (!navigator.getBattery) return;
+  let b;
+  try { b = await navigator.getBattery(); } catch (e) { return; }
+  const check = async () => {
+    const pct = Math.round(b.level * 100);
+    if (!lowBattery && b.level <= 0.15) {
+      lowBattery = true;
+      release();
+      $("dot").className = "";
+      report(`Live: battery ${pct}%, camera off until 35%`);
+    } else if (lowBattery && b.level >= 0.35) {
+      lowBattery = false;
+      report(`Live: battery ${pct}%, camera back on`);
+      if (!document.hidden) await start();
+    }
+  };
+  b.addEventListener("levelchange", check);
+  check();
 }
 
 $("saveToken").onclick = () => {
@@ -642,7 +671,7 @@ window.addEventListener("pagehide", release);
 // would lock out the tab that can. It takes the camera back when shown.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && !autoRunning) release();
-  else if (!document.hidden && liveOn && !track) start();
+  else if (!document.hidden && liveOn && !track && !lowBattery) start();
 });
 </script>
 </body>

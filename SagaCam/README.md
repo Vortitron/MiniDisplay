@@ -76,3 +76,12 @@ latest photo survives a restart (the Push camera keeps its image in memory
 only). The front-door dashboard shows it (tap to enlarge, hold for a fresh
 one), with "Take photo" (presses `input_button.saga_cam_test_shot`, for a
 laptop with no long press) and "Photo gallery" buttons.
+
+Battery (17 Oct evening): the Saga went flat on its charger. Overnight it held
+(65% to 62.5% in eight hours) but from dawn it lost ~9% an hour, charging all
+the while: by day the camera ran uncapped at 2592x1944 and ~30 fps, at night
+it slows itself for long exposures. The page now asks for at most 10 fps,
+and in live mode lets go of the camera at 15% battery (Battery Status API),
+taking it back at 35%, the door dashboard staying up. `saga_web_watchdog`
+no longer reopens the page below 35%: reopening it at 1% kept the Saga from
+charging for five hours.
