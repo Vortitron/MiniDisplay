@@ -1,0 +1,63 @@
+# Bio amp power follows the projector (17 Oct 2026).
+#
+# The bio amp (a ~20-year-old Onkyo home cinema amp) is on its own Tuya Local
+# plug, switch.energy_monitoring_smartplug ("Bio Amp Local"). Switched on it
+# draws a flat ~71 W whether or not anything is playing (17 Oct, through a
+# film), and it only goes to standby over HDMI or by hand; its remote no
+# longer works, so it is easy to leave it on after turning the projector off.
+#
+#   Projector off for 10 min (input_select.bio_projector "off", which itself
+#   needs sensor.bio_power_power under 150 W for a minute; see
+#   BioProjectorLights.yaml): the amp plug goes off.
+#   Projector waking (sensor.bio_power_power over 150 W for 3 s; the
+#   upstream plug feeds the amp too, and amp-on plus standby stays under it):
+#   the amp plug goes back on. The amp comes back on with its power and the
+#   HDMI link does the rest.
+#
+# Catch: music through the amp with the projector off would be cut after
+# 10 min.
+#
+# Deployed with ha_set_automation, id bio_amp_power.
+id: bio_amp_power
+alias: Bio amp power
+description: >-
+  Cuts the bio amp's plug once the projector has been off for 10 min (it draws
+  ~71 W when left on, and its remote no longer works), and powers it again
+  as soon as the projector wakes (bio power over 150 W for 3 s).
+mode: queued
+max: 3
+triggers:
+  - trigger: state
+    entity_id: input_select.bio_projector
+    to: "off"
+    for:
+      minutes: 10
+    id: "off"
+  - trigger: numeric_state
+    entity_id: sensor.bio_power_power
+    above: 150
+    for:
+      seconds: 3
+    id: "on"
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: "off"
+          - condition: state
+            entity_id: switch.energy_monitoring_smartplug
+            state: "on"
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: switch.energy_monitoring_smartplug
+      - conditions:
+          - condition: trigger
+            id: "on"
+          - condition: state
+            entity_id: switch.energy_monitoring_smartplug
+            state: "off"
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: switch.energy_monitoring_smartplug
