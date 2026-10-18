@@ -18,8 +18,10 @@
 # already on are included (their colour follows the sky too).
 #
 # Colour: the sensor's raw R, G, B counts are white-balanced against midday
-# daylight (R/G 1.04, B/G 0.38 at noon on 16 and 17 Oct), so daylight is
-# white, and then the difference from grey is multiplied by `boost`: the raw
+# daylight, so daylight is white: input_number.sunset_white_r_g / _b_g,
+# started at R/G 1.04, B/G 0.38 (noon, 16 and 17 Oct) and kept up to date
+# by automation sunset_white_balance below, since the box looks west
+# through trees and their leaves tint it as they turn and fall. Then and then the difference from grey is multiplied by `boost`: the raw
 # shift is real but small (17 Oct, half an hour before sunset: R 1.02, G 1,
 # B 0.77 after balancing, a pale warm white). The box faces away from the
 # sunset, so on a clear evening it sees the sky going blue rather than the
@@ -58,7 +60,8 @@ description: >-
   One light follows the sunset (see automation sunset_flood): every 30 s,
   brightness = the higher of a 3% to max_pct ramp (reaching max_pct at
   set_ts) and the light's own; colour = the FrontPath sensor's,
-  white-balanced and boosted: as it is (true colour, colour lights, while
+  white-balanced (input_number sunset_white_r_g / _b_g, learnt at midday)
+  and boosted: as it is (true colour, colour lights, while
   input_boolean.sunset_true_colour is on) or as a colour temperature (white
   LEDs; RGB only for an orange sky), drifting to the light's warmest over the
   20 min after sunset, and its warmest below 15 lx. Stops 20 min after set_ts, or when the light is turned off or dimmed
@@ -103,9 +106,9 @@ sequence:
             pct: "{{ [ramp, own] | max }}"
             lux: "{{ states('sensor.front_walkway_frontpath_ble_processing_illuminance') | float(0) }}"
             rgb: >-
-              {% set r = states('sensor.front_walkway_frontpath_ble_processing_light_red') | float(0) / 1.04 %}
+              {% set r = states('sensor.front_walkway_frontpath_ble_processing_light_red') | float(0) / states('input_number.sunset_white_r_g') | float(1.04) %}
               {% set g = states('sensor.front_walkway_frontpath_ble_processing_light_green') | float(0) %}
-              {% set b = states('sensor.front_walkway_frontpath_ble_processing_light_blue') | float(0) / 0.38 %}
+              {% set b = states('sensor.front_walkway_frontpath_ble_processing_light_blue') | float(0) / states('input_number.sunset_white_b_g') | float(0.38) %}
               {% set m = (r + g + b) / 3 %}
               {% if m <= 0 %}[255, 255, 255]{% else %}
               {% set c = [[0, m + boost * (r - m)] | max, [0, m + boost * (g - m)] | max, [0, m + boost * (b - m)] | max] %}
@@ -266,3 +269,48 @@ actions:
               light: "{{ repeat.item }}"
               set_ts: "{{ set_ts }}"
               white: "{{ repeat.item in white_lights }}"
+
+---
+# automation.sunset_white_balance
+# The sensor's idea of white, learnt from bright middays. Every 5 min from
+# 11:00 to 15:00 with at least 150 lx, R/G and B/G move 5% of the way
+# towards the current reading (a sunny midday, ~48 readings, moves them
+# ~90%; a dull one leaves them alone). Readings outside R/G 0.7-1.4 or
+# B/G 0.2-0.6 are ignored.
+id: sunset_white_balance
+alias: Sunset white balance
+description: >-
+  Learns the FrontPath colour sensor's midday white (input_number
+  sunset_white_r_g and sunset_white_b_g) for the sunset lights: every 5 min
+  from 11:00 to 15:00 with at least 150 lx, each moves 5% of the way towards
+  the current R/G and B/G. Out-of-range readings are ignored.
+mode: single
+triggers:
+  - trigger: time_pattern
+    minutes: /5
+conditions:
+  - condition: time
+    after: "11:00:00"
+    before: "15:00:00"
+  - condition: numeric_state
+    entity_id: sensor.front_walkway_frontpath_ble_processing_illuminance
+    above: 150
+variables:
+  r: "{{ states('sensor.front_walkway_frontpath_ble_processing_light_red') | float(0) }}"
+  g: "{{ states('sensor.front_walkway_frontpath_ble_processing_light_green') | float(0) }}"
+  b: "{{ states('sensor.front_walkway_frontpath_ble_processing_light_blue') | float(0) }}"
+  rg: "{{ (r / g) if g > 0 else 0 }}"
+  bg: "{{ (b / g) if g > 0 else 0 }}"
+actions:
+  - condition: template
+    value_template: "{{ 0.7 <= rg <= 1.4 and 0.2 <= bg <= 0.6 }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.sunset_white_r_g
+    data:
+      value: "{{ (states('input_number.sunset_white_r_g') | float(1.04) * 0.95 + rg * 0.05) | round(3) }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.sunset_white_b_g
+    data:
+      value: "{{ (states('input_number.sunset_white_b_g') | float(0.38) * 0.95 + bg * 0.05) | round(3) }}"
