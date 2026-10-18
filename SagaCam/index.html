@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Saga Camera Test</title>
+<!-- Installable as an app ("Front door"): full screen, no address bar. -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#101214">
 <!--
   Saga camera test (16 Oct 2026). Served by Home Assistant from
   /config/www/saga-cam/index.html at /local/saga-cam/index.html.
@@ -667,6 +670,9 @@ function release() {
   stream = null; track = null;
 }
 window.addEventListener("pagehide", release);
+// Lets Chrome install the page as the full-screen "Front door" app.
+if ("serviceWorker" in navigator && window.isSecureContext)
+  navigator.serviceWorker.register("sw.js").catch(() => {});
 // Live mode too: a hidden tab cannot take photos, and holding the camera
 // would lock out the tab that can. It takes the camera back when shown.
 document.addEventListener("visibilitychange", () => {

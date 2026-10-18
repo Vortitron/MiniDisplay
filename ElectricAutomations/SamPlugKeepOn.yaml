@@ -1,3 +1,11 @@
+# RETIRED 18 Oct 2026, automation turned off. Sam's own power readings
+# checked out, so Sam went back on the wall socket (17 Oct ~14:00) and the
+# plug now feeds the bio amp: "Bio Amp Local" in Tuya Local, "Amp Plug
+# (Cloud)" in the Tuya cloud integration, one physical plug. Left on, this
+# guard switched the amp straight back on 10 s after BioAmpPower.yaml cut
+# it (17 Oct 23:35, 18 Oct 08:21). Sam is still shed in super-expensive
+# hours by sam.yaml on climate.sam, which never depended on the plug.
+#
 # Sam (the living-room heat pump) is fed through the old pool plug,
 # switch.smart_plug_4_socket_1 (Tuya), from Oct 2026, to measure what it
 # really draws: Sam's own power figure comes from its cloud and may be an

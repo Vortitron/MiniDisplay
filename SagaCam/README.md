@@ -85,3 +85,12 @@ and in live mode lets go of the camera at 15% battery (Battery Status API),
 taking it back at 35%, the door dashboard staying up. `saga_web_watchdog`
 no longer reopens the page below 35%: reopening it at 1% kept the Saga from
 charging for five hours.
+
+Installable app (18 Oct): `manifest.json`, `sw.js` and two icons make the
+page installable from Chrome as "Front door" (Chrome menu, Install app /
+Add to Home screen): full screen with no address bar, opening straight into
+live mode (`index.html?app=1#facing=environment&live=1`). The webhook id is
+not in the manifest; the page keeps it in the browser (`sagaHook`) from the
+first visit with `#hook=`, and the installed app shares that storage. The
+service worker only passes the app's own files through (no caching; the
+/api webhook and websocket are untouched). HA stays the Saga's Home app.
