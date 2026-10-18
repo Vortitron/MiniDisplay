@@ -26,6 +26,9 @@
 # orange glow (16 Oct: B/G rose from 0.37 to 0.49 through sunset), and on a
 # hazy one it goes warm (17 Oct: 0.39 to 0.29). The lights follow either.
 #
+# 18 Oct: colours now stay on the daylight line (see the kelvin variable);
+# the raw sensor colour put the floods in lavender under a bluish sky.
+#
 # Below 15 lx every light goes to a set warm white (its warmest kelvin:
 # floods 2700 K, Kajplats 2202 K): by then what the sensor sees is mostly the
 # streetlamp and FrontPath's own path lights (on at 15 lx), and near dark the
@@ -55,8 +58,9 @@ description: >-
   One light follows the sunset (see automation sunset_flood): every 30 s,
   brightness = the higher of a 3% to max_pct ramp (reaching max_pct at
   set_ts) and the light's own; colour = the FrontPath sensor's,
-  white-balanced and boosted (as kelvin for a white-spectrum light), drifting
-  warm over the 20 min after sunset, and the light's warmest white below
+  white-balanced and boosted, as a colour temperature (white LEDs; RGB only
+  for an orange sky below the light's warmest white), drifting to the
+  light's warmest over the 20 min after sunset, and its warmest below
   15 lx. Stops 20 min after set_ts, or when the light is turned off or dimmed
   below what it set.
 mode: parallel
@@ -108,19 +112,18 @@ sequence:
               {% set top = c | max %}
               {{ [(255 * c[0] / top) | round(0) | int, (255 * c[1] / top) | round(0) | int, (255 * c[2] / top) | round(0) | int] }}
               {% endif %}
-            # After sunset, the colour lights' colour drifts to a warm white.
-            tint: >-
-              {% set f = [0, [(as_timestamp(now()) - set_ts) / 1200, 1] | min] | max %}
-              {% set w = [255, 166, 87] %}
-              {{ [(rgb[0] * (1 - f) + w[0] * f) | round(0) | int,
-                  (rgb[1] * (1 - f) + w[1] * f) | round(0) | int,
-                  (rgb[2] * (1 - f) + w[2] * f) | round(0) | int] }}
-            # The sky's kelvin until sunset (the warmest once the sensor is
-            # too dark to trust), then towards the warmest. Colour lights use
-            # it only in the dark, where it is always their warmest.
+            # Every light follows the sky along the daylight line only (warm
+            # to cool white, orange below that): the sensor colour as a
+            # colour temperature, so a bluish sky can no longer come out
+            # lavender on RGB LEDs (18 Oct, 201/196/255). Until sunset the
+            # sky's kelvin (white-spectrum lights down to their warmest,
+            # colour lights down to 1800 K for a real orange sky); then
+            # towards the light's warmest over 20 min; in the dark (under
+            # 15 lx, streetlamp) the warmest.
             kelvin: >-
-              {% set kmin = state_attr(light, 'min_color_temp_kelvin') | int(2200) %}
+              {% set kmin = state_attr(light, 'min_color_temp_kelvin') | int(2700) %}
               {% set kmax = state_attr(light, 'max_color_temp_kelvin') | int(6500) %}
+              {% set lo = kmin if white else 1800 %}
               {% set sky = namespace(k=kmin) %}
               {% if lux >= 15 %}
                 {% set lin = namespace(v=[]) %}
@@ -135,7 +138,16 @@ sequence:
               {% endif %}
               {% set f = [0, [(as_timestamp(now()) - set_ts) / 1200, 1] | min] | max %}
               {% set k = sky.k * (1 - f) + kmin * f %}
-              {{ [kmin, [k, kmax] | min] | max | round(0) | int }}
+              {{ [lo, [k, kmax] | min] | max | round(0) | int }}
+            # Below a colour light's own warmest white: that kelvin in RGB
+            # (Tanner Helland's black-body fit).
+            krgb: >-
+              {% set t = kelvin / 100 %}
+              {% set r = 255 if t <= 66 else 329.698727446 * (t - 60) ** -0.1332047592 %}
+              {% set g = 99.4708025861 * (t | log) - 161.1195681661 if t <= 66 else 288.1221695283 * (t - 60) ** -0.0755148492 %}
+              {% set b = 255 if t >= 66 else (0 if t <= 19 else 138.5177312231 * ((t - 10) | log) - 305.0447927307) %}
+              {{ [[0, [r, 255] | min] | max | round(0) | int, [0, [g, 255] | min] | max | round(0) | int, [0, [b, 255] | min] | max | round(0) | int] }}
+            warmest: "{{ state_attr(light, 'min_color_temp_kelvin') | int(2700) }}"
         - if:
             - condition: template
               value_template: "{{ white }}"
@@ -149,23 +161,23 @@ sequence:
                 transition: 25
         - if:
             - condition: template
-              value_template: "{{ not white and lux >= 15 }}"
-          then:
-            - action: light.turn_on
-              target:
-                entity_id: "{{ light }}"
-              data:
-                rgb_color: "{{ tint }}"
-                brightness_pct: "{{ pct }}"
-        - if:
-            - condition: template
-              value_template: "{{ not white and lux < 15 }}"
+              value_template: "{{ not white and kelvin >= warmest }}"
           then:
             - action: light.turn_on
               target:
                 entity_id: "{{ light }}"
               data:
                 color_temp_kelvin: "{{ kelvin }}"
+                brightness_pct: "{{ pct }}"
+        - if:
+            - condition: template
+              value_template: "{{ not white and kelvin < warmest }}"
+          then:
+            - action: light.turn_on
+              target:
+                entity_id: "{{ light }}"
+              data:
+                rgb_color: "{{ krgb }}"
                 brightness_pct: "{{ pct }}"
         - delay:
             seconds: 30
