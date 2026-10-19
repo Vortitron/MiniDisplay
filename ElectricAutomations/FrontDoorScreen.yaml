@@ -2,32 +2,45 @@
 #
 # Since 16 Oct 2026 the Saga's screen stays on: Chrome shows the camera page
 # (SagaCam/) with the front-door dashboard inside it, and the camera needs
-# the page visible. So brightness does the job Fully's screen on/off did, and
-# keeps the charger ahead of the drain:
+# the page visible. So brightness does the job Fully's screen on/off did.
 #
-#                                   by day   after sunset
-#   idle                              10          1
-#   sensor.door_message non-empty    150         60
-#   FrontPath person (for a minute)  150         60
+# 19 Oct: by day the idle level follows the Saga's own light sensor, which
+# reads 5,000-10,000 lx at the screen in daylight (10 was unreadable). With a
+# good cable the charger has headroom (2-5 W into the battery).
 #
-# Re-applied at sunset and sunrise. Needs the HA app's "Modify system
-# settings" permission on the Saga, and auto brightness off
-# (command_auto_screen_brightness: turn_off, sent once on 16 Oct).
+#   light at the screen      idle (by day)
+#   under 10 lx                  1
+#   10-100 lx                   15
+#   100-500 lx                  40
+#   500-2,000 lx                80
+#   2,000-5,000 lx             130
+#   over 5,000 lx              200
+#
+#   after sunset: idle 1
+#   sensor.door_message non-empty, or a FrontPath person (for a minute):
+#   150 by day (60 after sunset), or the idle level if that is higher
+#
+# Re-applied at sunset and sunrise, and when the light sensor moves the idle
+# level (only if the screen is not already within 5 of it). Needs the HA
+# app's "Modify system settings" permission on the Saga, and auto brightness
+# off (command_auto_screen_brightness: turn_off, sent once on 16 Oct).
 #
 # sensor.door_message is a UI template helper, source in
 # door_message_template.jinja.
 #
-# Deployed with ha_set_automation, id front_door_screen (2026-10-16).
+# Deployed with ha_set_automation, id front_door_screen (2026-10-16,
+# light-following 2026-10-19).
 id: front_door_screen
 alias: Front door screen
 description: >-
   Saga door display brightness (the screen stays on, holding the camera page
-  and the front-door dashboard, so brightness replaces Fully's screen on/off
-  and keeps the charger ahead). Idle: 10 by day, 1 after sunset. A door
-  message or a FrontPath detection (for a minute): 150 by day, 60 after
-  sunset. Re-applied at sunset and sunrise. Uses the HA app's
-  command_screen_brightness_level (0-255).
-mode: restart
+  and the front-door dashboard). By day the idle level follows the Saga's
+  light sensor (1 under 10 lx up to 200 over 5,000 lx); after sunset 1. A door
+  message or a FrontPath detection (for a minute): at least 150 by day, 60
+  after sunset. Re-applied at sunset, sunrise and when the light changes the
+  idle level. Uses the HA app's command_screen_brightness_level (0-255).
+mode: queued
+max: 10
 triggers:
   - trigger: template
     value_template: "{{ states('sensor.door_message') not in ['', 'unknown', 'unavailable'] }}"
@@ -49,11 +62,30 @@ triggers:
     from: "off"
     to: "on"
     id: visitor
+  - trigger: state
+    entity_id: sensor.saga_light_sensor
+    id: light
 variables:
   dark: "{{ is_state('sun.sun', 'below_horizon') }}"
-  bright: "{{ 60 if dark else 150 }}"
-  idle: "{{ 1 if dark else 10 }}"
+  lux: "{{ states('sensor.saga_light_sensor') | float(0) }}"
+  idle: >-
+    {% if dark %}1
+    {% elif lux < 10 %}1
+    {% elif lux < 100 %}15
+    {% elif lux < 500 %}40
+    {% elif lux < 2000 %}80
+    {% elif lux < 5000 %}130
+    {% else %}200{% endif %}
+  bright: "{{ [idle | int, 60 if dark else 150] | max }}"
+  message_on: "{{ states('sensor.door_message') not in ['', 'unknown', 'unavailable'] }}"
 actions:
+  # Light changes only matter when they move the level, and not while a
+  # message holds the screen bright.
+  - condition: template
+    value_template: >-
+      {{ trigger.id != 'light'
+         or (not message_on
+             and ((states('sensor.saga_screen_brightness') | int(-100)) - (idle | int)) | abs > 5) }}
   - if:
       - condition: trigger
         id: visitor
@@ -69,5 +101,4 @@ actions:
     data:
       message: command_screen_brightness_level
       data:
-        command: >-
-          {{ bright if states('sensor.door_message') not in ['', 'unknown', 'unavailable'] else idle }}
+        command: "{{ bright if message_on else idle }}"
