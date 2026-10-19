@@ -576,9 +576,23 @@ async function burst(kind) {
   } finally { shooting = false; }
 }
 
+// Installed as the "Front door" app (19 Oct) the page runs full screen; the
+// app shares this browser's storage, so a Chrome tab opened later (an old
+// watchdog link) knows the app exists and stays idle rather than fight it
+// for the camera.
+const shownAs = ["fullscreen", "standalone", "minimal-ui", "browser"]
+  .find(m => matchMedia("(display-mode: " + m + ")").matches) || "unknown";
+const asApp = shownAs !== "browser";
+
 async function live() {
   if (liveOn) return;
+  if (asApp) remembered("sagaApp", String(Date.now()));
+  else if (remembered("sagaApp")) {
+    status("Live: this is a Chrome tab, but the Front door app is installed, so the tab stays idle. Close it.", "err");
+    return;
+  }
   liveOn = true;
+  report("Live: starting (" + (asApp ? "app" : "tab") + ", " + shownAs + ")");
   wantW = 2592; wantH = 1944;
   $("live").textContent = "Live mode on";
   $("live").disabled = true;
@@ -590,7 +604,8 @@ async function live() {
     const ok = !lowBattery && track && track.readyState === "live" && ws && ws.readyState === 1;
     $("dot").className = ok ? "good" : "";
   }, 5000);
-  setInterval(() => report("Live: alive, camera " + (track && track.readyState === "live" ? "on" : "off") +
+  setInterval(() => report("Live: alive (" + (asApp ? "app" : "tab") + "), camera " +
+    (track && track.readyState === "live" ? "on" : "off") +
     ", HA " + (ws && ws.readyState === 1 ? "connected" : "not connected")), 10 * 60 * 1000);
   // Restart the camera if it is gone, or if its picture has stopped
   // changing: sensor noise makes every real frame differ a little.
