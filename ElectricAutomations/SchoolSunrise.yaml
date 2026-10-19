@@ -1,0 +1,72 @@
+# School-morning sunrise in the loft (19 Oct 2026).
+#
+# The two loft Kajplats (white spectrum, 2202-6535 K, they do transitions)
+# rise for Andy's 06:50 alarm: from 06:19, 1% at their warmest (2202 K) to
+# 100% at 4000 K by 06:50, a step a minute (31 steps) with the bulb's own
+# 60 s transition so it looks continuous. Brightness follows the square of the time, slow at first
+# like a real dawn. At 06:50 they are left on.
+#
+# School day: either child's InfoMentor "today schedule" says has_school for
+# today's date (Isolde's preschool counts: 08:00 starts either way). If
+# InfoMentor has nothing for today, input_boolean.school_day (set at 19:00
+# the evening before by automation "School Day") decides.
+#
+# Skipped if either light is already on at 06:19 (someone is up); stops,
+# leaving the lights alone, if either is turned off or dimmed below the
+# ramp.
+#
+# Deployed with ha_set_automation, id school_sunrise.
+id: school_sunrise
+alias: School morning sunrise
+description: >-
+  On school days (InfoMentor today schedule, else input_boolean.school_day)
+  the loft Kajplats rise 06:19-06:50 for the alarm: 1% at 2202 K to 100% at
+  4000 K, a step a minute with 60 s transitions. Skipped if either is already
+  on; stops if either is turned off or dimmed.
+mode: single
+triggers:
+  - trigger: time
+    at: "06:19:00"
+variables:
+  lights:
+    - light.kajplats_e14_ws_globe_806lm   # North spot kajplats
+    - light.loft_desk_kajplats            # South Spot KAJPLATS
+  steps: 30
+  k_from: 2202
+  k_to: 4000
+conditions:
+  - condition: template
+    value_template: >-
+      {% set today = now().date() | string %}
+      {% set kids = ['sensor.lyeklint_hancock_felix_today_schedule_2',
+                     'sensor.lyeklint_hancock_isolde_today_schedule_2'] %}
+      {% set known = kids | select('is_state_attr', 'date', today) | list %}
+      {% if known | count > 0 %}
+        {{ known | select('is_state_attr', 'has_school', true) | list | count > 0 }}
+      {% else %}
+        {{ is_state('input_boolean.school_day', 'on') }}
+      {% endif %}
+  - condition: template
+    value_template: "{{ lights | select('is_state', 'on') | list | count == 0 }}"
+actions:
+  - repeat:
+      sequence:
+        - variables:
+            frac: "{{ (repeat.index - 1) / steps }}"
+            pct: "{{ [1, (100 * frac ** 2) | round(0) | int] | max }}"
+            kelvin: "{{ (k_from + (k_to - k_from) * frac) | round(0) | int }}"
+        - action: light.turn_on
+          target:
+            entity_id: "{{ lights }}"
+          data:
+            brightness_pct: "{{ pct }}"
+            color_temp_kelvin: "{{ kelvin }}"
+            transition: 60
+        - delay:
+            seconds: 60
+      until:
+        - condition: template
+          value_template: >-
+            {{ repeat.index > steps
+               or lights | reject('is_state', 'on') | list | count > 0
+               or lights | map('state_attr', 'brightness') | map('int', 0) | min < pct * 2.55 - 8 }}
