@@ -1,0 +1,411 @@
+{
+ "icons": {
+  "sunny": {
+   "oled32": {
+    "file": "weather_icons/oled32/sunny.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 4,
+    "interval_ms": 140,
+    "bytes": 427
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/sunny.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 500,
+    "bytes": 178
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 600
+   }
+  },
+  "clear-night": {
+   "oled32": {
+    "file": "weather_icons/oled32/clear-night.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 6,
+    "interval_ms": 180,
+    "bytes": 309
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/clear-night.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 600,
+    "bytes": 147
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 700
+   }
+  },
+  "partlycloudy": {
+   "oled32": {
+    "file": "weather_icons/oled32/partlycloudy.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 4,
+    "interval_ms": 140,
+    "bytes": 352
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/partlycloudy.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 600,
+    "bytes": 169
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 700
+   }
+  },
+  "partlycloudy-night": {
+   "oled32": {
+    "file": "weather_icons/oled32/partlycloudy-night.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 6,
+    "interval_ms": 180,
+    "bytes": 428
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/partlycloudy-night.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 600,
+    "bytes": 140
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 700
+   }
+  },
+  "cloudy": {
+   "oled32": {
+    "file": "weather_icons/oled32/cloudy.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 8,
+    "interval_ms": 200,
+    "bytes": 597
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/cloudy.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 600,
+    "bytes": 179
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 800
+   }
+  },
+  "fog": {
+   "oled32": {
+    "file": "weather_icons/oled32/fog.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 4,
+    "interval_ms": 200,
+    "bytes": 272
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/fog.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 600,
+    "bytes": 144
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 700
+   }
+  },
+  "rainy": {
+   "oled32": {
+    "file": "weather_icons/oled32/rainy.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 6,
+    "interval_ms": 120,
+    "bytes": 368
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/rainy.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 450,
+    "bytes": 146
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 3,
+    "interval_ms": 350
+   }
+  },
+  "pouring": {
+   "oled32": {
+    "file": "weather_icons/oled32/pouring.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 6,
+    "interval_ms": 120,
+    "bytes": 414
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/pouring.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 450,
+    "bytes": 160
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 300
+   }
+  },
+  "snowy": {
+   "oled32": {
+    "file": "weather_icons/oled32/snowy.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 6,
+    "interval_ms": 120,
+    "bytes": 443
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/snowy.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 450,
+    "bytes": 152
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 4,
+    "interval_ms": 500
+   }
+  },
+  "snowy-rainy": {
+   "oled32": {
+    "file": "weather_icons/oled32/snowy-rainy.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 6,
+    "interval_ms": 120,
+    "bytes": 414
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/snowy-rainy.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 450,
+    "bytes": 151
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 4,
+    "interval_ms": 450
+   }
+  },
+  "hail": {
+   "oled32": {
+    "file": "weather_icons/oled32/hail.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 6,
+    "interval_ms": 120,
+    "bytes": 415
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/hail.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 450,
+    "bytes": 146
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 3,
+    "interval_ms": 300
+   }
+  },
+  "lightning": {
+   "oled32": {
+    "file": "weather_icons/oled32/lightning.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 4,
+    "interval_ms": 120,
+    "bytes": 279
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/lightning.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 450,
+    "bytes": 135
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 3,
+    "interval_ms": 350
+   }
+  },
+  "lightning-rainy": {
+   "oled32": {
+    "file": "weather_icons/oled32/lightning-rainy.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 6,
+    "interval_ms": 120,
+    "bytes": 461
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/lightning-rainy.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 450,
+    "bytes": 158
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 3,
+    "interval_ms": 350
+   }
+  },
+  "windy": {
+   "oled32": {
+    "file": "weather_icons/oled32/windy.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 4,
+    "interval_ms": 150,
+    "bytes": 264
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/windy.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 500,
+    "bytes": 139
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 500
+   }
+  },
+  "exceptional": {
+   "oled32": {
+    "file": "weather_icons/oled32/exceptional.gif",
+    "width": 32,
+    "height": 32,
+    "frames": 4,
+    "interval_ms": 300,
+    "bytes": 382
+   },
+   "lcd20": {
+    "file": "weather_icons/lcd20/exceptional.gif",
+    "width": 24,
+    "height": 20,
+    "frames": 2,
+    "interval_ms": 700,
+    "bytes": 177
+   },
+   "hd44780": {
+    "cells": "2x2",
+    "frames": 2,
+    "interval_ms": 700
+   }
+  }
+ },
+ "ha_conditions": {
+  "clear-night": {
+   "day": "clear-night",
+   "night": "clear-night"
+  },
+  "cloudy": {
+   "day": "cloudy",
+   "night": "cloudy"
+  },
+  "exceptional": {
+   "day": "exceptional",
+   "night": "exceptional"
+  },
+  "fog": {
+   "day": "fog",
+   "night": "fog"
+  },
+  "hail": {
+   "day": "hail",
+   "night": "hail"
+  },
+  "lightning": {
+   "day": "lightning",
+   "night": "lightning"
+  },
+  "lightning-rainy": {
+   "day": "lightning-rainy",
+   "night": "lightning-rainy"
+  },
+  "partlycloudy": {
+   "day": "partlycloudy",
+   "night": "partlycloudy-night"
+  },
+  "pouring": {
+   "day": "pouring",
+   "night": "pouring"
+  },
+  "rainy": {
+   "day": "rainy",
+   "night": "rainy"
+  },
+  "snowy": {
+   "day": "snowy",
+   "night": "snowy"
+  },
+  "snowy-rainy": {
+   "day": "snowy-rainy",
+   "night": "snowy-rainy"
+  },
+  "sunny": {
+   "day": "sunny",
+   "night": "clear-night"
+  },
+  "windy": {
+   "day": "windy",
+   "night": "windy"
+  },
+  "windy-variant": {
+   "day": "windy",
+   "night": "windy"
+  }
+ }
+}
