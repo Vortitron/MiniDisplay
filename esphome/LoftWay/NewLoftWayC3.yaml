@@ -84,6 +84,10 @@ substitutions:
 esphome:
   name: loftc3
   friendly_name: LoftC3
+  # Weather page glyphs (CGRAM slots 4-7). Needs the repo's
+  # esphome/weather_icons/ folder at /config/esphome/weather_icons/.
+  includes:
+    - weather_icons/hd44780/weather_glyphs.h
   on_boot:
     # High priority - wait for WiFi before initialising I2C sensors.
     - priority: 600
@@ -1260,6 +1264,7 @@ display:
       std::string top = "LoftC3 Display";
       std::string bottom = "Initialising...";
       const int page = id(lcd_drawn_page_index);
+      bool wx_glyph = false;  // set by the weather page
 
       if (page == 0) {
         if (id(ha_time).now().is_valid()) {
@@ -1277,23 +1282,28 @@ display:
           bottom = "from HomeAssistant";
         }
       } else if (page == 1) {
-        // Page 1 - live temps on top; D/N forecast + condition on bottom.
-        //   15:00-03:00 -> N + tonight min, otherwise D + day max.
+        // Page 1 - weather. Columns 0-13 hold the text: live temps on top,
+        // D/N forecast and condition below (15:00-03:00 -> N + tonight min,
+        // otherwise D + day max). Columns 14-15 on both rows hold a 2x2
+        // animated glyph from weather_icons/hd44780 in CGRAM slots 4-7.
+        // Slots 0-3 stay free; no other page uses CGRAM.
+        auto fmt4 = [](float v) -> std::string {
+          char b[16];
+          snprintf(b, sizeof(b), "%4.1f", v);
+          if (strlen(b) > 4) {
+            snprintf(b, sizeof(b), "%4.0f", v);  // -12.3 -> " -12"
+          }
+          return b;
+        };
         const bool out_ok = valid_float(id(outside_temperature).state,
                                         id(outside_temperature).has_state());
         const bool in_ok = valid_float(id(loft_aht10_temperature).state,
                                        id(loft_aht10_temperature).has_state());
-        char top_buf[32];
-        if (out_ok && in_ok) {
-          snprintf(top_buf, sizeof(top_buf), "Out%5.1f In%5.1f",
-                   id(outside_temperature).state, id(loft_aht10_temperature).state);
-        } else if (out_ok) {
-          snprintf(top_buf, sizeof(top_buf), "Out%5.1f In ----",
-                   id(outside_temperature).state);
-        } else {
-          snprintf(top_buf, sizeof(top_buf), "Out ---- In ----");
-        }
-        top = top_buf;
+        // "Out 7.0 In21.4": 14 columns.
+        top = std::string("Out") +
+              (out_ok ? fmt4(id(outside_temperature).state) : std::string("----")) +
+              " In" +
+              (in_ok ? fmt4(id(loft_aht10_temperature).state) : std::string("----"));
 
         bool show_night_min = false;
         if (id(ha_time).now().is_valid()) {
@@ -1308,23 +1318,66 @@ display:
         const float fc_val = show_night_min
           ? id(forecast_tonight_min).state
           : id(forecast_today_max).state;
-        std::string cond;
+        std::string raw_cond;
         if (id(openweathermap_condition).has_state()) {
-          cond = weather_abbrev(clean_text(id(openweathermap_condition).state));
+          raw_cond = clean_text(id(openweathermap_condition).state);
         }
+        const std::string cond = weather_abbrev(raw_cond);
+        // "D 10.2 pcloudy": 7 columns of forecast, 7 of condition.
         char bottom_buf[32];
         if (fc_ok) {
-          snprintf(bottom_buf, sizeof(bottom_buf), "%c %5.1fC ",
+          snprintf(bottom_buf, sizeof(bottom_buf), "%c%5.1f ",
                    show_night_min ? 'N' : 'D', fc_val);
         } else {
-          snprintf(bottom_buf, sizeof(bottom_buf), "%c  ----C ",
+          snprintf(bottom_buf, sizeof(bottom_buf), "%c ---- ",
                    show_night_min ? 'N' : 'D');
         }
         std::string bottom_line = std::string(bottom_buf) + cond;
-        if (bottom_line.size() > 16) {
-          bottom = scroll16(bottom_line);
-        } else {
-          bottom = bottom_line;
+        if (bottom_line.size() > 14) {
+          // Same scroll as scroll16, in the 14 columns left of the glyph.
+          bottom_line += "   ";
+          const size_t start = (size_t) ((now_ms / 350u) % bottom_line.size());
+          std::string out;
+          for (size_t i = 0; i < 14; i++) {
+            out.push_back(bottom_line[(start + i) % bottom_line.size()]);
+          }
+          bottom_line = out;
+        }
+        bottom = bottom_line;
+
+        // Glyph. No condition (unknown/unavailable/not yet received) -> no
+        // glyph, the two columns stay blank. Only the cells whose dots
+        // change are rewritten, so a frame step costs 0-4 CGRAM loads.
+        static uint8_t wx_cgram[4][8];
+        static bool wx_cgram_valid = false;
+        static int wx_last_icon = -1;
+        static uint32_t wx_tick = 0;
+        if (!raw_cond.empty()) {
+          const bool night = id(sun_state).has_state() &&
+                             id(sun_state).state == std::string("below_horizon");
+          const weather_glyphs::Icon icon =
+              weather_glyphs::from_condition(raw_cond, night);
+          if ((int) icon != wx_last_icon) {
+            wx_last_icon = (int) icon;
+            wx_tick = 0;
+          }
+          const weather_glyphs::IconGlyphs &g = weather_glyphs::ICONS[icon];
+          // One frame per 500 ms refresh; the slow icons (600-800 ms in
+          // the set) hold each frame for two refreshes.
+          const uint32_t ticks_per_frame = (g.interval_ms >= 600) ? 2u : 1u;
+          const uint8_t (*f)[8] = g.data[(wx_tick / ticks_per_frame) % g.frames];
+          wx_tick++;
+          for (uint8_t c = 0; c < 4; c++) {
+            if (wx_cgram_valid && memcmp(wx_cgram[c], f[c], 8) == 0) {
+              continue;
+            }
+            memcpy(wx_cgram[c], f[c], 8);
+            uint8_t buf[8];
+            memcpy(buf, f[c], 8);
+            it.loadchar(4 + c, buf);
+          }
+          wx_cgram_valid = true;
+          wx_glyph = true;
         }
       } else if (page == 2) {
         const bool t_ok = valid_float(id(loft_aht10_temperature).state,
@@ -1419,6 +1472,10 @@ display:
       std::string bottom_line = fit16(bottom);
       it.print(0, 0, top_line.c_str());
       it.print(0, 1, bottom_line.c_str());
+      if (wx_glyph) {
+        it.print(14, 0, "\x04\x05");
+        it.print(14, 1, "\x06\x07");
+      }
 
 interval:
   # Poll AHT20 after WiFi/API are stable.
