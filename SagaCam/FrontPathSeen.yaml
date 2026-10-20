@@ -10,8 +10,9 @@
 # Here: a person at 50%+ is a person. Otherwise, when it is dark (the
 # detector is weak on noisy night stacks) or the score is middling
 # (15-50%), the night stack photo goes to an AI vision model for a second
-# opinion (ai_entity below; the OpenAI account was inactive on 20 Oct, so
-# until another is set the call fails and the Saga's verdict stands).
+# opinion (ai_entity below: Claude, via the Anthropic integration, from
+# 20 Oct; the OpenAI account was inactive). If the call fails the Saga's
+# verdict stands.
 #
 # Results: input_text.frontpath_seen ("detect072009: person 83% (Saga)"),
 # input_datetime.frontpath_person_seen when it was a person, and a logbook
@@ -25,7 +26,7 @@ alias: Front Path - who is it
 description: >-
   Takes the Saga camera page's detector result for each FrontPath photo set
   (webhook <hook>_seen): a person at 50%+ is a person; when dark or unsure,
-  the night stack goes to an AI vision model for a second opinion. Writes
+  the night stack goes to an AI vision model (Claude) for a second opinion. Writes
   input_text.frontpath_seen, input_datetime.frontpath_person_seen and a
   'FrontPath seen' logbook line.
 mode: queued
@@ -37,7 +38,7 @@ triggers:
       - POST
     local_only: false
 variables:
-  ai_entity: ai_task.openai_ai_task
+  ai_entity: ai_task.claude_ai_task
   tag: "{{ trigger.json.tag | default('?') }}"
   person: "{{ trigger.json.person | default(0) | float(0) }}"
   animal: "{{ trigger.json.animal | default('') }}"

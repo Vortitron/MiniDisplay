@@ -107,7 +107,8 @@ person, and sends an unsure or night stack (input_text.frontpath_last_stack_phot
 recorded by saga_web_log) to an AI task for a second opinion. Results:
 input_text.frontpath_seen, input_datetime.frontpath_person_seen, and a
 "FrontPath seen" logbook line the gallery adds to each card's note. The AI
-task is ai_task.openai_ai_task, whose OpenAI account was inactive on 20 Oct
-(billing), so for now the call fails and the Saga's verdict stands; set
-ai_entity in the automation to another AI task to switch.
+task is ai_task.claude_ai_task (Anthropic integration, added 20 Oct; the
+key must be made inside a Console workspace, or HA's setup says "unexpected
+error"). Tested 20 Oct: empty steps "nothing", the 16 Oct 23:28 night stack
+"animal (likely fox or deer)", ~5 s a call.
 
