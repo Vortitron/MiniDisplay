@@ -176,34 +176,36 @@ actions:
               # Gold only → All
               - conditions: "{{ gold_on and not flood_on }}"
                 sequence:
-                  - action: light.turn_on
-                    continue_on_error: true
-                    target:
-                      entity_id: "{{ gold }}"
-                    data:
-                      brightness_pct: "{{ dim_pct }}"
-                      hs_color: "{{ gold_candle_hs }}"
-                  - action: light.turn_on
-                    continue_on_error: true
-                    target:
-                      entity_id: "{{ flood }}"
-                    data:
-                      brightness_pct: "{{ dim_pct }}"
-                      color_temp_kelvin: "{{ flood_warm_k }}"
+                  - parallel:
+                      - action: light.turn_on
+                        continue_on_error: true
+                        target:
+                          entity_id: "{{ gold }}"
+                        data:
+                          brightness_pct: "{{ dim_pct }}"
+                          hs_color: "{{ gold_candle_hs }}"
+                      - action: light.turn_on
+                        continue_on_error: true
+                        target:
+                          entity_id: "{{ flood }}"
+                        data:
+                          brightness_pct: "{{ dim_pct }}"
+                          color_temp_kelvin: "{{ flood_warm_k }}"
               # All → Flood only
               - conditions: "{{ gold_on and flood_on }}"
                 sequence:
-                  - action: light.turn_off
-                    continue_on_error: true
-                    target:
-                      entity_id: "{{ gold }}"
-                  - action: light.turn_on
-                    continue_on_error: true
-                    target:
-                      entity_id: "{{ flood }}"
-                    data:
-                      brightness_pct: "{{ dim_pct }}"
-                      color_temp_kelvin: "{{ flood_warm_k }}"
+                  - parallel:
+                      - action: light.turn_off
+                        continue_on_error: true
+                        target:
+                          entity_id: "{{ gold }}"
+                      - action: light.turn_on
+                        continue_on_error: true
+                        target:
+                          entity_id: "{{ flood }}"
+                        data:
+                          brightness_pct: "{{ dim_pct }}"
+                          color_temp_kelvin: "{{ flood_warm_k }}"
               # Flood only → Off
               - conditions: "{{ flood_on and not gold_on }}"
                 sequence:
@@ -234,20 +236,21 @@ actions:
       # cancels the step.)
       - conditions: "{{ press == 'long_press' and not gold_on and not flood_on }}"
         sequence:
-          - action: light.turn_on
-            continue_on_error: true
-            target:
-              entity_id: "{{ gold }}"
-            data:
-              brightness_pct: "{{ warm_hold_pct }}"
-              hs_color: "{{ gold_candle_hs }}"
-          - action: light.turn_on
-            continue_on_error: true
-            target:
-              entity_id: "{{ flood }}"
-            data:
-              brightness_pct: "{{ warm_hold_pct }}"
-              color_temp_kelvin: "{{ flood_warm_k }}"
+          - parallel:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ gold }}"
+                data:
+                  brightness_pct: "{{ warm_hold_pct }}"
+                  hs_color: "{{ gold_candle_hs }}"
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ flood }}"
+                data:
+                  brightness_pct: "{{ warm_hold_pct }}"
+                  color_temp_kelvin: "{{ flood_warm_k }}"
           - delay:
               seconds: "{{ hold_step_s }}"
           - action: light.turn_on

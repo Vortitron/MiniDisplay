@@ -238,9 +238,15 @@ class House:
 				count = int(self.render(step["repeat"]["count"], ctx))
 				for i in range(1, count + 1):
 					self.run(step["repeat"]["sequence"], {**ctx, "repeat": {"index": i}})
+			elif "parallel" in step:
+				# The model has no timing: branches run one after another.
+				for branch in step["parallel"]:
+					self.run([branch], ctx)
+			elif "sequence" in step:
+				self.run(step["sequence"], ctx)
 			elif "stop" in step:
 				raise Stop(step["stop"])
-			elif "delay" in step:
+			elif "delay" in step or "wait_template" in step:
 				pass
 			else:
 				self._service(step, ctx)

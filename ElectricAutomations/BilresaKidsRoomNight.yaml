@@ -196,36 +196,57 @@ actions:
             continue_on_error: true
             target:
               entity_id: "{{ sky }}"
+      # Each device on its own branch (20 Oct): a stand that has just lost
+      # power keeps its command waiting for a timeout (one took 40 s on
+      # 19 Oct), and in series that held up the stars, or let the next
+      # press restart the run before they were reached. The Sky Lite
+      # (Bluetooth) drops out for ~2 min every few hours; a command sent
+      # then is skipped, so it waits up to 2.5 min for it to come back.
       - conditions: "{{ press == 'multi_press_1' }}"
         sequence:
-          - action: light.turn_off
-            continue_on_error: true
-            target:
-              entity_id: "{{ living_room_lights + [spot] }}"
-          - action: light.turn_on
-            continue_on_error: true
-            target:
-              entity_id: "{{ stand }}"
-            data:
-              brightness_pct: "{{ night_stand_pct }}"
-              hs_color: "{{ candle_hs }}"
-          - action: light.turn_on
-            continue_on_error: true
-            target:
-              entity_id: "{{ sky }}"
-            data:
-              effect: "{{ sky_night_scene }}"
-              brightness_pct: "{{ sky_night_pct }}"
-          - action: switch.turn_off
-            continue_on_error: true
-            target:
-              entity_id: "{{ sky_fading }}"
+          - parallel:
+              - action: light.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ living_room_lights + [spot] }}"
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ stand }}"
+                data:
+                  brightness_pct: "{{ night_stand_pct }}"
+                  hs_color: "{{ candle_hs }}"
+              - sequence:
+                  - wait_template: "{{ states(sky) not in ['unavailable', 'unknown'] }}"
+                    timeout: "00:02:30"
+                    continue_on_timeout: true
+                  - action: light.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ sky }}"
+                    data:
+                      effect: "{{ sky_night_scene }}"
+                      brightness_pct: "{{ sky_night_pct }}"
+                  - action: switch.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ sky_fading }}"
       - conditions: "{{ press == 'multi_press_2' }}"
         sequence:
-          - action: light.turn_off
-            continue_on_error: true
-            target:
-              entity_id:
-                - "{{ stand }}"
-                - "{{ spot }}"
-                - "{{ sky }}"
+          - parallel:
+              - action: light.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ stand }}"
+              - action: light.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ spot }}"
+              - sequence:
+                  - wait_template: "{{ states(sky) not in ['unavailable', 'unknown'] }}"
+                    timeout: "00:02:30"
+                    continue_on_timeout: true
+                  - action: light.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ sky }}"
