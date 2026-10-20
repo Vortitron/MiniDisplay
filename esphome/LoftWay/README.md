@@ -17,9 +17,25 @@ The LCD rotates every 8 seconds:
 
 1. **Time/Date**
 2. **Weather**
-   - Top row: live outside (from HA) + inside (AHT20) temperatures.
-   - Bottom row: `D 12.3C pcloudy` (day max + condition) or
-     `N  8.2C rain` (night min + condition). Uses 15:00–03:00 for night min.
+   - Columns 0-13, top row: live outside (from HA) + inside (AHT20)
+     temperatures, `Out 7.0 In21.4`. A value that needs five characters
+     (below -9.9) drops its decimal: `Out -12`.
+   - Columns 0-13, bottom row: `D 10.2 pcloudy` (day max + condition) or
+     `N  3.8 rain` (night min + condition). Uses 15:00-03:00 for night min.
+     Anything longer than 14 characters scrolls.
+   - Columns 14-15, both rows: an animated 2x2 weather glyph from
+     `esphome/weather_icons/hd44780/` (Meteocons-derived art, MIT). The
+     lambda rewrites CGRAM slots 4-7 with `loadchar()` on each 500 ms
+     refresh, and only the cells whose dots change (0-4 character loads,
+     typically 2 for falling precipitation). Slow icons (sun, moon,
+     clouds, fog, exceptional) hold a frame for 1 s; rain, snow, hail, storm and wind step every 500 ms.
+     `sun.sun` below the horizon picks the night variants (`sunny` shows
+     the moon, `partlycloudy` the moon behind a cloud). With no condition
+     (unknown, unavailable or not yet received) the two columns stay
+     blank. Slots 0-3 are unused.
+   - The folder `esphome/weather_icons/` must be copied to
+     `/config/esphome/weather_icons/` on the HA box before compiling there,
+     because the YAML includes `weather_icons/hd44780/weather_glyphs.h`.
 3. **Local sensors** (AHT20 + MQ2 status)
 4. **Calendar events** — each active event shown for 4 seconds before
    advancing to the next; all events are shown before moving on.

@@ -98,6 +98,12 @@ esphome run minidisplay.yaml
 - Shows indoor/outdoor temperature and humidity
 - Updates every 10 seconds when idle
 
+### Screensaver Weather Icon
+- The screensaver (idle screen) shows an animated 24x20 weather icon in the top right corner, beside the time and price lines, from `weather.openweathermap`; `sun.sun` below the horizon picks the night variants.
+- The icons are the `lcd20` set in `esphome/weather_icons/` (included as a package). Copy that folder to `/config/esphome/weather_icons/` on Home Assistant before compiling. The 32x32 set does not fit the screensaver without covering text.
+- The icon moves with the burn-in pixel shift and stays on screen at every offset. With no weather data (unknown or unavailable) no icon is drawn.
+- A 600 ms interval steps the frames. While the icon is showing, that interval also redraws the screen and the display's own 1 s poll is paused, so the I2C bus is not written more often than needed.
+
 ### Bluetooth Proxy
 - Acts as a Bluetooth proxy for Home Assistant
 - Supports up to 2 simultaneous connections
