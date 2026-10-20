@@ -5,7 +5,11 @@
 # on the photos in the browser (MediaPipe EfficientDet-Lite0, COCO classes).
 # It posts what it found to webhook <hook>_seen:
 #   {"tag": "detect072009", "kind": "detect", "person": 0.83,
-#    "animal": "cat", "animal_score": 0.41}
+#    "animal": "cat", "animal_score": 0.41,
+#    "person_box": {"part": "b", "box": [0.41, 0.32, 0.08, 0.2]},
+#    "animal_box": {...}}
+# A box is where the best match was: in which photo of the set (a, b, c)
+# and [left, top, width, height] as fractions of the frame (21 Oct 2026).
 #
 # Here: a person at 50%+ is a person. Otherwise, when it is dark (the
 # detector is weak on noisy night stacks) or the score is middling
@@ -17,6 +21,10 @@
 # Results: input_text.frontpath_seen ("detect072009: person 83% (Saga)"),
 # input_datetime.frontpath_person_seen when it was a person, and a logbook
 # line "FrontPath seen" on input_text.frontpath_seen that the gallery reads.
+# The verdict ends with where the thing is, which the gallery circles:
+#   "detect072009: cat 41% (Saga) [b cat 0.41,0.32,0.08,0.2]"
+#   "detect221503: animal (AI: a cat on the steps) [~b animal 0.4,0.55,0.08,0.1]"
+# "~" marks the AI's box: a rough guess, on the night stack (photo b).
 #
 # The webhook id is the Saga page's hook plus "_seen"; it is not in this
 # repo (see SagaCam/README.md). Deployed with ha_set_automation, id
@@ -47,9 +55,17 @@ variables:
     {{ is_state('sun.sun', 'below_horizon')
        or states('sensor.front_walkway_frontpath_ble_processing_illuminance') | float(0) < 15 }}
   unsure: "{{ person < 0.5 and (dark or person >= 0.15) }}"
+  pbox: >-
+    {% set b = trigger.json.person_box if trigger.json.person_box is mapping else {} %}
+    {% set n = b.get('box') if b.get('box') is sequence and b.get('box') is not string else [] %}
+    {% if b.get('part') in ['a', 'b', 'c'] and n | count == 4 %}[{{ b.part }} person {{ n | map('float', 0) | map('round', 3) | join(',') }}]{% endif %}
+  abox: >-
+    {% set b = trigger.json.animal_box if trigger.json.animal_box is mapping else {} %}
+    {% set n = b.get('box') if b.get('box') is sequence and b.get('box') is not string else [] %}
+    {% if animal and b.get('part') in ['a', 'b', 'c'] and n | count == 4 %}[{{ b.part }} {{ animal }} {{ n | map('float', 0) | map('round', 3) | join(',') }}]{% endif %}
   saga_verdict: >-
-    {% if person >= 0.5 %}person {{ (person * 100) | round(0) | int }}% (Saga)
-    {% elif animal and animal_score >= 0.4 %}{{ animal }} {{ (animal_score * 100) | round(0) | int }}% (Saga)
+    {% if person >= 0.5 %}person {{ (person * 100) | round(0) | int }}% (Saga) {{ pbox }}
+    {% elif animal and animal_score >= 0.4 %}{{ animal }} {{ (animal_score * 100) | round(0) | int }}% (Saga) {{ abox }}
     {% else %}nothing (Saga, person {{ (person * 100) | round(0) | int }}%){% endif %}
 actions:
   - choose:
@@ -71,7 +87,11 @@ actions:
                 be dark, blurry or noisy. Is there a person anywhere in it? If
                 not, is there an animal (cat, dog, fox, deer, bird)? Answer
                 verdict person, animal or nothing, and in 'what' say in a few
-                words what you see.
+                words what you see. If you found a person or animal, in 'box'
+                say where it is as four numbers: left, top, width, height,
+                each a fraction of the image width or height from 0 to 1
+                (for example 0.40,0.55,0.08,0.12); otherwise leave 'box'
+                empty.
               structure:
                 verdict:
                   required: true
@@ -82,15 +102,22 @@ actions:
                   required: true
                   selector:
                     text: {}
+                box:
+                  required: false
+                  selector:
+                    text: {}
               attachments:
                 - media_content_id: "media-source://media_source/frontpath/{{ states('input_text.frontpath_last_stack_photo') }}"
                   media_content_type: image/jpeg
           - variables:
               verdict: >-
                 {% set v = ai.data.verdict if ai is defined and ai.data is defined and ai.data else '' %}
+                {% set n = (ai.data.get('box') or '') | string | regex_findall('[0-9]*[.]?[0-9]+') | map('float') | list if v else [] %}
+                {% set aibox = '[~b ' ~ v ~ ' ' ~ (n[:4] | map('round', 2) | join(',')) ~ ']'
+                   if n | count >= 4 and n[:4] | max <= 1 and n[2] > 0 and n[3] > 0 else '' %}
                 {% if person >= 0.5 %}{{ saga_verdict }}
-                {% elif v == 'person' %}person (AI: {{ ai.data.what | truncate(60) }})
-                {% elif v == 'animal' %}animal (AI: {{ ai.data.what | truncate(60) }})
+                {% elif v == 'person' %}person (AI: {{ ai.data.what | truncate(60) }}) {{ aibox }}
+                {% elif v == 'animal' %}animal (AI: {{ ai.data.what | truncate(60) }}) {{ aibox }}
                 {% elif v == 'nothing' %}nothing (AI, Saga person {{ (person * 100) | round(0) | int }}%)
                 {% else %}{{ saga_verdict }}{% endif %}
           - action: input_text.set_value

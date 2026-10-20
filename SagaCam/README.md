@@ -112,3 +112,11 @@ key must be made inside a Console workspace, or HA's setup says "unexpected
 error"). Tested 20 Oct: empty steps "nothing", the 16 Oct 23:28 night stack
 "animal (likely fox or deer)", ~5 s a call.
 
+
+Where it is (20 Oct evening): the page also sends where the best person and
+animal were (`person_box` / `animal_box`: photo a/b/c and [left, top,
+width, height] as fractions), and the AI is asked for a rough box too. The
+verdict ends with them, e.g. "cat 41% (Saga) [b cat 0.41,0.32,0.08,0.2]",
+"~b" for the AI's guess. The gallery circles them on the card and the large
+photo: solid for the Saga, dashed for the AI, faint on the set's other
+photos. Only photos from then on have boxes.

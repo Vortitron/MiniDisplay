@@ -26,7 +26,9 @@
   Path Trigger gates at that moment (history), or "radar burst" for a test
   shot that frontpath_burst_photo took (logbook). From 20 Oct the note also
   says who the photo check found (person / cat / no one; logbook "FrontPath
-  seen"), and the second row of buttons filters on it.
+  seen"), and the second row of buttons filters on it. Where the check found
+  it is circled on the photos (from 21 Oct): solid for the Saga's detector,
+  dashed for the AI's rough guess, faint on the other photos of the set.
 -->
 <style>
   :root {
@@ -61,6 +63,15 @@
   .card .who.animal { color: var(--warn); }
   .card .who.none { color: var(--muted); font-weight: 400; }
   .card .why { color: var(--muted); font-size: 12px; }
+  .card .pic { position: relative; overflow: hidden; }
+  .mark { position: absolute; border: 2px solid #81c995; border-radius: 50%; pointer-events: none;
+          box-shadow: 0 0 0 1px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.6); }
+  .mark.animal { border-color: var(--warn); }
+  .mark.ai { border-style: dashed; }
+  .mark.other { opacity: .45; }
+  .mark span { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 2px;
+               font-size: 12px; white-space: nowrap; background: rgba(0,0,0,.65); color: #fff; padding: 0 5px; border-radius: 3px; }
+  #marks { position: absolute; pointer-events: none; }
   .lb { position: fixed; inset: 0; background: rgba(0,0,0,.94); display: none; flex-direction: column; z-index: 5; }
   .lb.open { display: flex; }
   .lb .bar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; flex-wrap: wrap; }
@@ -112,6 +123,7 @@
   </div>
   <div class="stage">
     <img id="big" alt="">
+    <div id="marks"></div>
     <button class="side l" id="sideL" aria-label="Previous"></button>
     <button class="side r" id="sideR" aria-label="Next"></button>
   </div>
@@ -134,6 +146,21 @@ let events = [];      // newest first: {key, date, time, kind, why, photos: [{fi
 let flat = [];        // every photo in display order, for Prev / Next
 let cur = -1, filter = "all", who = "all", days = [], day = "", notes = {};
 // "person 83% (Saga)" / "cat 61% (Saga)" / "animal (AI: ...)" / "nothing ..."
+// Where it was, at the end of the verdict: "[b cat 0.41,0.32,0.08,0.2]"
+// (photo, what, left, top, width, height as fractions); "~b" is the AI's.
+const BOX = /\s*\[(~?)([abc]) ([a-z ]+?) ([\d.]+),([\d.]+),([\d.]+),([\d.]+)\]/g;
+const boxesOf = v => [...v.matchAll(BOX)].map(m => ({ ai: !!m[1], part: m[2], label: m[3],
+  x: +m[4], y: +m[5], w: +m[6], h: +m[7] }));
+// An ellipse a little bigger than the box, so the thing itself stays visible.
+function marks(boxes, part, labels) {
+  return (boxes || []).map(b => {
+    const w = Math.max(b.w * 1.5, .04), h = Math.max(b.h * 1.5, .04);
+    const x = b.x + b.w / 2 - w / 2, y = b.y + b.h / 2 - h / 2;
+    const cls = ["mark", b.label === "person" ? "person" : "animal", b.ai ? "ai" : "", b.part !== part ? "other" : ""].join(" ");
+    const tip = labels ? `<span>${b.label}${b.ai ? " (AI, rough)" : ""}${b.part !== part ? " in photo " + b.part : ""}</span>` : "";
+    return `<div class="${cls}" style="left:${x * 100}%;top:${y * 100}%;width:${w * 100}%;height:${h * 100}%">${tip}</div>`;
+  }).join("");
+}
 const whoOf = v => !v ? "" : /^person/.test(v) ? "person" : /^(nothing|no one)/.test(v) ? "none" : "animal";
 const WHO = { person: "person", animal: "animal", none: "no one" };
 
@@ -229,6 +256,7 @@ async function load() {
   try { notes = JSON.parse(localStorage.getItem("galleryNotes2") || "{}"); } catch (e) {}
   for (const e of events) if (notes[e.key]) {
     e.why = notes[e.key].why; e.kind = notes[e.key].kind; e.seen = notes[e.key].seen || "";
+    e.boxes = notes[e.key].boxes || [];
   }
   days = [...new Set(events.map(e => e.date))];          // newest first
   const want = (location.hash.match(/\d{4}-\d{2}-\d{2}/) || [""])[0].replace(/-/g, "");
@@ -276,7 +304,8 @@ async function showDay(d) {
       end_time: new Date(Math.min(t1 * 1000 + 120000, Date.now())).toISOString(), entity_ids: [SEEN] });
     for (const x of lb) {
       const m = (x.message || "").match(/^([a-z]+\d{6}): (.+)$/);
-      if (m && x.name === "FrontPath seen") seenBy[m[1]] = m[2].replace(/ \(Saga.*\)$/, "").replace(/^nothing.*/, "no one");
+      if (m && x.name === "FrontPath seen") seenBy[m[1]] = { boxes: boxesOf(m[2]),
+        text: m[2].replace(BOX, "").replace(/ \(Saga.*\)$/, "").replace(/^nothing.*/, "no one") };
     }
   } catch (e) {}
   try {
@@ -289,18 +318,19 @@ async function showDay(d) {
   const recent = Date.now() / 1000 - 120;   // the newest may not be logged yet
   for (const e of todo) {
     const t = when(e.date, e.time);
-    const seenNote = seenBy[e.kind + e.time];
+    const seen = seenBy[e.kind + e.time], seenNote = seen && seen.text;
     e.seen = whoOf(seenNote);
+    e.boxes = seen ? seen.boxes : [];
     if (e.kind === "detect" && gotTrig) {
       let best = null;
       for (const x of trig) if (Math.abs(x.t - t) <= 6 && (!best || Math.abs(x.t - t) < Math.abs(best.t - t))) best = x;
       if (best) e.why = "gates " + best.s;
       if (seenNote) e.why = (e.why ? e.why + " · " : "") + seenNote;
-      if (t < recent) notes[e.key] = { why: e.why, kind: e.kind, seen: e.seen };
+      if (t < recent) notes[e.key] = { why: e.why, kind: e.kind, seen: e.seen, boxes: e.boxes };
     } else if (e.kind === "test" && gotBursts) {
       if (bursts.some(b => Math.abs(b - t) <= 15)) { e.kind = "burst"; e.why = "every gate lit at once"; }
       if (seenNote) e.why = (e.why ? e.why + " · " : "") + seenNote;
-      if (t < recent) notes[e.key] = { why: e.why, kind: e.kind, seen: e.seen };
+      if (t < recent) notes[e.key] = { why: e.why, kind: e.kind, seen: e.seen, boxes: e.boxes };
     }
   }
   try { localStorage.setItem("galleryNotes2", JSON.stringify(notes)); } catch (e) {}
@@ -326,7 +356,7 @@ function render() {
     e.photos.forEach(p => flat.push({ e, p }));
     const card = document.createElement("div");
     card.className = "card";
-    card.innerHTML = `<img class="thumb" loading="lazy" alt="">
+    card.innerHTML = `<div class="pic"><img class="thumb" loading="lazy" alt="">${marks(e.boxes, e.photos[0].part, false)}</div>
       <div class="meta"><span class="time">${hms(e.time)}</span>
       <span class="kind ${e.kind}"> · ${KIND[e.kind]}</span>
       ${e.seen ? `<span class="who ${e.seen}"> · ${WHO[e.seen]}</span>` : ""}
@@ -358,9 +388,12 @@ async function open(i) {
   $("lb").classList.add("open");
   $("cap").innerHTML = `${ymd(e.date)} ${hms(e.time)} · ${KIND[e.kind]}${e.why ? " · " + e.why : ""}
     <small>${p.part ? "(" + p.part + ") " : ""}${p.how}, ${p.size} · ${i + 1} of ${flat.length}</small>`;
+  $("marks").innerHTML = "";
   const u = await url(p);
   if (cur !== i) return;
+  $("marks").innerHTML = marks(e.boxes, p.part, true);
   $("big").src = u;
+  placeMarks();
   $("open").href = u;
   const strip = $("strip");
   strip.innerHTML = "";
@@ -374,6 +407,17 @@ async function open(i) {
   // Warm the next photo so Next is instant.
   if (flat[i + 1]) url(flat[i + 1].p).then(v => { new Image().src = v; });
 }
+// The marks layer covers exactly the photo as shown (object-fit: contain).
+function placeMarks() {
+  const im = $("big"), mk = $("marks");
+  if (!im.naturalWidth) { mk.style.width = "0"; return; }
+  const sc = Math.min(im.clientWidth / im.naturalWidth, im.clientHeight / im.naturalHeight);
+  const w = im.naturalWidth * sc, h = im.naturalHeight * sc;
+  Object.assign(mk.style, { left: im.offsetLeft + (im.clientWidth - w) / 2 + "px",
+    top: im.offsetTop + (im.clientHeight - h) / 2 + "px", width: w + "px", height: h + "px" });
+}
+$("big").addEventListener("load", placeMarks);
+window.addEventListener("resize", placeMarks);
 function close() { $("lb").classList.remove("open"); cur = -1; }
 $("older").onclick = () => showDay(days[days.indexOf(day) + 1]);
 $("newer").onclick = () => showDay(days[days.indexOf(day) - 1]);

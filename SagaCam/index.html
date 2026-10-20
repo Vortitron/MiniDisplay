@@ -573,14 +573,14 @@ async function burst(kind) {
   const blobs = [];
   try {
     await shoot(tag + "-a", "frame");
-    if (lastBlob) blobs.push(lastBlob);
+    if (lastBlob) blobs.push({ part: "a", blob: lastBlob });
     report(`Live: ${kind} ${tag}, gates: ${why || "?"}`);
     await sleep(500);
     await shoot(tag + "-b", "stack");
-    if (lastBlob) blobs.push(lastBlob);
+    if (lastBlob) blobs.push({ part: "b", blob: lastBlob });
     await sleep(2000);
     await shoot(tag + "-c", "frame");
-    if (lastBlob) blobs.push(lastBlob);
+    if (lastBlob) blobs.push({ part: "c", blob: lastBlob });
   } finally { shooting = false; }
   if (blobs.length) seen(tag, kind, blobs);
 }
@@ -589,6 +589,9 @@ async function burst(kind) {
 // classes) run here on the photos, about 15 MB downloaded once and then
 // cached. The best person and animal scores over the set go to webhook
 // <hook>_seen; HA decides, and asks an AI model about unsure night photos.
+// With each best score goes where it was: the photo (a/b/c) and its box as
+// fractions of the frame [left, top, width, height] (all three photos have
+// the same view), so the gallery can draw it.
 const ANIMALS = ["cat", "dog", "bird", "horse", "sheep", "cow", "bear"];
 let detector = null, detectorLoading = null;
 function getDetector() {
@@ -609,20 +612,24 @@ function getDetector() {
   return detectorLoading;
 }
 async function seen(tag, kind, blobs) {
-  let person = 0, animal = "", animalScore = 0;
+  let person = 0, animal = "", animalScore = 0, personBox = null, animalBox = null;
   try {
     const d = await getDetector();
-    for (const blob of blobs) {
+    for (const { part, blob } of blobs) {
       const bmp = await createImageBitmap(blob, { resizeWidth: 960, resizeHeight: 720 });
       const res = d.detect(bmp);
       bmp.close();
-      for (const det of res.detections || [])
+      for (const det of res.detections || []) {
+        const bb = det.boundingBox || {};
+        const box = { part, box: [bb.originX / 960, bb.originY / 720, bb.width / 960, bb.height / 720]
+          .map(v => Math.round(Math.min(Math.max(v || 0, 0), 1) * 1000) / 1000) };
         for (const c of det.categories || []) {
-          if (c.categoryName === "person") person = Math.max(person, c.score);
+          if (c.categoryName === "person" && c.score > person) { person = c.score; personBox = box; }
           else if (ANIMALS.includes(c.categoryName) && c.score > animalScore) {
-            animalScore = c.score; animal = c.categoryName;
+            animalScore = c.score; animal = c.categoryName; animalBox = box;
           }
         }
+      }
     }
   } catch (e) { return; }   // no detector: no verdict, as before
   const id = hook();
@@ -630,7 +637,8 @@ async function seen(tag, kind, blobs) {
   try {
     await fetch("/api/webhook/" + encodeURIComponent(id + "_seen"), {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag, kind, person: +person.toFixed(3), animal, animal_score: +animalScore.toFixed(3) }),
+      body: JSON.stringify({ tag, kind, person: +person.toFixed(3), animal, animal_score: +animalScore.toFixed(3),
+        person_box: personBox, animal_box: animalBox }),
     });
   } catch (e) {}
 }
