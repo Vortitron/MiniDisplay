@@ -6,3 +6,4 @@ assets/c__Users_Nutzer_AppData_Roaming_Cursor_User_workspaceStorage_3b39cd141aff
 
 __pycache__/
 *.pyc
+.env
