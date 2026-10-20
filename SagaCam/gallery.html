@@ -109,6 +109,11 @@ const $ = id => document.getElementById(id);
 const FOLDER = "media-source://media_source/frontpath/.";
 const THUMBS = "media-source://media_source/frontpath/thumbs";
 const WHY = "sensor.front_walkway_frontpath_ble_processing_path_trigger";
+// From 20 Oct the camera follows Path Motion, whose trigger says why.
+const WHY2 = "sensor.front_walkway_frontpath_ble_processing_path_motion_trigger";
+// The Saga's person check (automation frontpath_seen), one logbook line per
+// photo set: "detect072009: person 83% (Saga)".
+const SEEN = "input_text.frontpath_seen";
 let ws, nextId = 1;
 const pending = new Map();
 let events = [];      // newest first: {key, date, time, kind, why, photos: [{file, id, part, label, url}]}
@@ -237,13 +242,23 @@ async function showDay(d) {
   const t0 = Math.min(...todo.map(e => when(e.date, e.time))) - 60;
   const t1 = Math.max(...todo.map(e => when(e.date, e.time))) + 60;
   const span = { start_time: new Date(t0 * 1000).toISOString(), end_time: new Date(Math.min(t1 * 1000, Date.now())).toISOString() };
-  let trig = [], bursts = [], gotTrig = false, gotBursts = false;
+  let trig = [], bursts = [], gotTrig = false, gotBursts = false, seenBy = {};
   try {
-    // Why each detection fired: the Path Trigger at that moment.
-    const h = await call({ type: "history/history_during_period", ...span, entity_ids: [WHY],
+    // Why each detection fired: the Path (Motion) Trigger at that moment.
+    const h = await call({ type: "history/history_during_period", ...span, entity_ids: [WHY, WHY2],
       minimal_response: true, no_attributes: true, significant_changes_only: false });
-    trig = (h[WHY] || []).map(x => ({ t: x.lu || x.lc, s: x.s }));
+    trig = [...(h[WHY] || []), ...(h[WHY2] || [])].map(x => ({ t: x.lu || x.lc, s: x.s }))
+      .filter(x => x.s && x.s !== "unknown" && x.s !== "unavailable");
     gotTrig = true;
+  } catch (e) {}
+  try {
+    // Who it was, from the person check (a little after the photos).
+    const lb = await call({ type: "logbook/get_events", ...span,
+      end_time: new Date(Math.min(t1 * 1000 + 120000, Date.now())).toISOString(), entity_ids: [SEEN] });
+    for (const x of lb) {
+      const m = (x.message || "").match(/^([a-z]+\d{6}): (.+)$/);
+      if (m && x.name === "FrontPath seen") seenBy[m[1]] = m[2].replace(/ \(Saga.*\)$/, "").replace(/^nothing.*/, "no one");
+    }
   } catch (e) {}
   try {
     // Test shots that frontpath_burst_photo took (its logbook line is
@@ -255,13 +270,16 @@ async function showDay(d) {
   const recent = Date.now() / 1000 - 120;   // the newest may not be logged yet
   for (const e of todo) {
     const t = when(e.date, e.time);
+    const seenNote = seenBy[e.kind + e.time];
     if (e.kind === "detect" && gotTrig) {
       let best = null;
       for (const x of trig) if (Math.abs(x.t - t) <= 6 && (!best || Math.abs(x.t - t) < Math.abs(best.t - t))) best = x;
       if (best) e.why = "gates " + best.s;
+      if (seenNote) e.why = (e.why ? e.why + " · " : "") + seenNote;
       if (t < recent) notes[e.key] = { why: e.why, kind: e.kind };
     } else if (e.kind === "test" && gotBursts) {
       if (bursts.some(b => Math.abs(b - t) <= 15)) { e.kind = "burst"; e.why = "every gate lit at once"; }
+      if (seenNote) e.why = (e.why ? e.why + " · " : "") + seenNote;
       if (t < recent) notes[e.key] = { why: e.why, kind: e.kind };
     }
   }

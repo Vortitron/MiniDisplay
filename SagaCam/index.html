@@ -493,7 +493,11 @@ async function autoRun() {
 
 // ---- Live mode -----------------------------------------------------------
 const DETECT = "binary_sensor.frontpath_ble_processing_path_person_detected";
-const WHY = "sensor.front_walkway_frontpath_ble_processing_path_trigger";
+// Path Motion (20 Oct): FrontPath's twitchy sensor, for this camera only. It
+// fires for cats and the tree too; each photo set is checked for a person
+// below (classify) and the verdict goes to HA (automation frontpath_seen).
+const MOTION = "binary_sensor.front_walkway_frontpath_ble_processing_path_motion";
+const WHY = "sensor.front_walkway_frontpath_ble_processing_path_motion_trigger";
 const TEST = "input_button.saga_cam_test_shot";
 const RELOAD = "input_button.saga_cam_reload";
 let ws = null, wsId = 1, liveOn = false, why = "", lastShot = 0, shooting = false;
@@ -518,7 +522,7 @@ function connect() {
     else if (m.type === "auth_invalid") { haStatus("token refused", "err"); report("Live: Home Assistant refused the token"); ws.close(); }
     else if (m.type === "auth_ok") {
       haStatus("connected, watching", "ok");
-      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, WHY, TEST, RELOAD] }));
+      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, MOTION, WHY, TEST, RELOAD] }));
       report("Live: connected to Home Assistant, watching for detections");
     } else if (m.type === "event" && m.event) onEntities(m.event);
   };
@@ -535,7 +539,7 @@ function onEntities(e) {
     const s = ch["+"] && ch["+"].s;
     if (s === undefined) continue;
     if (id === WHY) why = s;
-    else if (id === DETECT && s === "on") burst("detect");
+    else if ((id === DETECT || id === MOTION) && s === "on") burst("detect");
     else if (id === TEST) burst("test");
     // Pressed after the page is updated: reload in this tab, so no second
     // tab ends up fighting this one for the camera.
@@ -566,14 +570,69 @@ async function burst(kind) {
   if (document.hidden || shooting || Date.now() - lastShot < 15000) return;
   shooting = true; lastShot = Date.now();
   const tag = kind + hhmmss();
+  const blobs = [];
   try {
     await shoot(tag + "-a", "frame");
+    if (lastBlob) blobs.push(lastBlob);
     report(`Live: ${kind} ${tag}, gates: ${why || "?"}`);
     await sleep(500);
     await shoot(tag + "-b", "stack");
+    if (lastBlob) blobs.push(lastBlob);
     await sleep(2000);
     await shoot(tag + "-c", "frame");
+    if (lastBlob) blobs.push(lastBlob);
   } finally { shooting = false; }
+  if (blobs.length) seen(tag, kind, blobs);
+}
+
+// Who is it: an object detector (MediaPipe EfficientDet-Lite0, COCO
+// classes) run here on the photos, about 15 MB downloaded once and then
+// cached. The best person and animal scores over the set go to webhook
+// <hook>_seen; HA decides, and asks an AI model about unsure night photos.
+const ANIMALS = ["cat", "dog", "bird", "horse", "sheep", "cow", "bear"];
+let detector = null, detectorLoading = null;
+function getDetector() {
+  if (detector) return Promise.resolve(detector);
+  if (!detectorLoading) detectorLoading = (async () => {
+    const base = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+    const vision = await import(base + "/vision_bundle.mjs");
+    const files = await vision.FilesetResolver.forVisionTasks(base + "/wasm");
+    detector = await vision.ObjectDetector.createFromOptions(files, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite",
+        delegate: "CPU",
+      },
+      runningMode: "IMAGE", scoreThreshold: 0.1, maxResults: 10,
+    });
+    return detector;
+  })().catch(e => { detectorLoading = null; report("Live: detector did not load: " + e.message); throw e; });
+  return detectorLoading;
+}
+async function seen(tag, kind, blobs) {
+  let person = 0, animal = "", animalScore = 0;
+  try {
+    const d = await getDetector();
+    for (const blob of blobs) {
+      const bmp = await createImageBitmap(blob, { resizeWidth: 960, resizeHeight: 720 });
+      const res = d.detect(bmp);
+      bmp.close();
+      for (const det of res.detections || [])
+        for (const c of det.categories || []) {
+          if (c.categoryName === "person") person = Math.max(person, c.score);
+          else if (ANIMALS.includes(c.categoryName) && c.score > animalScore) {
+            animalScore = c.score; animal = c.categoryName;
+          }
+        }
+    }
+  } catch (e) { return; }   // no detector: no verdict, as before
+  const id = hook();
+  if (!id) return;
+  try {
+    await fetch("/api/webhook/" + encodeURIComponent(id + "_seen"), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag, kind, person: +person.toFixed(3), animal, animal_score: +animalScore.toFixed(3) }),
+    });
+  } catch (e) {}
 }
 
 // Installed as the "Front door" app (19 Oct) the page runs full screen; the
@@ -600,6 +659,7 @@ async function live() {
   $("dash").src = "/" + (param("dash") || "front-door/door").replace(/_/g, "-");
   await start();
   connect();
+  getDetector().catch(() => {});   // load it now, not at the first visitor
   setInterval(() => {
     const ok = !lowBattery && track && track.readyState === "live" && ws && ws.readyState === 1;
     $("dot").className = ok ? "good" : "";

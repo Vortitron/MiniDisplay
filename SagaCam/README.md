@@ -94,3 +94,20 @@ not in the manifest; the page keeps it in the browser (`sagaHook`) from the
 first visit with `#hook=`, and the installed app shares that storage. The
 service worker only passes the app's own files through (no caching; the
 /api webhook and websocket are untouched). HA stays the Saga's Home app.
+
+Who is it (20 Oct): FrontPath now has a twitchy "Path Motion" sensor
+(binary_sensor.front_walkway_frontpath_ble_processing_path_motion) beside
+the unchanged Path Person Detected that drives the lights; the camera page
+photographs every Path Motion (cats and the tree included) and runs an
+object detector on the photo set in the browser (MediaPipe
+EfficientDet-Lite0 from jsDelivr / Google storage, loaded once at live
+start). The best person and animal scores go to webhook `<hook>_seen`;
+automation `frontpath_seen` (FrontPathSeen.yaml) calls a person at 50%+ a
+person, and sends an unsure or night stack (input_text.frontpath_last_stack_photo,
+recorded by saga_web_log) to an AI task for a second opinion. Results:
+input_text.frontpath_seen, input_datetime.frontpath_person_seen, and a
+"FrontPath seen" logbook line the gallery adds to each card's note. The AI
+task is ai_task.openai_ai_task, whose OpenAI account was inactive on 20 Oct
+(billing), so for now the call fails and the Saga's verdict stands; set
+ai_entity in the automation to another AI task to switch.
+

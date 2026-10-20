@@ -83,6 +83,15 @@ text_sensor:
     entity_category: diagnostic
     icon: mdi:target-account
     update_interval: never
+  # What set off Path Motion (20 Oct): "near S1 52 D1 47" for the both-radars
+  # check beside the box, "door ..." for the 2-of-4 door rule, otherwise the
+  # same gates as Path Trigger.
+  - platform: template
+    name: "Path Motion Trigger"
+    id: path_motion_trigger
+    entity_category: diagnostic
+    icon: mdi:motion-sensor
+    update_interval: never
   # Changes only, as for person_position above.
   - id: !extend active_gate_sensor
     filters:
@@ -253,6 +262,18 @@ binary_sensor:
       if (id(path_eng_ms) != 0 && millis() - id(path_eng_ms) < 5000) return id(path_person_on);
       const bool recent = id(person_confirm_ms) != 0 && millis() - id(person_confirm_ms) < 20000;
       return id(person_detected).state && recent;
+  # Path Motion (20 Oct): twitchy on purpose, for the door camera, which then
+  # checks its photo for a person. Path Person Detected (above) stays as it
+  # was for the lights. On for 20 s when Path Person Detected's rule fires,
+  # or the door side has 2 lit seconds in 4, or the 0.75-1.5 m gate is 45+
+  # on both radars at once (someone right beside the box, as Andy walking
+  # past at 07:59 on 20 Oct, but cats too: replayed, ~20 extra a night).
+  - platform: template
+    name: "Path Motion"
+    id: path_motion
+    device_class: motion
+    lambda: |-
+      return id(path_eng_ms) != 0 && millis() - id(path_eng_ms) < 5000 && id(path_motion_on);
   # `diverted` is worked out in Home Assistant (JourneyTime.yaml): true when
   # a journey leaves its usual Gamla E4 for the E4. The pool line stands in
   # for a regular drive that goes that way.
@@ -295,6 +316,11 @@ globals:
   # Per-gate rule (1 s interval): its verdict, and millis() of the last
   # second that had engineering frames. 0 = never.
   - id: path_person_on
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Path Motion: the twitchy one, for the door camera only.
+  - id: path_motion_on
     type: bool
     restore_value: no
     initial_value: 'false'
@@ -575,7 +601,10 @@ interval:
           // else), probably a cat, and set it off 20 times between 23:00 and
           // 06:00. Replayed over both nights: 2 + 13 false, the walk caught.
           // Interference lights every gate on both radars together; a
-          // person makes a track a gate or two wide. So ignore 40 s, and
+          // person makes a track a gate or two wide. So ignore until 8 s
+          // after the last such second (40 s until 20 Oct: bursts last ~3 s,
+          // and the long blind spot hid a person walking out at 08:22; the
+          // 19-20 Oct night replayed the same 9 detections either way), and
           // learn nothing, when 5+ gates on a radar reach 40, when 7+ of
           // the 14 gates 2-8 rise 8 over their normal at once, or when 4+
           // near gates light together.
@@ -616,9 +645,9 @@ interval:
             if (n40 >= 5) strong++;
           }
           if (strong > 0 || (radars > 0 && raised >= (radars == 2 ? 7 : 4)))
-            burst_until = now + 40;
+            burst_until = now + 8;
           char why[64] = "";
-          int lit = 0;
+          int lit = 0, dlit = 0;
           bool spike = false;
           if ((int32_t) (now - burst_until) >= 0) {
             for (int r = 0; r < 2; r++) {
@@ -631,13 +660,14 @@ interval:
                 if (mx[r][g] >= std::max(ref + 30, 50)) spike = true;
                 if (mx[r][g] >= std::max(ref + 12, r == 0 ? 40 : 25)) {
                   lit++;
+                  if (r == 1) dlit++;
                   const size_t n = strlen(why);
                   snprintf(why + n, sizeof(why) - n, "%s%c%d %d/%d", n ? " " : "",
                            r == 0 ? 'S' : 'D', g, mx[r][g], ref);
                 }
               }
             }
-            if (lit >= 4) { burst_until = now + 40; lit = 0; spike = false; }
+            if (lit >= 4) { burst_until = now + 8; lit = 0; dlit = 0; spike = false; }
           }
           cand = lit > 0 ? cand + 1 : 0;
           if (spike) cand = std::max(cand, 3);
@@ -649,6 +679,30 @@ interval:
             last_lit = now;
           }
           if (id(path_person_on) && now - last_lit > 20) id(path_person_on) = false;
+
+          // Path Motion: the rule above, or door 2 lit seconds in 4, or near
+          // the box on both radars (gate 1, 45+), never inside a burst.
+          static uint32_t door_lit[4] = {0, 0, 0, 0};
+          static int door_i = 0;
+          static uint32_t motion_last = 0;
+          if (dlit > 0) { door_lit[door_i] = now; door_i = (door_i + 1) % 4; }
+          int door_recent = 0;
+          for (int i = 0; i < 4; i++)
+            if (door_lit[i] != 0 && now - door_lit[i] < 4) door_recent++;
+          const bool calm = (int32_t) (now - burst_until) >= 0;
+          const bool near = calm && have[0] && have[1] && mx[0][1] >= 45 && mx[1][1] >= 45;
+          if (cand >= 3 || door_recent >= 2 || near) {
+            if (!id(path_motion_on)) {
+              id(path_motion_on) = true;
+              char mw[64];
+              if (cand >= 3) snprintf(mw, sizeof(mw), "%s", why);
+              else if (door_recent >= 2) snprintf(mw, sizeof(mw), "door %s", why);
+              else snprintf(mw, sizeof(mw), "near S1 %d D1 %d", mx[0][1], mx[1][1]);
+              id(path_motion_trigger).publish_state(mw);
+            }
+            motion_last = now;
+          }
+          if (id(path_motion_on) && now - motion_last > 20) id(path_motion_on) = false;
 
           for (int i = 0; i < 9; i++) {
             id(s1_m_max)[i] = 0; id(s1_s_sum)[i] = 0;

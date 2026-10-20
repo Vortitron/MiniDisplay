@@ -1,0 +1,133 @@
+# Who set off the path: the Saga's verdict on each photo set (20 Oct 2026).
+#
+# FrontPath's Path Motion is twitchy on purpose (cats, the tree), so the
+# Saga camera page photographs every Path Motion and runs an object detector
+# on the photos in the browser (MediaPipe EfficientDet-Lite0, COCO classes).
+# It posts what it found to webhook <hook>_seen:
+#   {"tag": "detect072009", "kind": "detect", "person": 0.83,
+#    "animal": "cat", "animal_score": 0.41}
+#
+# Here: a person at 50%+ is a person. Otherwise, when it is dark (the
+# detector is weak on noisy night stacks) or the score is middling
+# (15-50%), the night stack photo goes to an AI vision model for a second
+# opinion (ai_entity below; the OpenAI account was inactive on 20 Oct, so
+# until another is set the call fails and the Saga's verdict stands).
+#
+# Results: input_text.frontpath_seen ("detect072009: person 83% (Saga)"),
+# input_datetime.frontpath_person_seen when it was a person, and a logbook
+# line "FrontPath seen" on input_text.frontpath_seen that the gallery reads.
+#
+# The webhook id is the Saga page's hook plus "_seen"; it is not in this
+# repo (see SagaCam/README.md). Deployed with ha_set_automation, id
+# frontpath_seen.
+id: frontpath_seen
+alias: Front Path - who is it
+description: >-
+  Takes the Saga camera page's detector result for each FrontPath photo set
+  (webhook <hook>_seen): a person at 50%+ is a person; when dark or unsure,
+  the night stack goes to an AI vision model for a second opinion. Writes
+  input_text.frontpath_seen, input_datetime.frontpath_person_seen and a
+  'FrontPath seen' logbook line.
+mode: queued
+max: 10
+triggers:
+  - trigger: webhook
+    webhook_id: SAGA_HOOK_seen
+    allowed_methods:
+      - POST
+    local_only: false
+variables:
+  ai_entity: ai_task.openai_ai_task
+  tag: "{{ trigger.json.tag | default('?') }}"
+  person: "{{ trigger.json.person | default(0) | float(0) }}"
+  animal: "{{ trigger.json.animal | default('') }}"
+  animal_score: "{{ trigger.json.animal_score | default(0) | float(0) }}"
+  dark: >-
+    {{ is_state('sun.sun', 'below_horizon')
+       or states('sensor.front_walkway_frontpath_ble_processing_illuminance') | float(0) < 15 }}
+  unsure: "{{ person < 0.5 and (dark or person >= 0.15) }}"
+  saga_verdict: >-
+    {% if person >= 0.5 %}person {{ (person * 100) | round(0) | int }}% (Saga)
+    {% elif animal and animal_score >= 0.4 %}{{ animal }} {{ (animal_score * 100) | round(0) | int }}% (Saga)
+    {% else %}nothing (Saga, person {{ (person * 100) | round(0) | int }}%){% endif %}
+actions:
+  - choose:
+      - conditions: "{{ unsure }}"
+        sequence:
+          # The stack is saved by saga_web_log a moment after it is sent.
+          - wait_template: "{{ tag in states('input_text.frontpath_last_stack_photo') }}"
+            timeout: "00:00:20"
+            continue_on_timeout: true
+          - action: ai_task.generate_data
+            continue_on_error: true
+            response_variable: ai
+            data:
+              task_name: frontpath person check
+              entity_id: "{{ ai_entity }}"
+              instructions: >-
+                This photo is from a camera inside a house door, looking out
+                across a patio and up garden steps towards the street. It may
+                be dark, blurry or noisy. Is there a person anywhere in it? If
+                not, is there an animal (cat, dog, fox, deer, bird)? Answer
+                verdict person, animal or nothing, and in 'what' say in a few
+                words what you see.
+              structure:
+                verdict:
+                  required: true
+                  selector:
+                    select:
+                      options: [person, animal, nothing]
+                what:
+                  required: true
+                  selector:
+                    text: {}
+              attachments:
+                - media_content_id: "media-source://media_source/frontpath/{{ states('input_text.frontpath_last_stack_photo') }}"
+                  media_content_type: image/jpeg
+          - variables:
+              verdict: >-
+                {% set v = ai.data.verdict if ai is defined and ai.data is defined and ai.data else '' %}
+                {% if person >= 0.5 %}{{ saga_verdict }}
+                {% elif v == 'person' %}person (AI: {{ ai.data.what | truncate(60) }})
+                {% elif v == 'animal' %}animal (AI: {{ ai.data.what | truncate(60) }})
+                {% elif v == 'nothing' %}nothing (AI, Saga person {{ (person * 100) | round(0) | int }}%)
+                {% else %}{{ saga_verdict }}{% endif %}
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.frontpath_seen
+            data:
+              value: "{{ (tag ~ ': ' ~ verdict) | truncate(250) }}"
+          - if:
+              - condition: template
+                value_template: "{{ verdict.startswith('person') }}"
+            then:
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: input_datetime.frontpath_person_seen
+                data:
+                  timestamp: "{{ as_timestamp(now()) }}"
+          - action: logbook.log
+            data:
+              name: FrontPath seen
+              message: "{{ tag }}: {{ verdict }}"
+              entity_id: input_text.frontpath_seen
+    default:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.frontpath_seen
+        data:
+          value: "{{ (tag ~ ': ' ~ saga_verdict) | truncate(250) }}"
+      - if:
+          - condition: template
+            value_template: "{{ saga_verdict.startswith('person') }}"
+        then:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.frontpath_person_seen
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
+      - action: logbook.log
+        data:
+          name: FrontPath seen
+          message: "{{ tag }}: {{ saga_verdict }}"
+          entity_id: input_text.frontpath_seen
