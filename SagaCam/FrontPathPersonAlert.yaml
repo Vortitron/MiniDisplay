@@ -1,0 +1,125 @@
+# A person on the front path: photo to Andy's phone, unless it is Andy
+# (20 Oct 2026).
+#
+# The person check (FrontPathSeen.yaml) writes input_text.frontpath_seen as
+# "<tag>: person ..." when the Saga's detector (50%+) or the AI calls a
+# photo set a person; this sends the photo they were found in to the Pixel 8.
+#
+# "Unless it is Andy": the Pixel 8's Bluetooth transmitter (the HA app's
+# iBeacon, Bermuda device 0a1b8d57..._100_40004) is placed in an area by
+# the Bluetooth proxies; FrontPath is one, and puts it in "Front walkway"
+# when Andy is out there (about 15 times a day, 18-20 Oct). The other
+# trigger here keeps input_datetime.pixel_at_front_walkway as the last time
+# it was. It counts as Andy when the Pixel:
+#   - is in Front walkway now, or was in the last 3 minutes (going out), or
+#   - came home (device_tracker.pixel_8, GPS) in the last 5 minutes, or
+#   - reaches Front walkway within 30 s of the verdict (Bermuda is a little
+#     behind someone walking up). That wait only happens when the Pixel is
+#     home; away, it cannot be Andy and the alert goes at once.
+# The catch: someone arriving at the same time as Andy is not reported.
+#
+# The photo: input_text.frontpath_last_photos holds the saved names of the
+# set's photos (saga_web_log); the one the person's box is in (the verdict's
+# "[b person ...]"), else the night stack, else the first. Sent as
+# /media/frontpath/<file> (the "frontpath" media folder; the app fetches it
+# with its own login). Tapping the notification opens the gallery.
+# Notifications share one tag and alert_once, so someone lingering (a photo
+# set every half minute) updates the one notification silently.
+#
+# Deployed with ha_set_automation, id frontpath_person_alert;
+# input_text.frontpath_last_photos and input_datetime.pixel_at_front_walkway
+# made with ha_set_helper.
+id: frontpath_person_alert
+alias: Front Path - person alert
+description: >-
+  When the person check says a person was on the front path
+  (input_text.frontpath_seen "<tag>: person ..."), sends the photo they are
+  in to the Pixel 8, unless the Pixel is (or just was, or within 30 s is)
+  in Bermuda area Front walkway, or came home in the last 5 minutes. Also
+  keeps input_datetime.pixel_at_front_walkway.
+mode: parallel
+max: 5
+triggers:
+  - trigger: state
+    entity_id: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
+    to: Front walkway
+    id: pixel
+  - trigger: state
+    entity_id: input_text.frontpath_seen
+    id: seen
+variables:
+  area_sensor: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
+  tracker: device_tracker.pixel_8
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: pixel
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.pixel_at_front_walkway
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
+      - conditions:
+          - condition: trigger
+            id: seen
+          - condition: template
+            value_template: "{{ trigger.to_state.state is match('^[a-z]+[0-9]{6}: person') }}"
+        sequence:
+          - variables:
+              tag: "{{ trigger.to_state.state.split(':')[0] }}"
+              verdict: "{{ trigger.to_state.state.split(': ', 1)[1] }}"
+              is_andy: >-
+                {{ is_state(area_sensor, 'Front walkway')
+                   or as_timestamp(now()) - as_timestamp(states('input_datetime.pixel_at_front_walkway'), 0) < 180
+                   or (is_state(tracker, 'home')
+                       and as_timestamp(now()) - as_timestamp(states[tracker].last_changed) < 300) }}
+          # Picked now: the next photo set replaces the list during the wait.
+          - variables:
+              part: "{{ (verdict | regex_findall('\\[~?([abc]) person ') + ['b'])[0] }}"
+              photos: >-
+                {{ states('input_text.frontpath_last_photos').split(' ')
+                   | select('search', '-' ~ tag ~ '-') | list }}
+              photo: >-
+                {% set mine = photos | select('search', '-' ~ tag ~ '-' ~ part ~ '-') | list %}
+                {{ (mine + photos + [''])[0] }}
+              said: >-
+                {{ verdict | regex_replace('\s*\[[^\]]*\]', '') | regex_replace(' \(Saga\)$', '') }}
+          - if:
+              - condition: template
+                value_template: "{{ not is_andy and is_state(tracker, 'home') }}"
+            then:
+              - wait_template: "{{ is_state(area_sensor, 'Front walkway') }}"
+                timeout: "00:00:30"
+                continue_on_timeout: true
+          - if:
+              - condition: template
+                value_template: "{{ is_andy or (wait is defined and wait.completed) }}"
+            then:
+              - action: logbook.log
+                data:
+                  name: FrontPath person alert
+                  message: "Not sent {{ tag }}: the Pixel is at the front walkway (Andy)"
+                  entity_id: input_text.frontpath_seen
+              - stop: It is Andy
+          - action: notify.mobile_app_pixel_8
+            continue_on_error: true
+            data:
+              title: Someone on the front path
+              message: "{{ tag[-6:-4] }}:{{ tag[-4:-2] }}: {{ said }}"
+              data:
+                image: >-
+                  {{ '/media/frontpath/' ~ photo if photo
+                     else '/api/camera_proxy/camera.frontpath_latest' }}
+                clickAction: /local/saga-cam/gallery.html
+                tag: frontpath-person
+                alert_once: true
+                channel: Front path
+                priority: high
+                ttl: 0
+          - action: logbook.log
+            data:
+              name: FrontPath person alert
+              message: "Sent {{ tag }} ({{ said }}) with {{ photo or 'latest.jpg' }}"
+              entity_id: input_text.frontpath_seen

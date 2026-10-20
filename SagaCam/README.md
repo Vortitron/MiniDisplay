@@ -120,3 +120,16 @@ verdict ends with them, e.g. "cat 41% (Saga) [b cat 0.41,0.32,0.08,0.2]",
 "~b" for the AI's guess. The gallery circles them on the card and the large
 photo: solid for the Saga, dashed for the AI, faint on the set's other
 photos. Only photos from then on have boxes.
+
+In the HA phone app (20 Oct): the gallery said "Not logged in" because the
+app keeps its login to itself (no localStorage "hassTokens"). It now asks
+the app for a token the way HA's own frontend does (Android
+window.externalApp.getExternalAuth, iOS webkit getExternalAuth), and when
+shown in a dashboard card it borrows the dashboard's login.
+
+Person alert (20 Oct, FrontPathPersonAlert.yaml): a "person" verdict sends
+the photo they are in to the Pixel 8 (tap opens the gallery), unless the
+Pixel's Bluetooth beacon is in Bermuda area "Front walkway" (now, in the
+last 3 min, or within 30 s), or it came home by GPS in the last 5 min.
+saga_web_log now also keeps the current set's saved file names in
+input_text.frontpath_last_photos for it.

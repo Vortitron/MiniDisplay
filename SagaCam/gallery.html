@@ -11,7 +11,9 @@
   The photos live in /config/frontpath_snapshots, which configuration.yaml
   adds as the media folder "frontpath". This page lists them through Home
   Assistant's websocket API (media_source/browse_media, resolve_media) with
-  the login of the browser it is opened in: the HA frontend's saved tokens
+  the login of the browser it is opened in: the Home Assistant phone app's
+  (asked for the way HA's own frontend does in the app, 20 Oct), the HA
+  dashboard's when shown in a card on it, the HA frontend's saved tokens
   (localStorage "hassTokens", same origin), or the Saga camera page's token.
   Nothing secret is stored in this file.
 
@@ -166,9 +168,38 @@ const WHO = { person: "person", animal: "animal", none: "no one" };
 
 function status(msg, cls) { $("status").textContent = msg; $("status").className = cls || ""; }
 
-// The login this browser already has: the HA frontend's tokens (refreshed if
+// The Home Assistant app keeps its login to itself (nothing in localStorage)
+// and hands a fresh access token to pages that ask: Android through
+// window.externalApp, iOS through a webkit message handler; the answer comes
+// back by calling the named window function, as for HA's own frontend.
+function appToken() {
+  const android = window.externalApp && window.externalApp.getExternalAuth;
+  const ios = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.getExternalAuth;
+  if (!android && !ios) return Promise.resolve(null);
+  return new Promise(res => {
+    const cb = "galleryAuth" + Date.now();
+    const done = t => { delete window[cb]; res(t); };
+    window[cb] = (ok, data) => done(ok && data && data.access_token || null);
+    const msg = { callback: cb, force: false };
+    try {
+      if (android) window.externalApp.getExternalAuth(JSON.stringify(msg));
+      else window.webkit.messageHandlers.getExternalAuth.postMessage(msg);
+    } catch (e) { done(null); }
+    setTimeout(() => window[cb] && done(null), 5000);
+  });
+}
+
+// The login this page can borrow: the HA app's, the dashboard's around it
+// (when shown in a card), the HA frontend's saved tokens (refreshed if
 // stale), else the token pasted into the Saga camera page.
 async function token() {
+  const app = await appToken();
+  if (app) return app;
+  try {
+    const ha = window.parent !== window && window.parent.document.querySelector("home-assistant");
+    const t = ha && ha.hass && ha.hass.auth && ha.hass.auth.data && ha.hass.auth.data.access_token;
+    if (t) return t;
+  } catch (e) { /* not framed by HA, or another origin */ }
   try {
     const t = JSON.parse(localStorage.getItem("hassTokens") || "null");
     if (t && t.access_token) {
