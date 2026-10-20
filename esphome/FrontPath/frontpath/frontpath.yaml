@@ -41,12 +41,13 @@ ota:
   - platform: esphome
     password: !secret frontpath_ota_password
 
-# Two networks: the separate router by the path first, the shared SSID as a
-# fallback. ESPHome joins the highest priority one it can see.
+# Two networks: the decon router by the path first, the shared SSID as a
+# fallback. ESPHome joins the highest priority one it can see. Both use the
+# same password.
 wifi:
   networks:
-    - ssid: !secret frontpath_wifi_ssid
-      password: !secret frontpath_wifi_password
+    - ssid: decon
+      password: !secret wifi_password
       priority: 10
     - ssid: !secret wifi_ssid
       password: !secret wifi_password
