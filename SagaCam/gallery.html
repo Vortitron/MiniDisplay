@@ -6,7 +6,11 @@
 <title>Front Path Photos</title>
 <!--
   Gallery of the FrontPath photos (17 Oct 2026). Served by Home Assistant from
-  /config/www/saga-cam/gallery.html at /local/saga-cam/gallery.html.
+  /config/www/saga-cam/gallery.html at /local/saga-cam/gallery.html, and shown
+  in the "Path photos" dashboard (/path-photos, an iframe strategy dashboard,
+  20 Oct) so the phone app and notifications open it with HA's own login.
+  Browsers keep /local/ files for 31 days (HA's cache headers), so that
+  dashboard's URL carries ?v=<date>; bump it when this file changes.
 
   The photos live in /config/frontpath_snapshots, which configuration.yaml
   adds as the media folder "frontpath". This page lists them through Home
@@ -28,7 +32,8 @@
   Path Trigger gates at that moment (history), or "radar burst" for a test
   shot that frontpath_burst_photo took (logbook). From 20 Oct the note also
   says who the photo check found (person / cat / no one; logbook "FrontPath
-  seen"), and the second row of buttons filters on it. Where the check found
+  seen"; "unsure" when the AI only guessed), and the second row of buttons
+  filters on it (Found = people and animals). Where the check found
   it is circled on the photos (from 21 Oct): solid for the Saga's detector,
   dashed for the AI's rough guess, faint on the other photos of the set.
 -->
@@ -64,11 +69,13 @@
   .card .who.person { color: #81c995; }
   .card .who.animal { color: var(--warn); }
   .card .who.none { color: var(--muted); font-weight: 400; }
+  .card .who.unsure { color: var(--muted); }
   .card .why { color: var(--muted); font-size: 12px; }
   .card .pic { position: relative; overflow: hidden; }
   .mark { position: absolute; border: 2px solid #81c995; border-radius: 50%; pointer-events: none;
           box-shadow: 0 0 0 1px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.6); }
   .mark.animal { border-color: var(--warn); }
+  .mark.unsure { border-color: #aaa; }
   .mark.ai { border-style: dashed; }
   .mark.other { opacity: .45; }
   .mark span { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 2px;
@@ -158,13 +165,13 @@ function marks(boxes, part, labels) {
   return (boxes || []).map(b => {
     const w = Math.max(b.w * 1.5, .04), h = Math.max(b.h * 1.5, .04);
     const x = b.x + b.w / 2 - w / 2, y = b.y + b.h / 2 - h / 2;
-    const cls = ["mark", b.label === "person" ? "person" : "animal", b.ai ? "ai" : "", b.part !== part ? "other" : ""].join(" ");
+    const cls = ["mark", b.label === "person" ? "person" : b.label === "unsure" ? "unsure" : "animal", b.ai ? "ai" : "", b.part !== part ? "other" : ""].join(" ");
     const tip = labels ? `<span>${b.label}${b.ai ? " (AI, rough)" : ""}${b.part !== part ? " in photo " + b.part : ""}</span>` : "";
     return `<div class="${cls}" style="left:${x * 100}%;top:${y * 100}%;width:${w * 100}%;height:${h * 100}%">${tip}</div>`;
   }).join("");
 }
-const whoOf = v => !v ? "" : /^person/.test(v) ? "person" : /^(nothing|no one)/.test(v) ? "none" : "animal";
-const WHO = { person: "person", animal: "animal", none: "no one" };
+const whoOf = v => !v ? "" : /^person/.test(v) ? "person" : /^(nothing|no one)/.test(v) ? "none" : /^unsure/.test(v) ? "unsure" : "animal";
+const WHO = { person: "person", animal: "animal", none: "no one", unsure: "unsure" };
 
 function status(msg, cls) { $("status").textContent = msg; $("status").className = cls || ""; }
 
@@ -189,17 +196,19 @@ function appToken() {
   });
 }
 
-// The login this page can borrow: the HA app's, the dashboard's around it
-// (when shown in a card), the HA frontend's saved tokens (refreshed if
-// stale), else the token pasted into the Saga camera page.
+// The login this page can borrow: the dashboard's around it (the "Path
+// photos" dashboard is this page in a frame; the app answers getExternalAuth
+// in the top frame only, so this comes first), the HA app's, the HA
+// frontend's saved tokens (refreshed if stale), else the token pasted into
+// the Saga camera page.
 async function token() {
-  const app = await appToken();
-  if (app) return app;
   try {
     const ha = window.parent !== window && window.parent.document.querySelector("home-assistant");
     const t = ha && ha.hass && ha.hass.auth && ha.hass.auth.data && ha.hass.auth.data.access_token;
     if (t) return t;
   } catch (e) { /* not framed by HA, or another origin */ }
+  const app = await appToken();
+  if (app) return app;
   try {
     const t = JSON.parse(localStorage.getItem("hassTokens") || "null");
     if (t && t.access_token) {
@@ -284,7 +293,7 @@ async function load() {
   events.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
   if (!events.length) { status("No photos yet."); return; }
 
-  try { notes = JSON.parse(localStorage.getItem("galleryNotes2") || "{}"); } catch (e) {}
+  try { notes = JSON.parse(localStorage.getItem("galleryNotes3") || "{}"); } catch (e) {}
   for (const e of events) if (notes[e.key]) {
     e.why = notes[e.key].why; e.kind = notes[e.key].kind; e.seen = notes[e.key].seen || "";
     e.boxes = notes[e.key].boxes || [];
@@ -364,7 +373,7 @@ async function showDay(d) {
       if (t < recent) notes[e.key] = { why: e.why, kind: e.kind, seen: e.seen, boxes: e.boxes };
     }
   }
-  try { localStorage.setItem("galleryNotes2", JSON.stringify(notes)); } catch (e) {}
+  try { localStorage.setItem("galleryNotes3", JSON.stringify(notes)); } catch (e) {}
   if (day === d) { render(); status(count()); }
 }
 

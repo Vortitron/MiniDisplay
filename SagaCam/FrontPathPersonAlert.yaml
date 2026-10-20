@@ -22,7 +22,8 @@
 # set's photos (saga_web_log); the one the person's box is in (the verdict's
 # "[b person ...]"), else the night stack, else the first. Sent as
 # /media/frontpath/<file> (the "frontpath" media folder; the app fetches it
-# with its own login). Tapping the notification opens the gallery.
+# with its own login). Tapping the notification opens the gallery, as the
+# "Path photos" dashboard (/path-photos) so the app shows it logged in.
 # Notifications share one tag and alert_once, so someone lingering (a photo
 # set every half minute) updates the one notification silently.
 #
@@ -112,7 +113,7 @@ actions:
                 image: >-
                   {{ '/media/frontpath/' ~ photo if photo
                      else '/api/camera_proxy/camera.frontpath_latest' }}
-                clickAction: /local/saga-cam/gallery.html
+                clickAction: /path-photos
                 tag: frontpath-person
                 alert_once: true
                 channel: Front path

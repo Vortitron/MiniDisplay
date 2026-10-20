@@ -122,10 +122,22 @@ photo: solid for the Saga, dashed for the AI, faint on the set's other
 photos. Only photos from then on have boxes.
 
 In the HA phone app (20 Oct): the gallery said "Not logged in" because the
-app keeps its login to itself (no localStorage "hassTokens"). It now asks
-the app for a token the way HA's own frontend does (Android
-window.externalApp.getExternalAuth, iOS webkit getExternalAuth), and when
-shown in a dashboard card it borrows the dashboard's login.
+app keeps its login to itself (no localStorage "hassTokens"), and a page
+opened straight from a notification did not load at all. So the gallery is
+now a dashboard, "Path photos" (/path-photos, HA's iframe strategy with
+url /local/saga-cam/gallery.html?v=<date>): in a frame inside HA it borrows
+the dashboard's login, the app opens it like any dashboard, and the Front
+door button and the person alert go there. HA tells browsers to keep
+/local/ files for 31 days, which is why the phone kept showing the old
+gallery (raw "[b cat ...]" text, no circles): bump ?v= in the dashboard
+whenever gallery.html changes (ha_save_dashboard path-photos). The page
+also asks the app for a token (window.externalApp.getExternalAuth) when it
+is the top frame.
+
+AI confidence (20 Oct 23:17): Claude called a tree trunk by the fairy lights
+"a dark silhouette of a person" and the phone buzzed. It now also answers
+'confidence' (high / low) with a more sceptical prompt; a low-confidence
+person is "unsure (AI: ...)": grey in the gallery, no alert.
 
 Person alert (20 Oct, FrontPathPersonAlert.yaml): a "person" verdict sends
 the photo they are in to the Pixel 8 (tap opens the gallery), unless the

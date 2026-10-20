@@ -16,7 +16,10 @@
 # (15-50%), the night stack photo goes to an AI vision model for a second
 # opinion (ai_entity below: Claude, via the Anthropic integration, from
 # 20 Oct; the OpenAI account was inactive). If the call fails the Saga's
-# verdict stands.
+# verdict stands. The AI also says how sure it is: a "person" it is not
+# sure of becomes "unsure (AI: ...)", which the gallery shows but the
+# person alert leaves alone (20 Oct 23:17 it called a tree trunk by the
+# fairy lights "a dark silhouette of a person", and the phone buzzed).
 #
 # Results: input_text.frontpath_seen ("detect072009: person 83% (Saga)"),
 # input_datetime.frontpath_person_seen when it was a person, and a logbook
@@ -85,9 +88,15 @@ actions:
                 This photo is from a camera inside a house door, looking out
                 across a patio and up garden steps towards the street. It may
                 be dark, blurry or noisy. Is there a person anywhere in it? If
-                not, is there an animal (cat, dog, fox, deer, bird)? Answer
-                verdict person, animal or nothing, and in 'what' say in a few
-                words what you see. If you found a person or animal, in 'box'
+                not, is there an animal (cat, dog, fox, deer, bird)? Be
+                sceptical: tree trunks, posts, the railing, the garden chairs
+                and reflections of the hallway in the door glass are not
+                people; a dark upright shape is only a person if you can make
+                out a head and shoulders, limbs or clothing. Answer verdict
+                person, animal or nothing, and in 'confidence' high when you
+                can clearly see it, low when you are guessing from a vague
+                shape. In 'what' say in a few words what you see. If you found
+                a person or animal, in 'box'
                 say where it is as four numbers: left, top, width, height,
                 each a fraction of the image width or height from 0 to 1
                 (for example 0.40,0.55,0.08,0.12); otherwise leave 'box'
@@ -102,6 +111,11 @@ actions:
                   required: true
                   selector:
                     text: {}
+                confidence:
+                  required: true
+                  selector:
+                    select:
+                      options: [high, low]
                 box:
                   required: false
                   selector:
@@ -113,9 +127,12 @@ actions:
               verdict: >-
                 {% set v = ai.data.verdict if ai is defined and ai.data is defined and ai.data else '' %}
                 {% set n = (ai.data.get('box') or '') | string | regex_findall('[0-9]*[.]?[0-9]+') | map('float') | list if v else [] %}
-                {% set aibox = '[~b ' ~ v ~ ' ' ~ (n[:4] | map('round', 2) | join(',')) ~ ']'
+                {% set sure = (ai.data.get('confidence') or 'high') != 'low' if v else true %}
+                {% set what = v if sure else 'unsure' %}
+                {% set aibox = '[~b ' ~ what ~ ' ' ~ (n[:4] | map('round', 2) | join(',')) ~ ']'
                    if n | count >= 4 and n[:4] | max <= 1 and n[2] > 0 and n[3] > 0 else '' %}
                 {% if person >= 0.5 %}{{ saga_verdict }}
+                {% elif v == 'person' and not sure %}unsure (AI: {{ ai.data.what | truncate(60) }}) {{ aibox }}
                 {% elif v == 'person' %}person (AI: {{ ai.data.what | truncate(60) }}) {{ aibox }}
                 {% elif v == 'animal' %}animal (AI: {{ ai.data.what | truncate(60) }}) {{ aibox }}
                 {% elif v == 'nothing' %}nothing (AI, Saga person {{ (person * 100) | round(0) | int }}%)
