@@ -127,6 +127,22 @@ text_sensor:
     entity_id: sensor.journey_orkelljunga
     attribute: road
     internal: true
+  # Weather icon, bottom-left cell (see wx_pick and the display lambda).
+  # The same OpenWeatherMap entity that feeds the rain and temperature
+  # helpers (ElectricAutomations/FrontPathRainTemp.yaml). sun.sun picks the
+  # night icons.
+  - platform: homeassistant
+    id: wx_condition
+    entity_id: weather.openweathermap
+    internal: true
+    on_value:
+      - script.execute: wx_pick
+  - platform: homeassistant
+    id: wx_sun
+    entity_id: sun.sun
+    internal: true
+    on_value:
+      - script.execute: wx_pick
 
 sensor:
   # The radar logic in frontpath/frontpath.yaml publishes position, active
@@ -411,6 +427,13 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # Weather icon for the bottom-left cell, set by wx_pick when the condition
+  # or the sun changes, so the 150 ms display lambda only blits it. nullptr
+  # (unknown, unavailable, or a condition with no icon here) shows "Rain".
+  - id: wx_anim
+    type: animation::Animation *
+    restore_value: no
+    initial_value: 'nullptr'
 
 # Panel tuning, live from Home Assistant. A lit backlight with nothing on the
 # glass is usually contrast or the voltage ratio; "All Pixels On" tells the two
@@ -545,6 +568,33 @@ script:
           id(path_lcd).set_all_pixels_on(id(path_lcd_all_on).state);
           id(path_lcd).update();
           id(path_lcd).turn_on();
+
+  # Weather icon: HA condition to one of the wx20_* images below, as in
+  # weather_icons/README.md. Runs only when the condition or the sun
+  # changes. hail shares snowy-rainy, lightning shares lightning-rainy and
+  # windy-variant shares windy, so only 12 of the 15 icons are in flash.
+  # exceptional and anything unknown leave the "Rain" label.
+  - id: wx_pick
+    mode: queued
+    then:
+      - lambda: |-
+          animation::Animation *a = nullptr;
+          if (id(wx_condition).has_state()) {
+            const std::string &c = id(wx_condition).state;
+            const bool night = id(wx_sun).has_state() && id(wx_sun).state == "below_horizon";
+            if (c == "sunny") a = night ? id(wx20_clear_night) : id(wx20_sunny);
+            else if (c == "clear-night") a = id(wx20_clear_night);
+            else if (c == "partlycloudy") a = night ? id(wx20_partlycloudy_night) : id(wx20_partlycloudy);
+            else if (c == "cloudy") a = id(wx20_cloudy);
+            else if (c == "fog") a = id(wx20_fog);
+            else if (c == "rainy") a = id(wx20_rainy);
+            else if (c == "pouring") a = id(wx20_pouring);
+            else if (c == "snowy") a = id(wx20_snowy);
+            else if (c == "snowy-rainy" || c == "hail") a = id(wx20_snowy_rainy);
+            else if (c == "lightning" || c == "lightning-rainy") a = id(wx20_lightning_rainy);
+            else if (c == "windy" || c == "windy-variant") a = id(wx20_windy);
+          }
+          id(wx_anim) = a;
 
   # See enable_sensorN_ble above: after the reconnect delay, stay off if off
   # was asked for.
@@ -795,6 +845,59 @@ interval:
             call.perform();
           }
 
+# Weather icons for the bottom-left cell: 24x20, two 1-bit frames each, 60
+# bytes a frame. From weather_icons/lcd20 (Meteocons, MIT; see the README
+# there), which goes at /config/esphome/weather_icons/ on Home Assistant.
+image:
+  - platform: animation
+    id: wx20_sunny
+    file: weather_icons/lcd20/sunny.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_clear_night
+    file: weather_icons/lcd20/clear-night.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_partlycloudy
+    file: weather_icons/lcd20/partlycloudy.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_partlycloudy_night
+    file: weather_icons/lcd20/partlycloudy-night.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_cloudy
+    file: weather_icons/lcd20/cloudy.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_fog
+    file: weather_icons/lcd20/fog.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_rainy
+    file: weather_icons/lcd20/rainy.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_pouring
+    file: weather_icons/lcd20/pouring.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_snowy
+    file: weather_icons/lcd20/snowy.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_snowy_rainy
+    file: weather_icons/lcd20/snowy-rainy.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_lightning_rainy
+    file: weather_icons/lcd20/lightning-rainy.gif
+    type: BINARY
+  - platform: animation
+    id: wx20_windy
+    file: weather_icons/lcd20/windy.gif
+    type: BINARY
+
 display:
   - platform: st7567_spi
     id: path_lcd
@@ -822,7 +925,7 @@ display:
       //
       //   Markaryd     11   Gamla E4
       //   Örkelljunga  16   Gamla E4
-      //   Rain         4h   6.5°
+      //   [icon]       4h   6.5°     icon = condition now; "Rain" if none
       //   ▪ · · ▪▪ · · ·   gates, street end left, door end right   (y 60-61)
       //   ━━━━━━━━         distance along the path while detected   (y 63)
       static const int COL_X[3] = {0, 43, 86};
@@ -893,7 +996,18 @@ display:
         temp = buf;
       }
       if (ice) temp += " ice";
-      cell(2, 0, "Rain", false);
+      // Bottom-left: the weather icon in place of the "Rain" label (the
+      // middle column already says when rain comes). Centred in the 42 px
+      // cell; a frame every 700 ms, as the glass smears. Only a frame index
+      // and one blit here: wx_pick chose the icon when the state changed.
+      static const uint32_t WX_MS_PER_FRAME = 700;
+      animation::Animation *wx = id(wx_anim);
+      if (wx != nullptr) {
+        wx->set_frame((now / WX_MS_PER_FRAME) % wx->get_animation_frame_count());
+        it.image(COL_X[0] + (COL_W[0] - 24) / 2, ROW_Y[2], wx);
+      } else {
+        cell(2, 0, "Rain", false);
+      }
       cell(2, 1, rain, false);
       cell(2, 2, temp, ice);
 
