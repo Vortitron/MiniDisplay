@@ -125,6 +125,12 @@ one_wire:
     pin: GPIO4
     id: onewire_bus
 
+# Animated weather icons (24x20, 1-bit, two frames each) for the screensaver.
+# The folder lives at /config/esphome/weather_icons/; see its README.md.
+# Ids are wx20_<icon>.
+packages:
+  wx20: !include weather_icons/lcd20/images.yaml
+
 # Font for display
 font:
   - file: "gfonts://Roboto"
@@ -252,6 +258,15 @@ display:
           // Draw labels
           it.print(0 + offset_x, bar_y + offset_y, id(default_font), "€");
           it.print(120 + offset_x, bar_y + offset_y, id(default_font), "£");
+        }
+
+        // Animated weather icon, top right beside the time and price lines.
+        // 24x20 leaves a gap after the longest texts there (time and tank 96 px,
+        // "Now: 12.34  12/24" 99 px) and ends above the headline line (y 40),
+        // and x 102 keeps it on screen at the largest shift (+2, +2).
+        // No icon while the condition is unknown or unavailable.
+        if (id(wx_anim) != nullptr) {
+          it.image(102 + offset_x, 12 + offset_y, id(wx_anim));
         }
         return;
       }
@@ -584,7 +599,7 @@ sensor:
 
   # MQ2 Gas Sensor - Raw Analog Voltage (ADC on GPIO34)
   - platform: adc
-    name: "MQ2 Gas/Smoke Level - Raw Analog Voltage"
+    name: "MQ2 Gas⁄Smoke Level - Raw Analog Voltage"
     pin: GPIO34
     id: mq2_analog_raw
     unit_of_measurement: "V"
@@ -599,7 +614,7 @@ sensor:
 
   # MQ2 Gas Sensor - Percentage
   - platform: template
-    name: "MQ2 Gas/Smoke Level"
+    name: "MQ2 Gas⁄Smoke Level"
     id: mq2_analog
     unit_of_measurement: "%"
     accuracy_decimals: 1
@@ -877,7 +892,7 @@ binary_sensor:
 
   # MQ2 Gas Sensor - Software Alarm (hysteresis)
   - platform: template
-    name: "MQ2 Smoke/Gas Alarm"
+    name: "MQ2 Smoke⁄Gas Alarm"
     id: mq2_alarm
     device_class: smoke
     lambda: |-
@@ -895,6 +910,21 @@ binary_sensor:
       - delayed_off: 10s
 
 text_sensor:
+  # Weather condition and day/night for the screensaver weather icon
+  - platform: homeassistant
+    id: wx_condition
+    entity_id: weather.openweathermap
+    on_value:
+      then:
+        - script.execute: wx_select
+
+  - platform: homeassistant
+    id: sun_state
+    entity_id: sun.sun
+    on_value:
+      then:
+        - script.execute: wx_select
+
   - platform: homeassistant
     id: sam_hvac_headline
     entity_id: input_text.sam_hvac_headline
@@ -1213,6 +1243,12 @@ text_sensor:
 
 # Global variables for state tracking
 globals:
+  # Weather icon currently shown on the screensaver (nullptr = no icon)
+  - id: wx_anim
+    type: esphome::animation::Animation *
+    restore_value: no
+    initial_value: 'nullptr'
+
   - id: current_entity_index
     type: int
     restore_value: yes
@@ -1432,7 +1468,7 @@ interval:
           if (!id(screensaver_active) && (now - id(last_interaction_ms)) >= idle_ms) {
             id(screensaver_active) = true;
             id(last_screensaver_update_ms) = now;
-            ESP_LOGI("script", "Screensaver activated after %u ms idle", idle_ms);
+            ESP_LOGI("script", "Screensaver activated after %" PRIu32 " ms idle", idle_ms);
             id(update_display).execute();
           } else if (id(screensaver_active) && (now - id(last_screensaver_update_ms)) >= refresh_ms) {
             id(last_screensaver_update_ms) = now;
@@ -1469,6 +1505,31 @@ interval:
             
             id(update_display).execute();
             ESP_LOGD("display", "Pixel shift: (%d, %d)", id(display_offset_x), id(display_offset_y));
+          }
+
+  # Weather icon animation (screensaver only). While the icon is showing,
+  # this tick is the screensaver's redraw and the display's own 1 s poll is
+  # paused, so the I2C bus (50 kHz, about 0.2 s per frame) carries 1.7
+  # frames a second instead of 2.7. The poll resumes within one tick of the
+  # icon going away (user input, a notification or no weather data).
+  - interval: 600ms
+    then:
+      - lambda: |-
+          static bool poller_paused = false;
+          auto *disp = id(oled_display);
+          auto *icon = id(wx_anim);
+          const bool animate = icon != nullptr && id(screensaver_active) &&
+                               id(notifications_count) == 0 && !disp->is_failed();
+          if (animate) {
+            if (!poller_paused) {
+              disp->stop_poller();
+              poller_paused = true;
+            }
+            icon->next_frame();
+            disp->update();
+          } else if (poller_paused) {
+            disp->start_poller();
+            poller_paused = false;
           }
 
   # Periodic screensaver inversion for OLED burn-in prevention
@@ -1559,6 +1620,55 @@ script:
             
             ESP_LOGI("script", "Screensaver deactivated by user input");
             id(update_display).execute();
+          }
+
+  # Pick the weather icon from the HA condition; sun.sun below_horizon picks
+  # the night variants. Unknown or unavailable shows no icon.
+  - id: wx_select
+    mode: queued
+    then:
+      - lambda: |-
+          const std::string &c = id(wx_condition).state;
+          const bool night = id(sun_state).has_state() && id(sun_state).state == "below_horizon";
+          animation::Animation *a = nullptr;
+          if (!id(wx_condition).has_state() || c.empty() || c == "unknown" || c == "unavailable") {
+            a = nullptr;
+          } else if (c == "sunny") {
+            a = night ? id(wx20_clear_night) : id(wx20_sunny);
+          } else if (c == "clear-night") {
+            a = id(wx20_clear_night);
+          } else if (c == "partlycloudy") {
+            a = night ? id(wx20_partlycloudy_night) : id(wx20_partlycloudy);
+          } else if (c == "fog") {
+            a = id(wx20_fog);
+          } else if (c == "rainy") {
+            a = id(wx20_rainy);
+          } else if (c == "pouring") {
+            a = id(wx20_pouring);
+          } else if (c == "snowy") {
+            a = id(wx20_snowy);
+          } else if (c == "snowy-rainy") {
+            a = id(wx20_snowy_rainy);
+          } else if (c == "hail") {
+            a = id(wx20_hail);
+          } else if (c == "lightning") {
+            a = id(wx20_lightning);
+          } else if (c == "lightning-rainy") {
+            a = id(wx20_lightning_rainy);
+          } else if (c == "windy" || c == "windy-variant") {
+            a = id(wx20_windy);
+          } else if (c == "exceptional") {
+            a = id(wx20_exceptional);
+          } else {
+            a = id(wx20_cloudy);  // cloudy, and any condition HA adds later
+          }
+          if (a != id(wx_anim)) {
+            if (a != nullptr) a->set_frame(0);
+            id(wx_anim) = a;
+            ESP_LOGI("weather", "Icon for '%s' (%s)", c.c_str(), night ? "night" : "day");
+            if (id(screensaver_active)) {
+              id(update_display).execute();
+            }
           }
 
   - id: update_display
