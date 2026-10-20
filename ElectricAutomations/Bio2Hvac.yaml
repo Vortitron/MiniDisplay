@@ -1,0 +1,384 @@
+# Bio2 — the bio hall heat pump (20 Oct 2026).
+#
+# climate.bio2 is a Panasonic unit (same cloud integration as Sam) wired in
+# temporarily in the bio hall, the room next to Sam that the circulation fan
+# blows Sam's warm air into. Its own sensor sits in the unit near the ceiling
+# and reads whatever it is blowing, so the room is read from the ESPHome
+# sensor on the wall there instead: sensor.bedroomlights_bedroomlights_temperature
+# (the "bedroom" sensor in sam.yaml — same room, older name).
+#
+# Same fooling as sam.yaml: Bio2's setpoint is placed relative to its OWN
+# reading so that it heats when the room sensor is below the target and idles
+# when the room is at it (internal + need when cold, internal - 2 or lower when
+# warm, clamped to the unit's 16-30 range on its 0.5 step).
+#
+# What it wants (input_number.bio2_desired_temperature, written here):
+#   holiday mode              10 C (heat_8_15 preset, frost protection)
+#   you set it                kept for 90 min (same lock as Sam: the helper
+#                             differing from bio2_automation_set_value means a
+#                             hand/voice/dashboard change; the lock also bypasses
+#                             nothing else here — there is no price ladder)
+#   projector playing/paused  20 C (film on — input_select.bio_projector, from
+#                             BioProjectorLights.yaml)
+#   phone in the bio, 07-23   20 C (input_select.phone_zone == bio, from
+#                             PhoneZone.yaml: Andy working in there)
+#   otherwise                 16 C economy, evening or not: with the projector
+#                             off nobody is in the bio hall, so it goes low
+#                             (Sam's living room goes to 20 in the evening; this
+#                             room does not)
+#
+# Super-expensive electricity (input_boolean.super_expensive_active): Bio2 is
+# switched off while the room is above its target (it would only be idling);
+# at or below target it keeps heating.
+#
+# When climate.bio2 is unavailable (cloud drop, or the unit unplugged again)
+# this automation only keeps the desired helper and headline up to date and
+# stops. sam.yaml then does the old thing: with the circulation fan running it
+# heats on min(living, bio hall), so Sam warms this room from next door; and
+# BioProjectorLights.yaml raises Sam's desired to 20 on film start only when
+# Bio2 is unavailable. While Bio2 is live, Sam reads the living room alone.
+#
+# Helpers (storage, created over MCP with ha_set_helper):
+#   input_number.bio2_desired_temperature   10-30 step 1 C
+#   input_number.bio2_automation_set_value  10-30 step 0.1 C (not user-facing)
+#   input_datetime.bio2_desired_lock_until  date + time
+#   input_text.bio2_hvac_headline           max 64
+#   input_text.bio2_hvac_status             max 255
+#
+# Tests: tests/test_bio2_hvac_templates.py
+# Deploy: python3 ElectricAutomations/deploy_bio2_hvac.py (id bio2_hvac)
+id: bio2_hvac
+alias: Bio2 HVAC (bio hall)
+description: >-
+  Drives climate.bio2 from the bio hall wall sensor
+  (sensor.bedroomlights_bedroomlights_temperature) with the same setpoint
+  fooling as Sam. Desired: holiday 10, your own setting kept 90 min, 20 while
+  the projector is on or Andy's phone is in the bio by day, else 16. Off while above target when electricity is
+  super-expensive. When Bio2 is unavailable it stands aside and Sam covers the
+  room through the circulation fan.
+variables:
+  film_temp: 20
+  economy_temp: 16
+  frost_temp: 10
+  manual_lock_minutes: 90
+  heat_offset: 1
+  base_stop_heat_offset: -2
+  max_stop_heat_offset: -5
+  temp_tolerance: 0.5
+  fan_only_diff: 3
+  heat_room_max: 27
+  heat_fallback_offset: 2
+  bio2_min_temp_fallback: 16
+  bio2_max_temp_fallback: 30
+triggers:
+  - trigger: state
+    entity_id:
+      - sensor.bedroomlights_bedroomlights_temperature
+      - sensor.bio2_inside_temperature
+      - sensor.bio2_outside_temperature
+    for:
+      seconds: 30
+  # Availability only: a bare climate.bio2 trigger would also fire on every
+  # temperature attribute update.
+  - trigger: state
+    entity_id: climate.bio2
+    to: unavailable
+  - trigger: state
+    entity_id: climate.bio2
+    from: unavailable
+  - trigger: state
+    entity_id:
+      - input_select.bio_projector
+      - input_select.phone_zone
+      - input_boolean.holiday_mode
+      - input_boolean.super_expensive_active
+      - input_number.bio2_desired_temperature
+  - trigger: time_pattern
+    minutes: "/15"
+  - trigger: time
+    at:
+      - "19:00:00"
+      - "23:00:00"
+actions:
+  - variables:
+      bio2_state: "{{ states('climate.bio2') }}"
+      bio2_ok: "{{ bio2_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      bio2_preset: "{{ state_attr('climate.bio2', 'preset_mode') | default('none', true) }}"
+      bio2_min_temp: "{{ state_attr('climate.bio2', 'min_temp') | float(bio2_min_temp_fallback) }}"
+      bio2_max_temp: "{{ state_attr('climate.bio2', 'max_temp') | float(bio2_max_temp_fallback) }}"
+      room_state: "{{ states('sensor.bedroomlights_bedroomlights_temperature') }}"
+      room_ok: "{{ room_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      room: "{{ room_state | float(0) }}"
+      internal_state: "{{ states('sensor.bio2_inside_temperature') }}"
+      internal_ok: "{{ internal_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      internal: "{{ internal_state | float(0) }}"
+      outdoor: >-
+        {% set v = states('sensor.bio2_outside_temperature') %}
+        {% if v in ['unknown', 'unavailable', 'none', ''] %}
+          {{ states('sensor.sam_outside_temperature') | float(10) }}
+        {% else %}
+          {{ v | float(10) }}
+        {% endif %}
+      projector_state: "{{ states('input_select.bio_projector') }}"
+      projector_on: "{{ projector_state in ['playing', 'paused'] }}"
+      # Andy's phone settled in the bio (PhoneZone.yaml): 20°C by day, as
+      # DaytimeCheapHeat does for Sam's rooms. Not overnight.
+      phone_zone: "{{ states('input_select.phone_zone') }}"
+      phone_comfort_start_hour: 7
+      phone_comfort: >-
+        {{ phone_zone == 'bio'
+           and now().hour >= phone_comfort_start_hour and now().hour < 23 }}
+      holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
+      super_expensive: "{{ is_state('input_boolean.super_expensive_active', 'on') }}"
+      current_desired: "{{ states('input_number.bio2_desired_temperature') | float(economy_temp) }}"
+      auto_set: "{{ states('input_number.bio2_automation_set_value') | float(economy_temp) }}"
+      lock_until_ts: "{{ as_timestamp(states('input_datetime.bio2_desired_lock_until'), 0) | float(0) }}"
+      lock_active_now: "{{ lock_until_ts > now().timestamp() }}"
+      manual_override: "{{ (current_desired - auto_set) | abs > 0.05 }}"
+  - variables:
+      lock_minutes_remaining: >-
+        {% if lock_active_now %}
+          {{ ((lock_until_ts - now().timestamp()) / 60) | round(0) | int }}
+        {% else %}
+          0
+        {% endif %}
+      desired: >-
+        {% if holiday_mode %}
+          {{ frost_temp }}
+        {% elif manual_override or lock_active_now %}
+          {{ current_desired }}
+        {% elif projector_on or phone_comfort %}
+          {{ film_temp }}
+        {% else %}
+          {{ economy_temp }}
+        {% endif %}
+      reason: >-
+        {% if holiday_mode %}
+          Holiday frost {{ frost_temp }}°C
+        {% elif manual_override %}
+          You set {{ current_desired | round(0) }}°C ({{ manual_lock_minutes }}m)
+        {% elif lock_active_now %}
+          You set {{ current_desired | round(0) }}°C ({{ lock_minutes_remaining }}m)
+        {% elif projector_on %}
+          Film on {{ film_temp }}°C
+        {% elif phone_comfort %}
+          Phone in bio {{ film_temp }}°C
+        {% else %}
+          Bio idle {{ economy_temp }}°C
+        {% endif %}
+  - variables:
+      target: "{{ desired | float }}"
+      heat_diff: "{{ room - target }}"
+      heat_need: "{{ target - room }}"
+      heat_boost: "{{ [heat_offset, heat_need] | max }}"
+      room_at_heat_max: "{{ room_ok and room >= heat_room_max }}"
+      # Fan only when the room is well past the target, at the ceiling, or it
+      # is cold inside but warmer out than wanted (open a window instead).
+      heat_fan_only: >-
+        {{ room_ok and (room_at_heat_max
+           or heat_diff > fan_only_diff
+           or (room < target - temp_tolerance and outdoor > target)) }}
+      heat_mode: "{{ 'fan_only' if heat_fan_only else 'heat' }}"
+      heat_setpoint: >-
+        {% if not room_ok %}
+          {% set unclamped = target + heat_fallback_offset %}
+        {% elif room_at_heat_max %}
+          {% set unclamped = internal + max_stop_heat_offset %}
+        {% elif room < target - temp_tolerance %}
+          {% set unclamped = internal + heat_boost %}
+        {% elif room >= target %}
+          {% set unclamped = internal + [base_stop_heat_offset - heat_diff, max_stop_heat_offset] | max %}
+        {% else %}
+          {% set unclamped = internal %}
+        {% endif %}
+        {% set clamped = [bio2_min_temp, [bio2_max_temp, unclamped] | min] | max %}
+        {{ (clamped * 2) | round(0) / 2 }}
+      heat_action_label: >-
+        {% if not room_ok %}Bio2 sensor only
+        {% elif room_at_heat_max %}Room at max, fan only
+        {% elif not heat_fan_only %}{{ 'Heating' if room < target - temp_tolerance else 'Holding' }}
+        {% elif room < target - temp_tolerance and outdoor > target %}Coasting (mild)
+        {% else %}Fan only{% endif %}
+      # Super-expensive: only shed while idling above target (never shed blind).
+      shed_now: "{{ super_expensive and room_ok and room > target }}"
+  # ---- Desired helper: manual-override lock, then write (as DaytimeCheapHeat) ----
+  - if:
+      - condition: template
+        value_template: "{{ manual_override and not holiday_mode }}"
+    then:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bio2_desired_lock_until
+        data:
+          timestamp: "{{ now().timestamp() + manual_lock_minutes * 60 }}"
+      - action: logbook.log
+        data:
+          name: Bio2 HVAC
+          message: >-
+            Manual desired change ({{ auto_set }}°C -> {{ current_desired }}°C).
+            Kept at {{ current_desired }}°C for {{ manual_lock_minutes }} min.
+  # auto_set first, so the desired write below never looks like a manual change.
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.bio2_automation_set_value
+    data:
+      value: "{{ desired }}"
+  - if:
+      - condition: template
+        value_template: "{{ (desired | float) != current_desired }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.bio2_desired_temperature
+        data:
+          value: "{{ desired }}"
+  # ---- Bio2 not there: Sam covers the room (sam.yaml, BioProjectorLights) ----
+  - if:
+      - condition: template
+        value_template: "{{ not bio2_ok }}"
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio2_hvac_headline
+        data:
+          value: "Bio2 unavailable · Sam covers"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio2_hvac_status
+        data:
+          value: >-
+            {% set s %}Bio2 {{ bio2_state }}: want {{ target | round(1) }}°C ({{ reason | trim }}), room={{ room_state }}°C, projector={{ projector_state }}. Sam heats the bio hall through the circulation fan.{% endset -%}
+            {{ s | truncate(255, True, '', 0) }}
+      - stop: "Bio2 unavailable"
+  - if:
+      - condition: template
+        value_template: "{{ not internal_ok }}"
+    then:
+      - action: logbook.log
+        data:
+          name: Bio2 HVAC
+          message: "Skipping: Bio2 inside temperature is {{ internal_state }} (room={{ room_state }}, want {{ target }}°C)."
+      - stop: "Missing Bio2 sensor"
+  # ---- Holiday: frost protection on the unit's low-range preset ----
+  - if:
+      - condition: template
+        value_template: "{{ holiday_mode }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ bio2_preset != 'heat_8_15' }}"
+        then:
+          - action: climate.set_preset_mode
+            target:
+              entity_id: climate.bio2
+            data:
+              preset_mode: heat_8_15
+      - if:
+          - condition: template
+            value_template: "{{ bio2_state != 'heat' or (state_attr('climate.bio2', 'temperature') | float(-1)) != frost_temp }}"
+        then:
+          - action: climate.set_hvac_mode
+            target:
+              entity_id: climate.bio2
+            data:
+              hvac_mode: heat
+          - action: climate.set_temperature
+            target:
+              entity_id: climate.bio2
+            data:
+              temperature: "{{ frost_temp }}"
+              hvac_mode: heat
+          - action: logbook.log
+            data:
+              name: Bio2 HVAC
+              message: "Holiday mode: preset=heat_8_15, heat {{ frost_temp }}°C, room={{ room | round(1) }}°C, internal={{ internal | round(1) }}°C"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio2_hvac_headline
+        data:
+          value: "Holiday frost · Heating"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio2_hvac_status
+        data:
+          value: "Holiday: preset=heat_8_15, heat {{ frost_temp }}°C, room={{ room | round(1) }}°C, internal={{ internal | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C"
+      - stop: "Holiday mode active"
+  - if:
+      - condition: template
+        value_template: "{{ bio2_preset == 'heat_8_15' }}"
+    then:
+      - action: climate.set_preset_mode
+        target:
+          entity_id: climate.bio2
+        data:
+          preset_mode: none
+  # ---- Super-expensive: off while idling above target ----
+  - if:
+      - condition: template
+        value_template: "{{ shed_now }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ bio2_state != 'off' }}"
+        then:
+          - action: climate.set_hvac_mode
+            target:
+              entity_id: climate.bio2
+            data:
+              hvac_mode: "off"
+          - action: logbook.log
+            data:
+              name: Bio2 HVAC
+              message: "Super-expensive: Bio2 OFF (room {{ room | round(1) }}°C above {{ target | round(1) }}°C target)."
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio2_hvac_headline
+        data:
+          value: "Super-expensive · Off"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio2_hvac_status
+        data:
+          value: "Super-expensive shed: Bio2 OFF, room={{ room | round(1) }}°C, want {{ target | round(1) }}°C, internal={{ internal | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C"
+      - stop: "Super-expensive mode active"
+  # ---- Normal: fool the unit's own thermostat with the room sensor ----
+  - if:
+      - condition: template
+        value_template: >-
+          {{ bio2_state != heat_mode
+             or (state_attr('climate.bio2', 'temperature') | float(-1)) != (heat_setpoint | float) }}
+    then:
+      - action: climate.set_hvac_mode
+        target:
+          entity_id: climate.bio2
+        data:
+          hvac_mode: "{{ heat_mode }}"
+      - action: climate.set_temperature
+        target:
+          entity_id: climate.bio2
+        data:
+          temperature: "{{ heat_setpoint }}"
+          hvac_mode: "{{ heat_mode }}"
+      - action: logbook.log
+        data:
+          name: Bio2 HVAC
+          message: >-
+            {{ reason | trim }} · {{ heat_action_label | trim }}: mode={{ heat_mode }},
+            want={{ target | round(1) }}°C, need={{ heat_need | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C,
+            room={{ room | round(1) if room_ok else 'n/a' }}°C, internal={{ internal | round(1) }}°C,
+            outdoor={{ outdoor | round(1) }}°C, projector={{ projector_state }}, preset={{ bio2_preset }}
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.bio2_hvac_headline
+    data:
+      value: "{{ (reason | trim) ~ ' · ' ~ (heat_action_label | trim) }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.bio2_hvac_status
+    data:
+      value: >-
+        {% set s %}mode={{ heat_mode }}, want={{ target | round(1) }}°C, need={{ heat_need | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C, room={{ room | round(1) if room_ok else 'n/a' }}°C, internal={{ internal | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, projector={{ projector_state }}, preset={{ bio2_preset }}, lock={{ lock_minutes_remaining }}m{% endset -%}
+        {{ s | truncate(255, True, '', 0) }}
+mode: queued
+max: 2
+max_exceeded: silent

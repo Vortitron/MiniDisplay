@@ -15,7 +15,7 @@ Home Assistant automations for `climate.circulation_fan`, used to push warm air 
 
 - Turns the circulation fan **on earlier than before** to reduce bedroom heater cycling.
 - Uses these entities:
-  - Bedroom temperature: `sensor.bedroomlights_bedroomlights_temperature`
+  - Bedroom temperature: `sensor.loftc3_loftc3_temperature` — **Oct 2026:** the BedroomLights ESP32 moved to the bio hall, so the loft sensor (where the fan's air ends up) stands in until the bedroom gets a new sensor. The `climate.circulation_fan` generic_thermostat's `target_sensor` was repointed the same way (config entry *Circulation fan*, options flow).
   - Other room temperature: `sensor.t_h_sensor_temperature`
   - Bedroom target temperature: `state_attr('climate.mama_bedroom_thermostat', 'temperature')`
 

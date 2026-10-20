@@ -47,6 +47,9 @@ views:
                 name: Manual lock until
               - entity: input_boolean.holiday_mode
                 name: Holiday mode
+              - entity: input_select.phone_zone
+                name: Phone zone (20°C by day where it is)
+                icon: mdi:cellphone-marker
           - type: entities
             title: Superchill (blast cool)
             show_header_toggle: false
@@ -71,6 +74,44 @@ views:
                 name: Living-room TV
               - entity: media_player.telia_tv
                 name: Telia TV
+      # ------------------------------------------------- Bio2 (bio hall)
+      # Temporary heat pump in the bio hall (Oct 2026), driven by Bio2Hvac.yaml
+      # from the wall sensor there. When it is unavailable Sam covers the room
+      # through the circulation fan, and the headline says so.
+      - type: grid
+        cards:
+          - type: heading
+            heading: Bio2 — bio hall heat pump
+            icon: mdi:projector-screen
+          - type: markdown
+            content: >
+              ## {{ states('input_text.bio2_hvac_headline') }}
+
+              {{ states('input_text.bio2_hvac_status') }}
+          - type: thermostat
+            entity: climate.bio2
+          - type: entities
+            title: Targets & plan
+            show_header_toggle: false
+            entities:
+              - entity: input_number.bio2_desired_temperature
+                name: Desired (16 idle · 20 film)
+                icon: mdi:home-thermometer
+              - entity: input_datetime.bio2_desired_lock_until
+                name: Manual lock until
+              - entity: input_select.bio_projector
+                name: Projector
+              - entity: sensor.bio2_daily_energy
+                name: Energy today
+          - type: glance
+            columns: 3
+            entities:
+              - entity: sensor.bedroomlights_bedroomlights_temperature
+                name: Bio hall
+              - entity: sensor.bio2_inside_temperature
+                name: Bio2 unit
+              - entity: sensor.bio2_outside_temperature
+                name: Outside
       # -------------------------------------------------------- Temperatures
       - type: grid
         cards:
@@ -87,15 +128,25 @@ views:
               - entity: sensor.sam_outside_temperature
                 name: Outside
               - entity: sensor.bedroomlights_bedroomlights_temperature
-                name: Bedroom
+                name: Bio hall
+              - entity: sensor.loftc3_loftc3_temperature
+                name: Loft (fan room)
+              - entity: climate.circulation_fan
+                name: Circulation fan
           - type: history-graph
             title: Last 24 h
             hours_to_show: 24
             entities:
               - entity: sensor.t_h_sensor_temperature
                 name: Living
+              - entity: sensor.bedroomlights_bedroomlights_temperature
+                name: Bio hall
+              - entity: sensor.loftc3_loftc3_temperature
+                name: Loft
               - entity: sensor.sam_inside_temperature
                 name: Sam unit
+              - entity: sensor.bio2_inside_temperature
+                name: Bio2 unit
               - entity: sensor.sam_outside_temperature
                 name: Outside
           - type: entities

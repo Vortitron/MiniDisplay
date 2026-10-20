@@ -163,11 +163,20 @@ Sam uses different "remote" temperatures for cooling vs heating:
 - **Cooling logic** uses the living-room sensor only:
   - `sensor.t_h_sensor_temperature`
 
-- **Heating logic** uses:
+- **Heating logic** uses the **coldest** of the rooms Sam is heating (`remote_heat_rooms`):
   - **Fan OFF** → living-room sensor (`sensor.t_h_sensor_temperature`)
-  - **Fan ON** → `min(sensor.bedroomlights_bedroomlights_temperature, sensor.t_h_sensor_temperature)`
+  - **Fan ON** → living room **and the loft** (`sensor.loftc3_loftc3_temperature`, where the circulation fan's air ends up — Oct 2026), **plus the bio hall** (`sensor.bedroomlights_bedroomlights_temperature`) only while `climate.bio2` is unavailable
+  - living room gone → loft, then bio, then Sam's own sensor (`internal_fallback`)
 
-The "min" rule encourages Sam to keep heating until the bedroom catches up whenever the circulation fan is actively pushing warm air, unless the living-room overheat guard is triggered.
+The "min" rule keeps Sam heating until the far room catches up whenever the circulation fan is pushing warm air, unless the living-room overheat guard is triggered. Status shows the rooms used, e.g. `via min(living,loft)`.
+
+> **Bio2 (Oct 2026).** The BedroomLights ESP32 now sits on the bio hall wall. While **`climate.bio2`** (a heat pump wired in there temporarily, driven by `Bio2Hvac.yaml` — see `README_Bio2HVAC.md`) is **available**, that sensor stays out of the min (`bio2_live`) and `BioProjectorLights.yaml` no longer raises Sam's desired on film start. When Bio2 is **unavailable** (cloud drop or unplugged) Sam covers the bio hall from next door again. Regression: `bio2_live_fan_on_uses_living_loft` / `bio2_down_fan_on_uses_min` / `fan_on_loft_cold*`.
+
+### Phone-room comfort (Oct 2026)
+
+`PhoneZone.yaml` settles the Pixel 8's Bermuda area (`sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area`) into **`input_select.phone_zone`** — `loft` / `living` (the middle floor) / `bio` / `other` (downstairs, outside) / `away` — only after the new zone has held for **3 minutes**, because the raw sensor flaps between Living Room and Kitchen every minute or two. `DaytimeCheapHeat.yaml` treats `loft` and `living` (and `bio` while Bio2 is unavailable) exactly like the TV: **desired 20 °C from 07:00 to 23:00** and no expensive-hour cut (`occupied = tv_on or phone_comfort`; reason `Phone in loft 20°C`). `Bio2Hvac.yaml` does the same for `bio`. Overnight the phone is home too, so nothing changes before 07:00. Regression: `test_phone_room_comfort`.
+
+For the loft, Sam's 20 °C only arrives through the circulation fan: `CirculationFan.yaml` (Temperature Control) turns `climate.circulation_fan` on when the living room is warmer than the loft and the loft is below `sam_desired_temperature`, and `sam.yaml` then heats on min(living, loft).
 
 ### No room sensor: Sam's own sensor (`internal_fallback`)
 
@@ -382,6 +391,7 @@ live HA list-only `min`/`max` filter semantics).
 - `sensor.forecast_today_max` (hot-day morning heat skip)
 - `input_boolean.daytime_cheap_7_21`
 - `input_boolean.holiday_mode`
+- `input_select.phone_zone` (PhoneZone.yaml) and `climate.bio2` availability (phone-room comfort)
 - `input_number.sam_desired_temperature` (reads and writes)
 - `input_number.sam_control_temperature` (writes)
 - `input_number.sam_automation_set_value` (reads and writes — manual-override detection)
@@ -397,7 +407,7 @@ live HA list-only `min`/`max` filter semantics).
 - `input_boolean.sam_superchill_active` (manual blast-cool flag)
 - `input_datetime.sam_superchill_until` (UI countdown for Superchill)
 - `sensor.t_h_sensor_temperature` (living room)
-- `sensor.bedroomlights_bedroomlights_temperature` (bedroom)
+- `sensor.loftc3_loftc3_temperature` (loft — the fan room) and `sensor.bedroomlights_bedroomlights_temperature` (bio hall; only while `climate.bio2` is unavailable)
 - `climate.circulation_fan` (on/off state, read) and `switch.smart_plug_5_socket_1` (the fan's Tuya plug — driven on/off during cooling)
 
 ### SamSuperchill.yaml

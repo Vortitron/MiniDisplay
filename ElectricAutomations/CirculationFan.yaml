@@ -10,6 +10,11 @@
 # - Temperature Control no longer needs the thermostat (Sep 2026): it compares
 #   the bedroom and living-room sensors against the house comfort target,
 #   input_number.sam_desired_temperature.
+# - Oct 2026: the "bedroom" ESP32 (sensor.bedroomlights_bedroomlights_temperature)
+#   moved to the bio hall, so the fan's room is read from the loft instead —
+#   sensor.loftc3_loftc3_temperature, where its air ends up — until a new
+#   sensor goes in the bedroom. The generic_thermostat's own target_sensor
+#   (config entry "Circulation fan") was repointed the same way.
 # ============================================================================
 # Automation to sync circulation fan temperature to mama's bedroom thermostat + 1°C
 id: circulation_fan_temperature_sync
@@ -35,10 +40,10 @@ mode: single
 # Automation to control circulation fan based on temperature comparison
 id: circulation_fan_temperature_control
 alias: "Circulation Fan - Temperature Control"
-description: "Turn on when the living room is warmer and the bedroom is below the comfort target (sam_desired_temperature); turn off when no longer beneficial"
+description: "Turn on when the living room is warmer and the fan room (loft sensor, Oct 2026) is below the comfort target (sam_desired_temperature); turn off when no longer beneficial"
 trigger:
   - platform: state
-    entity_id: sensor.bedroomlights_bedroomlights_temperature
+    entity_id: sensor.loftc3_loftc3_temperature
   - platform: state
     entity_id: sensor.t_h_sensor_temperature
   - platform: state
@@ -46,7 +51,8 @@ trigger:
 condition: []
 action:
   - variables:
-      bedroom_temp_state: "{{ states('sensor.bedroomlights_bedroomlights_temperature') }}"
+      # The fan's room: the loft sensor for now (the bedroom ESP32 is in the bio).
+      bedroom_temp_state: "{{ states('sensor.loftc3_loftc3_temperature') }}"
       other_room_temp_state: "{{ states('sensor.t_h_sensor_temperature') }}"
       # House comfort target (16°C day / 20°C evening, set by DaytimeCheapHeat).
       bedroom_target_raw: "{{ states('input_number.sam_desired_temperature') }}"

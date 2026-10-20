@@ -32,15 +32,15 @@ def load_dashboard_config() -> dict:
 
 
 def load_vome_broker() -> tuple[str, str] | None:
-	if not MCP.is_file():
+	"""Same token/instance lookup as the other deploy scripts (Oct 2026: the
+	old copy here read a stdio-server `env` that no longer exists and choked
+	on the trailing commas in ~/.cursor/mcp.json)."""
+	from deploy_feed_restore import load_broker
+
+	try:
+		return load_broker()
+	except SystemExit:
 		return None
-	servers = json.loads(MCP.read_text()).get("mcpServers", {})
-	cfg = servers.get("ha-gamlabio", servers.get("home-assistant", {})).get("env", {})
-	token = cfg.get("VOMEHOME_TOKEN", "").strip()
-	instance = cfg.get("VOMEHOME_INSTANCE_ID", "").strip()
-	if not token or not instance:
-		return None
-	return f"https://vome.io/api/v1/instances/{instance}/ha", token
 
 
 def ws_command(base: str, token: str, command: dict) -> object:

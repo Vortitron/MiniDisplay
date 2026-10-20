@@ -23,9 +23,13 @@ description: >-
 
   - Cooling: living-room sensor only (sensor.t_h_sensor_temperature).
   - Heating, fan OFF: living-room sensor.
-  - Heating, circulation fan ON: min(living, bedroom) so Sam keeps working
-    until the bedroom catches up.
-  - Neither room sensor available (e.g. Tuya signed out): fall back to Sam's
+  - Heating, circulation fan ON: min(living, loft) so Sam keeps working
+    until the loft catches up (Oct 2026: the fan's air ends up in the loft,
+    read by sensor.loftc3_loftc3_temperature). The bio hall sensor
+    (sensor.bedroomlights_bedroomlights_temperature, the ESP32 that used to
+    be in the bedroom) joins the min only while climate.bio2 is unavailable;
+    with Bio2 live (Bio2Hvac.yaml) that room heats itself.
+  - No room sensor available at all (e.g. Tuya signed out): fall back to Sam's
     own sensor. Sam heats as its own thermostat at control +
     heat_fallback_offset (its ceiling sensor over-reads), and cooling decisions
     use the internal reading. Headline shows "Sam sensor only".
@@ -41,8 +45,8 @@ description: >-
 
   Default is to do NOTHING energy-hungry. The compressor (cool mode) runs when:
     - it is genuinely hot BOTH inside and out (living ≥ 27°C AND outdoor ≥ 27°C), or
-    - the scorcher override fires — outdoor > 30°C AND either room (living OR
-      bedroom) > 27°C AND power is cheap, or
+    - the scorcher override fires — outdoor > 30°C AND any room (living,
+      loft or bio) > 27°C AND power is cheap, or
     - pre-cooling (see below).
   Otherwise, if the room is merely too warm (≥ 25°C and it's ≥ 22°C outside), Sam
   just circulates air (fan_only) — no compressor. Cooling is never engaged when
@@ -134,11 +138,19 @@ triggers:
   - trigger: state
     entity_id:
       - sensor.t_h_sensor_temperature
+      - sensor.loftc3_loftc3_temperature
       - sensor.bedroomlights_bedroomlights_temperature
       - sensor.sam_outside_temperature
       - sensor.sam_inside_temperature
     for:
       seconds: 30
+  # Bio2 (bio hall heat pump) coming or going changes which room Sam reads.
+  - trigger: state
+    entity_id: climate.bio2
+    to: unavailable
+  - trigger: state
+    entity_id: climate.bio2
+    from: unavailable
   - trigger: state
     entity_id:
       - climate.circulation_fan
@@ -165,25 +177,35 @@ actions:
       superchill_active: "{{ is_state('input_boolean.sam_superchill_active', 'on') }}"
       sam_preset: "{{ state_attr('climate.sam', 'preset_mode') | default('none', true) }}"
       living_room_temp_state: "{{ states('sensor.t_h_sensor_temperature') }}"
-      bedroom_temp_state: "{{ states('sensor.bedroomlights_bedroomlights_temperature') }}"
+      # Loft: where the circulation fan's air ends up (Oct 2026).
+      loft_temp_state: "{{ states('sensor.loftc3_loftc3_temperature') }}"
+      # Bio hall: the old "bedroom" ESP32, now on the bio wall. Bio2's room.
+      bio_temp_state: "{{ states('sensor.bedroomlights_bedroomlights_temperature') }}"
       sam_outdoor_state: "{{ states('sensor.sam_outside_temperature') }}"
       sam_internal_state: "{{ states('sensor.sam_inside_temperature') }}"
       sam_desired_state: "{{ states('input_number.sam_desired_temperature') }}"
       sam_control_state: "{{ states('input_number.sam_control_temperature') }}"
       fan_state: "{{ states('climate.circulation_fan') }}"
       fan_running: "{{ fan_state not in ['off', 'unknown', 'unavailable', 'none', ''] }}"
+      # The bio hall has its own heat pump while climate.bio2 is live
+      # (Bio2Hvac.yaml). Then its sensor stays out of the fan's min: Sam
+      # would otherwise heat the living room hard to warm a room Bio2 is
+      # already heating. Unavailable (cloud drop or unplugged) = Sam's job.
+      bio2_live: "{{ states('climate.bio2') not in ['unknown', 'unavailable', 'none', ''] }}"
 
       living_room_temp_ok: "{{ living_room_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
-      bedroom_temp_ok: "{{ bedroom_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      loft_temp_ok: "{{ loft_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
+      bio_temp_ok: "{{ bio_temp_state not in ['unknown', 'unavailable', 'none', ''] }}"
       outdoor_ok: "{{ sam_outdoor_state not in ['unknown', 'unavailable', 'none', ''] }}"
       internal_ok: "{{ sam_internal_state not in ['unknown', 'unavailable', 'none', ''] }}"
       control_ok: "{{ sam_control_state not in ['unknown', 'unavailable', 'none', ''] }}"
-      # Both room sensors gone: steer from Sam's own (ceiling) sensor rather
+      # Every room sensor gone: steer from Sam's own (ceiling) sensor rather
       # than skip and leave Sam on whatever it was last told.
-      internal_fallback: "{{ internal_ok and not living_room_temp_ok and not bedroom_temp_ok }}"
+      internal_fallback: "{{ internal_ok and not living_room_temp_ok and not loft_temp_ok and not bio_temp_ok }}"
 
       living_room_temp: "{{ living_room_temp_state | float(0) }}"
-      bedroom_temp: "{{ bedroom_temp_state | float(0) }}"
+      loft_temp: "{{ loft_temp_state | float(0) }}"
+      bio_temp: "{{ bio_temp_state | float(0) }}"
       outdoor: "{{ sam_outdoor_state | float(0) }}"
       internal: "{{ sam_internal_state | float(0) }}"
       desired_base: "{{ sam_control_state | float(0) }}"
@@ -230,49 +252,34 @@ actions:
       # Cooling uses the living room sensor (Sam's own when no room sensor).
       remote_cool: "{{ internal if internal_fallback else living_room_temp }}"
 
-      # Heating uses:
-      # - living room sensor when circulation fan is off
-      # - min(bedroom,living) when circulation fan is on (so Sam keeps heating until bedroom catches up)
-      # - Sam's internal sensor when neither room sensor is available
-      remote_heat: >-
-        {% if fan_running %}
-          {% if living_room_temp_ok and bedroom_temp_ok %}
-            {{ [living_room_temp, bedroom_temp] | min }}
-          {% elif bedroom_temp_ok %}
-            {{ bedroom_temp }}
-          {% elif living_room_temp_ok %}
-            {{ living_room_temp }}
-          {% else %}
-            {{ internal }}
-          {% endif %}
-        {% else %}
-          {% if living_room_temp_ok %}
-            {{ living_room_temp }}
-          {% elif bedroom_temp_ok %}
-            {{ bedroom_temp }}
-          {% else %}
-            {{ internal }}
-          {% endif %}
+      # Heating uses the coldest of the rooms Sam is heating:
+      # - living room sensor when the circulation fan is off
+      # - with the fan on, the loft too (so Sam keeps heating until the loft
+      #   catches up), and the bio hall only while Bio2 is unavailable
+      # - living room gone: loft, then bio, then Sam's own sensor
+      remote_heat_rooms: >-
+        {% set ns = namespace(rooms=[]) %}
+        {% if living_room_temp_ok %}{% set ns.rooms = ns.rooms + ['living'] %}{% endif %}
+        {% if fan_running and loft_temp_ok %}{% set ns.rooms = ns.rooms + ['loft'] %}{% endif %}
+        {% if fan_running and bio_temp_ok and not bio2_live %}{% set ns.rooms = ns.rooms + ['bio'] %}{% endif %}
+        {% if ns.rooms | count == 0 %}
+          {% if loft_temp_ok %}{% set ns.rooms = ['loft'] %}
+          {% elif bio_temp_ok %}{% set ns.rooms = ['bio'] %}{% endif %}
         {% endif %}
+        {{ ns.rooms }}
+      remote_heat: >-
+        {% set ns = namespace(t=[]) %}
+        {% for r in remote_heat_rooms %}
+          {% set ns.t = ns.t + [living_room_temp if r == 'living' else (loft_temp if r == 'loft' else bio_temp)] %}
+        {% endfor %}
+        {{ ns.t | min if ns.t | count > 0 else internal }}
       remote_heat_source: >-
-        {% if fan_running %}
-          {% if living_room_temp_ok and bedroom_temp_ok %}
-            min(bedroom,living)
-          {% elif bedroom_temp_ok %}
-            bedroom
-          {% elif living_room_temp_ok %}
-            living
-          {% else %}
-            sam internal
-          {% endif %}
+        {% if remote_heat_rooms | count > 1 %}
+          min({{ remote_heat_rooms | join(',') }})
+        {% elif remote_heat_rooms | count == 1 %}
+          {{ remote_heat_rooms[0] }}
         {% else %}
-          {% if living_room_temp_ok %}
-            living
-          {% elif bedroom_temp_ok %}
-            bedroom
-          {% else %}
-            sam internal
-          {% endif %}
+          sam internal
         {% endif %}
       # Guard: allow living-room overheating to help bedroom, but never above
       # both desired targets (effective desired).
@@ -323,12 +330,13 @@ actions:
       room_too_warm: "{{ remote_cool >= cool_fan_target }}"
       # Genuinely hot BOTH inside and out -> compressor cooling justified.
       very_hot: "{{ remote_cool >= cool_compressor_in and outdoor >= cool_compressor_out }}"
-      # Scorcher override: it's really hot outside and EITHER room (living or
-      # bedroom) is uncomfortably warm. On cheap power, just cool — no cooling-
+      # Scorcher override: it's really hot outside and ANY room (living, loft
+      # or bio) is uncomfortably warm. On cheap power, just cool — no cooling-
       # trend / cheaper-still-later guessing.
       cool_hot_rooms: >-
         {{ (living_room_temp_ok and living_room_temp > cool_hot_room)
-           or (bedroom_temp_ok and bedroom_temp > cool_hot_room)
+           or (loft_temp_ok and loft_temp > cool_hot_room)
+           or (bio_temp_ok and bio_temp > cool_hot_room)
            or (internal_fallback and internal > cool_hot_room) }}
       hot_cheap_cool: "{{ cheap_now and outdoor > cool_hot_outdoor and cool_hot_rooms }}"
       # Pre-cool opportunity: power cheap now, a hot day forecast, NOT about to
@@ -409,7 +417,7 @@ actions:
         data:
           name: Sam HVAC
           message: >-
-            Skipping update (missing data). fan={{ fan_state }}, living={{ living_room_temp_state }}, bedroom={{ bedroom_temp_state }}, outdoor={{ sam_outdoor_state }}, internal={{ sam_internal_state }}, desired_ui={{ sam_desired_state }}, control={{ sam_control_state }}
+            Skipping update (missing data). fan={{ fan_state }}, living={{ living_room_temp_state }}, loft={{ loft_temp_state }}, bio={{ bio_temp_state }}, outdoor={{ sam_outdoor_state }}, internal={{ sam_internal_state }}, desired_ui={{ sam_desired_state }}, control={{ sam_control_state }}
       - stop: "Missing sensor data"
   - if:
       - condition: template
@@ -561,7 +569,7 @@ actions:
                     Cooling: {{ cool_action_label | trim }} (mode={{ cool_mode }}, setpoint={{ cool_setpoint | round(1) }}°C, preset={{ sam_preset }}),
                     living={{ living_room_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C,
                     very_hot={{ very_hot }}, precool={{ precool_now }}, hot_cheap={{ hot_cheap_cool }}, cooling_trend={{ outdoor_cooling_trend }} (base {{ cool_trend_baseline | round(1) }}°C),
-                    cheap_now={{ cheap_now }}, bedroom={{ bedroom_temp | round(1) }}°C, fc_day_max={{ forecast_day_max | round(1) }}°C, fc_out_4h={{ forecast_out_4h | round(1) }}°C
+                    cheap_now={{ cheap_now }}, loft={{ loft_temp | round(1) }}°C, bio={{ bio_temp | round(1) }}°C, fc_day_max={{ forecast_day_max | round(1) }}°C, fc_out_4h={{ forecast_out_4h | round(1) }}°C
           - action: input_text.set_value
             target:
               entity_id: input_text.sam_hvac_headline
@@ -572,7 +580,7 @@ actions:
               entity_id: input_text.sam_hvac_status
             data:
               value: >-
-                {% set s %}Cool: {{ cool_action_label | trim }} (mode={{ cool_mode }}, set={{ cool_setpoint | round(1) }}°C), living={{ living_room_temp | round(1) }}°C, bed={{ bedroom_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, very_hot={{ very_hot }}, hot_cheap={{ hot_cheap_cool }}, precool={{ precool_now }}, trend_cooler={{ outdoor_cooling_trend }}, rank={{ price_rank }}/{{ price_rank_4h }}, fc_max={{ forecast_day_max | round(0) }}°C{% endset -%}
+                {% set s %}Cool: {{ cool_action_label | trim }} (mode={{ cool_mode }}, set={{ cool_setpoint | round(1) }}°C), living={{ living_room_temp | round(1) }}°C, loft={{ loft_temp | round(1) }}°C, bio={{ bio_temp | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C, very_hot={{ very_hot }}, hot_cheap={{ hot_cheap_cool }}, precool={{ precool_now }}, trend_cooler={{ outdoor_cooling_trend }}, rank={{ price_rank }}/{{ price_rank_4h }}, fc_max={{ forecast_day_max | round(0) }}°C{% endset -%}
                 {{ s | truncate(255, True, '', 0) }}
           # Spread the cool air: run the circulation fan whenever Sam is cooling.
           - if:
@@ -626,7 +634,7 @@ actions:
                     control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C,
                     need={{ heat_need | round(1) }}°C, boost={{ heat_boost | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C,
                     remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source }},
-                    living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, overheat_guard={{ living_above_all_targets }},
+                    living={{ living_room_temp | round(1) }}°C, loft={{ loft_temp | round(1) }}°C, bio={{ bio_temp | round(1) }}°C, overheat_guard={{ living_above_all_targets }},
                     fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C
                     {% if desired_base > (sam_desired_state | float(0)) + 0.5 %} [pre-warm: control>{{ sam_desired_state }} desired]{% endif %}
           - action: input_text.set_value
@@ -642,7 +650,7 @@ actions:
               # headline helper). Capped to 255 chars so input_text.set_value can
               # never be rejected — this was the cause of the "Initializing..." bug.
               value: >-
-                {% set s %}Heating: mode={{ heat_mode }}, control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C, need={{ heat_need | round(1) }}°C, boost={{ heat_boost | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C, remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source | trim }}, living={{ living_room_temp | round(1) }}°C, bedroom={{ bedroom_temp | round(1) }}°C, guard={{ living_above_all_targets }}, fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C{% endset -%}
+                {% set s %}Heating: mode={{ heat_mode }}, control={{ desired_base | round(1) }}°C effective={{ desired_effective | round(1) }}°C, need={{ heat_need | round(1) }}°C, boost={{ heat_boost | round(1) }}°C, setpoint={{ heat_setpoint | round(1) }}°C, remote={{ remote_heat | round(1) }}°C via {{ remote_heat_source | trim }}, living={{ living_room_temp | round(1) }}°C, loft={{ loft_temp | round(1) }}°C, bio={{ bio_temp | round(1) }}°C, guard={{ living_above_all_targets }}, fan={{ fan_state }}, outdoor={{ outdoor | round(1) }}°C, internal={{ internal | round(1) }}°C{% endset -%}
                 {{ s | truncate(255, True, '', 0) }}
           # Not cooling: in warm weather, stop the circulation fan (it is only run
           # to spread Sam's cooling). In winter (outdoor < cool_outdoor_gate) leave

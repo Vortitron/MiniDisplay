@@ -18,6 +18,11 @@ description: >-
     - The overshoot is always sized by prewarm_control_target and the three
       thermal-model skip guards. There is no longer a flat 25°C branch.
 
+  Phone-room comfort (Oct 2026): input_select.phone_zone (PhoneZone.yaml) in
+  loft or living — or bio while climate.bio2 is unavailable — gives desired
+  20°C from 07:00 to 23:00, like the TV does (and like the TV, no
+  expensive-hour cut while it holds).
+
   Manual changes to sam_desired_temperature (from the HA UI, KitchenDetectorer
   Button 6, the MiniDisplay, voice, automations, scripts, etc.) are now
   STICKY for at least 90 minutes via input_datetime.sam_desired_lock_until.
@@ -54,6 +59,15 @@ triggers:
       - input_boolean.on_fixed_price_feed
       - sensor.forecast_tonight_min
       - sensor.forecast_outside_at_23
+      # Where Andy's phone is (PhoneZone.yaml) — comfort follows him by day.
+      - input_select.phone_zone
+  # Bio2 coming or going decides whether a phone in the bio is Sam's job.
+  - trigger: state
+    entity_id: climate.bio2
+    to: unavailable
+  - trigger: state
+    entity_id: climate.bio2
+    from: unavailable
   # Living-room temp changes every minute or two; debounce like sam.yaml does.
   - trigger: state
     entity_id:
@@ -100,6 +114,24 @@ actions:
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
       current_hour: "{{ now().hour }}"
       evening_hours: "{{ current_hour | int >= 19 and current_hour | int < 23 }}"
+      # ---- Phone-room comfort (Oct 2026) ----
+      # input_select.phone_zone (PhoneZone.yaml) says which heated zone the
+      # Pixel 8 has settled in. Sam reaches the loft (circulation fan) and the
+      # middle floor directly, and the bio only while climate.bio2 is away
+      # (Bio2Hvac.yaml heats it otherwise). By day that room gets 20°C, the
+      # same comfort signal as the TV: desired 20 and no expensive-hour cut.
+      # Not overnight — the phone is home then too, and 23:00-07:00 is economy.
+      phone_zone: "{{ states('input_select.phone_zone') }}"
+      bio2_live: "{{ states('climate.bio2') not in ['unknown', 'unavailable', 'none', ''] }}"
+      phone_in_sam_rooms: >-
+        {{ phone_zone in ['loft', 'living']
+           or (phone_zone == 'bio' and not bio2_live) }}
+      phone_comfort_start_hour: 7
+      phone_comfort: >-
+        {{ phone_in_sam_rooms
+           and current_hour | int >= phone_comfort_start_hour
+           and current_hour | int < 23 }}
+      occupied: "{{ tv_on or phone_comfort }}"
       # ---- Pre-warm window ----
       # Heat banked much earlier than it is wanted has leaked away again by the
       # time anyone is sitting in it. At the learned house time constant
@@ -157,7 +189,7 @@ actions:
       price_genuinely_expensive: "{{ nordpool_price >= nordpool_average }}"
       electricity_expensive_now: >-
         {{ price_rank > price_rank_4h and price_genuinely_expensive
-           and not tv_on and not on_fixed_price }}
+           and not occupied and not on_fixed_price }}
       # Relative "cheap" must not trigger afternoon-style boost during 19:00–23:00,
       # nor a wasteful morning warm-up when the day is going to be hot anyway.
       evening_hours_block_boost: "{{ evening_hours }}"
@@ -234,7 +266,7 @@ actions:
           10
         {% elif manual_override or lock_active_now %}
           {{ current_desired }}
-        {% elif evening_hours or tv_on %}
+        {% elif evening_hours or occupied %}
           20
         {% else %}
           16
@@ -314,6 +346,8 @@ actions:
           Electricity expensive
         {% elif tv_on %}
           Evening comfort {{ d | round(0) }}°C
+        {% elif phone_comfort %}
+          Phone in {{ phone_zone }} {{ d | round(0) }}°C
         {% else %}
           Daytime economy {{ d | round(0) }}°C
         {% endif %}
@@ -398,7 +432,7 @@ actions:
       name: Daytime Cheap Heat
       message: >-
         desired={{ desired }}°C, control={{ control }}°C,
-        tv={{ tv_on }}, evening={{ evening_hours }},
+        tv={{ tv_on }}, phone={{ phone_zone }} (comfort={{ phone_comfort }}, bio2={{ bio2_live }}), evening={{ evening_hours }},
         pre_evening={{ approaching_evening }},
         outside={{ outside_temp | round(1) }}°C,
         living={{ living_temp | round(1) if living_ok else 'n/a' }}°C,

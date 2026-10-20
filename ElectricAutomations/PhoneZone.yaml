@@ -1,0 +1,102 @@
+# Which heated zone Andy's phone is in (20 Oct 2026).
+#
+# Bermuda puts the Pixel 8's BLE beacon (the companion app's transmitter,
+# sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area) in an area
+# from the ESPHome proxies. Over 17-20 Oct it sat in the Loft for 40 h and the
+# bio for 11 h, but it flaps between Living Room and Kitchen (and briefly
+# unknown) every minute or two whenever he is on the middle floor, so the
+# heating must not follow the raw sensor.
+#
+# input_select.phone_zone (storage helper, made with ha_set_helper):
+#   loft    Loft — Sam, with the circulation fan pushing its heat up
+#   living  Living Room, Kitchen, the bedrooms and the rest of the middle
+#           floor — Sam directly
+#   bio     bio, Bio Office — Bio2 (Bio2Hvac.yaml), or Sam while Bio2 is
+#           unavailable
+#   other   downstairs, garden, front walkway — nothing heats there
+#   away    device_tracker.pixel_8 not home
+#
+# A change only lands after the new zone has held for settle_s (3 min): the
+# run waits, then reads the zone again and gives up if it moved. mode: single
+# drops the flaps that arrive during the wait; the /5 time pattern picks up a
+# zone that settled while a wait was busy. 'unknown' and areas not listed
+# leave the zone as it was.
+#
+# Readers: DaytimeCheapHeat.yaml (Sam's desired goes to 20 C from 07:00 to
+# 23:00 while the phone is in loft or living, or in the bio with Bio2 away)
+# and Bio2Hvac.yaml (20 C while the phone is in the bio).
+#
+# Deployed with ha_set_automation, id phone_zone.
+id: phone_zone
+alias: Phone zone (Pixel 8 room)
+description: >-
+  Settles the Pixel 8's Bermuda area into input_select.phone_zone (loft /
+  living / bio / other / away) after it has held for 3 minutes, so the heating
+  can follow the room without chasing the sensor's minute-to-minute flaps.
+mode: single
+max_exceeded: silent
+variables:
+  area_sensor: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
+  tracker: device_tracker.pixel_8
+  settle_s: 180
+  loft_areas: ["Loft"]
+  bio_areas: ["bio", "Bio Office"]
+  living_areas:
+    - Living Room
+    - Kitchen
+    - Bedroom
+    - Quiet room
+    - Upper Rear Vestibule
+    - Upstairs Shower
+    - Sofie Wardrobe
+    - Window Sills
+    - Residence
+  other_areas: ["Allrum", "Cellar 0", "Comms Room", "Back Garden", "Front walkway"]
+triggers:
+  - trigger: state
+    entity_id: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
+  - trigger: state
+    entity_id: device_tracker.pixel_8
+  - trigger: time_pattern
+    minutes: "/5"
+actions:
+  - variables:
+      zone_raw: >-
+        {% if states(tracker) == 'not_home' %}away
+        {% else %}
+          {% set a = states(area_sensor) %}
+          {% if a in loft_areas %}loft
+          {% elif a in bio_areas %}bio
+          {% elif a in living_areas %}living
+          {% elif a in other_areas %}other
+          {% else %}keep{% endif %}
+        {% endif %}
+      zone_now: "{{ zone_raw | trim }}"
+      current: "{{ states('input_select.phone_zone') }}"
+  - condition: template
+    value_template: "{{ zone_now != 'keep' and zone_now != current }}"
+  - delay:
+      seconds: "{{ settle_s }}"
+  - variables:
+      zone_after_raw: >-
+        {% if states(tracker) == 'not_home' %}away
+        {% else %}
+          {% set a = states(area_sensor) %}
+          {% if a in loft_areas %}loft
+          {% elif a in bio_areas %}bio
+          {% elif a in living_areas %}living
+          {% elif a in other_areas %}other
+          {% else %}keep{% endif %}
+        {% endif %}
+      zone_after: "{{ zone_after_raw | trim }}"
+  - condition: template
+    value_template: "{{ zone_after == zone_now }}"
+  - action: input_select.select_option
+    target:
+      entity_id: input_select.phone_zone
+    data:
+      option: "{{ zone_now }}"
+  - action: logbook.log
+    data:
+      name: Phone zone
+      message: "{{ current }} -> {{ zone_now }} (area {{ states(area_sensor) }}, held {{ settle_s }} s)."

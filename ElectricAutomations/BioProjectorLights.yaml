@@ -13,7 +13,10 @@
 #     on go to 10% before 20:00 (what was chosen by hand for the 17 Oct
 #     evening film), all off from 20:00. Sam's desired temperature goes up
 #     to 20 C if lower and not on holiday, as the BILRESA bio button does
-#     (replaces "Sam TV Comfort", which watched the LG TV no longer used).
+#     (replaces "Sam TV Comfort", which watched the LG TV no longer used) —
+#     but only while climate.bio2 is unavailable (20 Oct 2026): with the
+#     bio hall's own heat pump live, Bio2Hvac.yaml heats the room to 20 C
+#     on the same input_select change and Sam stays on its own plan.
 #   playing -> paused (200-290 W for 20 s): the bio lights are saved
 #     (scene.bio_before_pause) and the gold lights fade up to 40% red.
 #   paused -> playing: the saved lights come straight back.
@@ -30,7 +33,8 @@ alias: Bio projector lights
 description: >-
   Follows sensor.bio_power_power through input_select.bio_projector. Film
   starts (over 300 W from off): bio lights that are on go to 10% before
-  20:00, off from 20:00, and Sam's desired temperature up to 20 C. Paused
+  20:00, off from 20:00, and Sam's desired temperature up to 20 C when
+  climate.bio2 is unavailable (otherwise Bio2 heats the bio hall). Paused
   with the lamp dimmed (200-290 W for 20 s): lights saved, gold lights fade
   up to 40% red. Playing again: saved lights restored. Under 150 W for 60 s:
   off.
@@ -95,6 +99,7 @@ actions:
               - condition: template
                 value_template: >-
                   {{ is_state('input_boolean.holiday_mode', 'off')
+                     and states('climate.bio2') in ['unknown', 'unavailable', 'none', '']
                      and states('input_number.sam_desired_temperature') | float(99) < home_temp_c }}
             then:
               - action: input_number.set_value

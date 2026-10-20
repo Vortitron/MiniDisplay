@@ -360,7 +360,7 @@ PRICE_GATE_CHAIN = {
 	"price_genuinely_expensive": "{{ nordpool_price >= nordpool_average }}",
 	"electricity_expensive_now": (
 		"{{ price_rank > price_rank_4h and price_genuinely_expensive "
-		"and not tv_on and not on_fixed_price }}"
+		"and not occupied and not on_fixed_price }}"
 	),
 }
 
@@ -387,7 +387,8 @@ GATE_CONSTS = {
 	"on_fixed_price": False,
 	"evening_hours_block_boost": False,
 	"suppress_morning_heat": False,
-	"tv_on": False,
+	# occupied = tv_on or phone_comfort (Oct 2026: the phone's settled zone).
+	"occupied": False,
 }
 
 
@@ -454,11 +455,52 @@ def test_below_average_morning_is_not_called_expensive():
 	assert dear["price_genuinely_expensive"] is True
 	assert dear["electricity_expensive_now"] is True
 
-	# TV on still protects comfort even when the price is genuinely dear.
+	# TV on (or the phone settled in a room Sam heats, by day) still protects
+	# comfort even when the price is genuinely dear.
 	watching = _render_chain(PRICE_GATE_CHAIN, dict(
-		GATE_CONSTS, tv_on=True, price_rank=18, price_rank_4h=10,
+		GATE_CONSTS, occupied=True, price_rank=18, price_rank_4h=10,
 		**_nordpool(2.5, 1.234875)))
 	assert watching["electricity_expensive_now"] is False
+
+
+# Must match DaytimeCheapHeat.yaml exactly.
+PHONE_CHAIN = {
+	"phone_in_sam_rooms": (
+		"{{ phone_zone in ['loft', 'living'] "
+		"or (phone_zone == 'bio' and not bio2_live) }}"
+	),
+	"phone_comfort": (
+		"{{ phone_in_sam_rooms "
+		"and current_hour | int >= phone_comfort_start_hour "
+		"and current_hour | int < 23 }}"
+	),
+	"occupied": "{{ tv_on or phone_comfort }}",
+}
+
+
+def test_phone_room_comfort():
+	def run(**over):
+		ctx = dict(phone_comfort_start_hour=7, tv_on=False, bio2_live=True, current_hour=10)
+		ctx.update(over)
+		return _render_chain(PHONE_CHAIN, ctx)
+
+	# Working in the loft by day: Sam's room.
+	assert run(phone_zone="loft")["occupied"] is True
+	assert run(phone_zone="living")["occupied"] is True
+	# In the bio: Bio2's job while it is live, Sam's when it is not.
+	assert run(phone_zone="bio")["occupied"] is False
+	assert run(phone_zone="bio", bio2_live=False)["occupied"] is True
+	# Downstairs, out, or unknown: nothing.
+	for z in ("other", "away", "unknown", ""):
+		assert run(phone_zone=z)["occupied"] is False, z
+	# Overnight the phone is home too — economy until 07:00.
+	assert run(phone_zone="loft", current_hour=2)["occupied"] is False
+	assert run(phone_zone="loft", current_hour=6)["occupied"] is False
+	assert run(phone_zone="loft", current_hour=7)["occupied"] is True
+	assert run(phone_zone="loft", current_hour=22)["occupied"] is True
+	assert run(phone_zone="loft", current_hour=23)["occupied"] is False
+	# The TV still counts on its own.
+	assert run(phone_zone="away", tv_on=True)["occupied"] is True
 
 
 def test_prewarm_window_widens_when_cold():
@@ -549,6 +591,7 @@ if __name__ == "__main__":
 		test_price_gate_rejects_the_run_up_into_a_peak,
 		test_cheap_leccy_is_an_absolute_escape_hatch,
 		test_below_average_morning_is_not_called_expensive,
+		test_phone_room_comfort,
 		test_prewarm_window_widens_when_cold,
 		test_no_overnight_25c_blast,
 		test_cold_afternoon_still_respects_the_skip_guards,

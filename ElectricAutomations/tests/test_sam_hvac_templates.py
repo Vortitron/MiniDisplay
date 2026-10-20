@@ -122,10 +122,11 @@ COOL_VARS = {
 	"cool_season": "{{ outdoor >= cool_outdoor_gate }}",
 	"room_too_warm": "{{ remote_cool >= cool_fan_target }}",
 	"very_hot": "{{ remote_cool >= cool_compressor_in and outdoor >= cool_compressor_out }}",
-	# Scorcher override: really hot outside and EITHER room uncomfortably warm.
+	# Scorcher override: really hot outside and ANY room uncomfortably warm.
 	"cool_hot_rooms": (
 		"{{ (living_room_temp_ok and living_room_temp > cool_hot_room) "
-		"or (bedroom_temp_ok and bedroom_temp > cool_hot_room) "
+		"or (loft_temp_ok and loft_temp > cool_hot_room) "
+		"or (bio_temp_ok and bio_temp > cool_hot_room) "
 		"or (internal_fallback and internal > cool_hot_room) }}"
 	),
 	"hot_cheap_cool": "{{ cheap_now and outdoor > cool_hot_outdoor and cool_hot_rooms }}",
@@ -172,11 +173,18 @@ def build_context(scenario: dict) -> dict:
 	"""Derive the intermediate context (as sam.yaml's variables block does)."""
 	ctx = dict(CONSTANTS)
 	living = scenario["living"]
+	# "bedroom" in the scenarios is the fan room: the loft since Oct 2026
+	# (sensor.loftc3_loftc3_temperature). "bio" is the bio hall sensor, only
+	# in the fan's min while Bio2 is unavailable.
 	bedroom = scenario.get("bedroom", living)
+	bio = scenario.get("bio")
 	outdoor = scenario["outdoor"]
 	internal = scenario["internal"]
 	control = scenario.get("control", 16)
 	fan_running = scenario.get("fan_running", False)
+	# Oct 2026: while climate.bio2 (the bio hall's own heat pump) is live, the
+	# fan's min(living, bedroom) rule is off and Sam reads the living room.
+	bio2_live = bool(scenario.get("bio2_live", False))
 
 	desired_base = float(control)
 	# The mama bedroom thermostat blend was retired (summer 2026 — bedroom
@@ -185,26 +193,39 @@ def build_context(scenario: dict) -> dict:
 
 	living_ok = bool(scenario.get("living_room_temp_ok", True))
 	bedroom_ok = bool(scenario.get("bedroom_temp_ok", True))
-	# Neither room sensor: sam.yaml falls back to Sam's own sensor.
-	internal_fallback = not living_ok and not bedroom_ok
+	bio_ok = bio is not None
+	# No room sensor at all: sam.yaml falls back to Sam's own sensor.
+	internal_fallback = not living_ok and not bedroom_ok and not bio_ok
 
+	# Mirrors remote_heat_rooms / remote_heat in sam.yaml.
+	rooms = []
+	if living_ok:
+		rooms.append(float(living))
+	if fan_running and bedroom_ok:
+		rooms.append(float(bedroom))
+	if fan_running and bio_ok and not bio2_live:
+		rooms.append(float(bio))
+	if not rooms:
+		if bedroom_ok:
+			rooms = [float(bedroom)]
+		elif bio_ok:
+			rooms = [float(bio)]
 	if internal_fallback:
 		remote_cool = float(internal)
 		remote_heat = float(internal)
-	elif fan_running and living_ok and bedroom_ok:
-		remote_cool = float(living)
-		remote_heat = min(float(living), float(bedroom))
 	else:
 		remote_cool = float(living)
-		remote_heat = float(living) if living_ok else float(bedroom)
+		remote_heat = min(rooms) if rooms else float(internal)
 
 	ctx.update(
 		{
 			"living_room_temp": float(living),
-			"bedroom_temp": float(bedroom),
+			"loft_temp": float(bedroom),
+			"bio_temp": float(bio) if bio_ok else 0.0,
 			# Sensors valid unless a scenario explicitly marks one offline.
 			"living_room_temp_ok": living_ok,
-			"bedroom_temp_ok": bedroom_ok,
+			"loft_temp_ok": bedroom_ok,
+			"bio_temp_ok": bio_ok,
 			"internal_fallback": internal_fallback,
 			"outdoor": float(outdoor),
 			"internal": float(internal),
@@ -281,6 +302,19 @@ HEAT_SCENARIOS = [
 	("bedroom_down_uses_living", dict(living=17, bedroom=0, bedroom_temp_ok=False,
 			outdoor=10, internal=20, control=20, fan_running=True),
 		"heat", 23.0),
+	# Live 20 Oct 2026: living 17, loft 18, bio hall 14, fan on. With Bio2
+	# unavailable Sam heats on the bio hall too (need 6 -> internal + 6); with
+	# Bio2 live that is Bio2's room, so Sam only closes the living room's 3°C.
+	("bio2_down_fan_on_uses_min", dict(living=17, bedroom=18, bio=14, outdoor=7, internal=20, control=20, fan_running=True),
+		"heat", 26.0),
+	("bio2_live_fan_on_uses_living_loft", dict(living=17, bedroom=18, bio=14, outdoor=7, internal=20, control=20, fan_running=True, bio2_live=True),
+		"heat", 23.0),
+	# Fan on, loft colder than the living room: Sam keeps going for the loft
+	# until the living-room overheat guard says enough (then internal - 2.5).
+	("fan_on_loft_cold", dict(living=20.5, bedroom=17, bio=14, outdoor=7, internal=21, control=20, fan_running=True, bio2_live=True),
+		"fan_only", 18.5),
+	("fan_on_loft_cold_living_at_target", dict(living=19.8, bedroom=17, outdoor=7, internal=21, control=20, fan_running=True, bio2_live=True),
+		"heat", 24.0),
 ]
 
 # --- Cooling scenarios: (name, scenario, expected cool_active, cool_mode,
