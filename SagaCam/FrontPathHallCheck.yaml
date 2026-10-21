@@ -37,10 +37,11 @@
 id: frontpath_hall_check
 alias: Front Path - forgot something
 description: >-
-  While a hall reference photo is armed ("Remember the hall"), when Andy's
+  While a hall reference photo is armed ("Remember the hall"), or
+  automatically on weekday mornings from the hall watch photos, when Andy's
   Pixel is out front and a person set's hall photo (d) arrives, Claude
-  compares the two and the Pixel is told what is still in the hall. One
-  shot; cleared at 03:00 if unused.
+  compares the hall before and after and the Pixel is told what is still
+  there. Manual: one shot, cleared at 03:00 if unused.
 mode: single
 triggers:
   - trigger: state
@@ -140,9 +141,13 @@ actions:
                 shelves by the door). The second was taken just now, after
                 someone went out. Which of the things that were put down in
                 the first photo are still there in the second?{% endif %}
-                Ignore shoes, coats on hooks and the permanent clutter; only
-                things that look placed to be taken: bags, boxes, parcels, a
-                basket, a helmet, a bottle, keys. Answer still_there yes if
+                Never count footwear or clothes: people swap indoor shoes or
+                slippers for outdoor ones on the way out, so shoes, slippers
+                and boots left behind (or moved, or gone) are normal, and so
+                are coats, jackets, hats and scarves taken down or left. Also
+                ignore the permanent clutter. Only count things that look
+                placed to be taken: bags, rucksacks, boxes, parcels, a
+                basket, a lunch box, sports kit, a helmet, a bottle, keys. Answer still_there yes if
                 any such thing is still there, no if they are gone or if
                 nothing looked placed to be taken. In 'items' name what is
                 still there, briefly.
