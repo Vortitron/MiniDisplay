@@ -35,7 +35,8 @@
   seen"; "unsure" when the AI only guessed), and the second row of buttons
   filters on it (Found = people and animals). Where the check found
   it is circled on the photos (from 21 Oct): solid for the Saga's detector,
-  dashed for the AI's rough guess, faint on the other photos of the set.
+  dashed for the AI's rough guess, only on the photo it was found in (the
+  strip's thumbnail of that photo has a green border).
 -->
 <style>
   :root {
@@ -77,7 +78,8 @@
   .mark.animal { border-color: var(--warn); }
   .mark.unsure { border-color: #aaa; }
   .mark.ai { border-style: dashed; }
-  .mark.other { opacity: .45; }
+  .lb .strip img.hit { border-color: #81c995; opacity: 1; }
+  .lb .strip img.hit.cur { border-color: var(--accent); }
   .mark span { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 2px;
                font-size: 12px; white-space: nowrap; background: rgba(0,0,0,.65); color: #fff; padding: 0 5px; border-radius: 3px; }
   #marks { position: absolute; pointer-events: none; }
@@ -161,15 +163,19 @@ const BOX = /\s*\[(~?)([abc]) ([a-z ]+?) ([\d.]+),([\d.]+),([\d.]+),([\d.]+)\]/g
 const boxesOf = v => [...v.matchAll(BOX)].map(m => ({ ai: !!m[1], part: m[2], label: m[3],
   x: +m[4], y: +m[5], w: +m[6], h: +m[7] }));
 // An ellipse a little bigger than the box, so the thing itself stays visible.
+// Only on the photo the box belongs to: the three photos are seconds apart
+// and whoever it was has moved (21 Oct: a box from photo c drawn over photo
+// a sat on empty steps). The strip marks the photo that has one.
 function marks(boxes, part, labels) {
-  return (boxes || []).map(b => {
+  return (boxes || []).filter(b => b.part === part).map(b => {
     const w = Math.max(b.w * 1.5, .04), h = Math.max(b.h * 1.5, .04);
     const x = b.x + b.w / 2 - w / 2, y = b.y + b.h / 2 - h / 2;
-    const cls = ["mark", b.label === "person" ? "person" : b.label === "unsure" ? "unsure" : "animal", b.ai ? "ai" : "", b.part !== part ? "other" : ""].join(" ");
-    const tip = labels ? `<span>${b.label}${b.ai ? " (AI, rough)" : ""}${b.part !== part ? " in photo " + b.part : ""}</span>` : "";
+    const cls = ["mark", b.label === "person" ? "person" : b.label === "unsure" ? "unsure" : "animal", b.ai ? "ai" : ""].join(" ");
+    const tip = labels ? `<span>${b.label}${b.ai ? " (AI, rough)" : ""}</span>` : "";
     return `<div class="${cls}" style="left:${x * 100}%;top:${y * 100}%;width:${w * 100}%;height:${h * 100}%">${tip}</div>`;
   }).join("");
 }
+const hasBox = (boxes, part) => (boxes || []).some(b => b.part === part);
 const whoOf = v => !v ? "" : /^person/.test(v) ? "person" : /^(nothing|no one)/.test(v) ? "none" : /^unsure/.test(v) ? "unsure" : "animal";
 const WHO = { person: "person", animal: "animal", none: "no one", unsure: "unsure" };
 
@@ -399,7 +405,7 @@ function render() {
     card.innerHTML = `<div class="pic"><img class="thumb" loading="lazy" alt="">${marks(e.boxes, e.photos[0].part, false)}</div>
       <div class="meta"><span class="time">${hms(e.time)}</span>
       <span class="kind ${e.kind}"> · ${KIND[e.kind]}</span>
-      ${e.seen ? `<span class="who ${e.seen}"> · ${WHO[e.seen]}</span>` : ""}
+      ${e.seen ? `<span class="who ${e.seen}"> · ${WHO[e.seen]}${(e.boxes || []).length && !hasBox(e.boxes, e.photos[0].part) ? " (photo " + e.boxes[0].part + ")" : ""}</span>` : ""}
       <div class="why">${e.why || "&nbsp;"}</div></div>`;
     card.onclick = () => open(first);
     grid.appendChild(card);
@@ -439,7 +445,7 @@ async function open(i) {
   strip.innerHTML = "";
   for (const q of e.photos) {
     const im = document.createElement("img");
-    im.className = q === p ? "cur" : "";
+    im.className = (q === p ? "cur" : "") + (hasBox(e.boxes, q.part) ? " hit" : "");
     url(q.thumb || q).then(v => { im.src = v; });
     im.onclick = () => open(flat.findIndex(f => f.p === q));
     strip.appendChild(im);

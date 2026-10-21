@@ -59,9 +59,11 @@ variables:
   person: "{{ trigger.json.person | default(0) | float(0) }}"
   animal: "{{ trigger.json.animal | default('') }}"
   animal_score: "{{ trigger.json.animal_score | default(0) | float(0) }}"
+  # Night by the sun, or the box's light sensor under 3 lx (it read 10-12 lx
+  # on an overcast morning when the camera's frames were fine: 21 Oct 08:42).
   dark: >-
     {{ is_state('sun.sun', 'below_horizon')
-       or states('sensor.front_walkway_frontpath_ble_processing_illuminance') | float(0) < 15 }}
+       or states('sensor.front_walkway_frontpath_ble_processing_illuminance') | float(0) < 3 }}
   unsure: "{{ person < 0.5 and (dark or person >= 0.15) }}"
   person_rule: >-
     {{ is_state('binary_sensor.frontpath_ble_processing_path_person_detected', 'on')
@@ -87,10 +89,21 @@ actions:
   - choose:
       - conditions: "{{ ask_ai }}"
         sequence:
-          # The stack is saved by saga_web_log a moment after it is sent.
-          - wait_template: "{{ tag in states('input_text.frontpath_last_stack_photo') }}"
+          # The photos are saved by saga_web_log a moment after they are sent.
+          # By day the AI gets the first single frame (sharp); at night the
+          # stack (8 frames added: brighter, but anything moving smears into
+          # a trail, which is why a person walking up the steps at 08:42 on
+          # 21 Oct came back "white cat trail").
+          - wait_template: >-
+              {{ (tag ~ '-b-stack') in states('input_text.frontpath_last_photos') if dark
+                 else (tag ~ '-a-frame') in states('input_text.frontpath_last_photos') }}
             timeout: "00:00:20"
             continue_on_timeout: true
+          - variables:
+              ai_photo: >-
+                {% set want = '-' ~ tag ~ ('-b-stack' if dark else '-a-frame') %}
+                {% set hit = states('input_text.frontpath_last_photos').split(' ') | select('search', want) | list %}
+                {{ hit[0] if hit else states('input_text.frontpath_last_stack_photo') }}
           - action: input_datetime.set_datetime
             continue_on_error: true
             target:
@@ -105,13 +118,15 @@ actions:
               entity_id: "{{ ai_entity }}"
               instructions: >-
                 This photo is from a camera inside a house door, looking out
-                across a patio and up garden steps towards the street, at
-                night. It is eight frames over about four seconds added
-                together, so anything moving appears as a trail of repeated
-                or smeared pale shapes, each a little smaller as it moves
-                away up the steps. A white cat lives here and makes exactly
-                that trail: a pale blob or streak repeated up the steps is
-                the cat, not a person with a light or an umbrella. Is there a
+                across a patio and up garden steps towards the street.
+                {% if dark %}It is night, and the photo is eight frames over
+                about four seconds added together, so anything moving appears
+                as a trail of repeated or smeared pale shapes, each a little
+                smaller as it moves away up the steps. A white cat lives here
+                and makes exactly that trail: a pale blob or streak repeated
+                up the steps is the cat, not a person with a light or an
+                umbrella.{% else %}It is a single frame in daylight, possibly
+                dull or wet. A white cat lives here.{% endif %} Is there a
                 person anywhere in it? If not, is there an animal (cat, dog,
                 fox, deer, bird)? Be sceptical: tree trunks, posts, the
                 railing, the garden chairs and reflections of the hallway in
@@ -146,7 +161,7 @@ actions:
                   selector:
                     text: {}
               attachments:
-                - media_content_id: "media-source://media_source/frontpath/{{ states('input_text.frontpath_last_stack_photo') }}"
+                - media_content_id: "media-source://media_source/frontpath/{{ ai_photo }}"
                   media_content_type: image/jpeg
           - variables:
               verdict: >-
@@ -154,7 +169,7 @@ actions:
                 {% set n = (ai.data.get('box') or '') | string | regex_findall('[0-9]*[.]?[0-9]+') | map('float') | list if v else [] %}
                 {% set sure = (ai.data.get('confidence') or 'high') != 'low' if v else true %}
                 {% set what = v if sure else 'unsure' %}
-                {% set aibox = '[~b ' ~ what ~ ' ' ~ (n[:4] | map('round', 2) | join(',')) ~ ']'
+                {% set aibox = '[~' ~ ('b' if dark else 'a') ~ ' ' ~ what ~ ' ' ~ (n[:4] | map('round', 2) | join(',')) ~ ']'
                    if n | count >= 4 and n[:4] | max <= 1 and n[2] > 0 and n[3] > 0 else '' %}
                 {% if person >= 0.5 %}{{ saga_verdict }}
                 {% elif v == 'person' and not sure %}unsure (AI: {{ ai.data.what | truncate(60) }}) {{ aibox }}
