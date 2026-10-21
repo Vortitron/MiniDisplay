@@ -156,3 +156,10 @@ min ("rain hold" in the Path Motion Trigger); FrontPathSeen.yaml asks Claude
 for a box-only set at most once in 10 min (input_datetime.frontpath_ai_asked;
 person-rule sets and Saga 15%+ always go), and the prompt explains the stack
 and the white cat.
+
+Both cameras (21 Oct): `input_button.saga_cam_inside_shot` makes the page
+open the inward (hall) camera while the outward one runs, take one frame and
+send it as inside<hhmmss>-a-frame (gallery kind "Inside"), reporting whether
+the outward stream survived. On the Saga it did: 1280x960 in 1.2 s, outward
+camera still live. So the two can run together and an inward snap costs a
+second, no interruption.

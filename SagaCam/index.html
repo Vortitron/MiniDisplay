@@ -500,6 +500,7 @@ const MOTION = "binary_sensor.front_walkway_frontpath_ble_processing_path_motion
 const WHY = "sensor.front_walkway_frontpath_ble_processing_path_motion_trigger";
 const TEST = "input_button.saga_cam_test_shot";
 const RELOAD = "input_button.saga_cam_reload";
+const INSIDE = "input_button.saga_cam_inside_shot";
 let ws = null, wsId = 1, liveOn = false, why = "", lastShot = 0, shooting = false;
 // Live mode lets go of the camera at 15% battery and takes it back at 35%,
 // so a charger that cannot keep up does not run the Saga flat (17 Oct).
@@ -522,7 +523,7 @@ function connect() {
     else if (m.type === "auth_invalid") { haStatus("token refused", "err"); report("Live: Home Assistant refused the token"); ws.close(); }
     else if (m.type === "auth_ok") {
       haStatus("connected, watching", "ok");
-      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, MOTION, WHY, TEST, RELOAD] }));
+      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, MOTION, WHY, TEST, RELOAD, INSIDE] }));
       report("Live: connected to Home Assistant, watching for detections");
     } else if (m.type === "event" && m.event) onEntities(m.event);
   };
@@ -541,6 +542,7 @@ function onEntities(e) {
     if (id === WHY) why = s;
     else if ((id === DETECT || id === MOTION) && s === "on") burst("detect");
     else if (id === TEST) burst("test");
+    else if (id === INSIDE) insideShot();
     // Pressed after the page is updated: reload in this tab, so no second
     // tab ends up fighting this one for the camera.
     else if (id === RELOAD) {
@@ -583,6 +585,49 @@ async function burst(kind) {
     if (lastBlob) blobs.push({ part: "c", blob: lastBlob });
   } finally { shooting = false; }
   if (blobs.length) seen(tag, kind, blobs);
+}
+
+// The inward (hall) camera, on input_button.saga_cam_inside_shot (21 Oct).
+// As much a test as a photo: it opens the user-facing camera while the
+// outward one is running, takes a frame, sends it as inside<hhmmss>-a-frame,
+// and reports whether the outward stream survived (many phones stop the
+// first camera when a second one opens) and how long the whole thing took.
+// If the outward camera was lost it is started again.
+const INSIDE_CAM = { audio: false, video: { facingMode: { exact: "user" },
+  width: { ideal: 1280 }, height: { ideal: 960 }, frameRate: { ideal: 10, max: 10 } } };
+async function insideShot() {
+  if (document.hidden || shooting) return;
+  shooting = true;
+  const tag = "inside" + hhmmss();
+  const t0 = Date.now();
+  const before = track && track.readyState === "live";
+  let s2 = null;
+  try {
+    s2 = await navigator.mediaDevices.getUserMedia(INSIDE_CAM);
+    const v2 = document.createElement("video");
+    v2.muted = true; v2.playsInline = true; v2.srcObject = s2;
+    try { await v2.play(); } catch (e) {}
+    for (let i = 0; i < 30 && !v2.videoWidth; i++) await sleep(100);
+    await sleep(700);   // let the exposure settle
+    const c = document.createElement("canvas");
+    c.width = v2.videoWidth; c.height = v2.videoHeight;
+    c.getContext("2d").drawImage(v2, 0, 0);
+    const blob = await canvasBlob(c);
+    const size = `${c.width}x${c.height}`;
+    c.width = c.height = 0;
+    const alive = track && track.readyState === "live";
+    report(`Live: ${tag}: inward ${size} in ${Date.now() - t0} ms; outward camera ${alive ? "still live" : "STOPPED"} (${before ? "was live" : "was not live"})`);
+    show(blob, "frame hall");
+    await sleep(300); await loaded();
+    lastName = tag + "-a-" + lastName;
+    await send();
+  } catch (e) {
+    report(`Live: ${tag} failed: ${e.name} ${e.message}; outward camera ${track ? track.readyState : "none"}`);
+  } finally {
+    if (s2) s2.getTracks().forEach(t => t.stop());
+    shooting = false;
+  }
+  if (liveOn && (!track || track.readyState !== "live")) { report("Live: restarting the outward camera"); await start(); }
 }
 
 // Who is it: an object detector (MediaPipe EfficientDet-Lite0, COCO

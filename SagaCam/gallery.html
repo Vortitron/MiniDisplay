@@ -262,7 +262,7 @@ function call(msg) {
 // web-20261016-213631-detect213622-a-frame-2592x1944.jpg
 // 20261016-105200.jpg (Fully)
 function parse(file) {
-  let m = file.match(/^web-(\d{8})-(\d{6})-(detect|test)(\d{6})-([abc])-([a-z]+)-(\d+x\d+)/);
+  let m = file.match(/^web-(\d{8})-(\d{6})-(detect|test|inside)(\d{6})-([abc])-([a-z]+)-(\d+x\d+)/);
   if (m) return { date: m[1], saved: m[2], kind: m[3], time: m[4], part: m[5], how: m[6], size: m[7] };
   m = file.match(/^web-(\d{8})-(\d{6})-([a-z]+)-(\d+x\d+)/);
   if (m) return { date: m[1], saved: m[2], kind: "test", time: m[2], part: "", how: m[3], size: m[4] };
@@ -383,7 +383,7 @@ async function showDay(d) {
   if (day === d) { render(); status(count()); }
 }
 
-const KIND = { detect: "Detection", test: "Test shot", burst: "Radar burst", fully: "Fully still" };
+const KIND = { detect: "Detection", test: "Test shot", burst: "Radar burst", fully: "Fully still", inside: "Inside (hall camera)" };
 
 function render() {
   const box = $("days");
