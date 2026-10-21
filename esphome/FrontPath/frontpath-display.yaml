@@ -29,6 +29,22 @@ logger:
 bluetooth_proxy:
   active: false
 
+# When the radio comes (back) up: the motion rule's radio_quiet window. The
+# wifi: and api: blocks themselves are in frontpath/frontpath.yaml; packages
+# merge, so only the hooks are added here.
+wifi:
+  on_connect:
+    - lambda: 'id(radio_up_ms) = millis();'
+api:
+  on_client_connected:
+    - lambda: 'id(radio_up_ms) = millis();'
+
+# Reset reason, heap and loop time, after the evening of 20 Oct when the box
+# went deaf to Home Assistant a dozen times (22:28-23:21): a reboot shows as
+# Uptime starting again and a Reset Reason; a stall shows in Loop Time.
+debug:
+  update_interval: 30s
+
 spi:
   id: path_lcd_spi
   clk_pin: GPIO1
@@ -60,6 +76,9 @@ font:
     glyphs: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÅÄÖåäö -.°"
 
 text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Reset Reason"
   # Both radars' per-gate energies, once a second, for replaying in Home
   # Assistant history: the 14 Oct test walk showed that moving energy only
   # reaches 2-3 m, while static energy follows a person to both ends of the
@@ -145,6 +164,14 @@ text_sensor:
       - script.execute: wx_pick
 
 sensor:
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+  - platform: debug
+    free:
+      name: "Heap Free"
+    loop_time:
+      name: "Loop Time"
   # The radar logic in frontpath/frontpath.yaml publishes position, active
   # gate and gate pattern every ~100 ms whether or not they changed. Each one
   # is an API message over a weak link (-81 dBm where the box is mounted).
@@ -341,6 +368,12 @@ globals:
     restore_value: no
     initial_value: 'false'
   - id: path_eng_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # millis() when the radio last came up (wifi on_connect, api
+  # on_client_connected); the box-adjacent motion rules wait 10 s after it.
+  - id: radio_up_ms
     type: uint32_t
     restore_value: no
     initial_value: '0'
@@ -821,8 +854,13 @@ interval:
           for (int i = 0; i < 4; i++)
             if (door_lit[i] != 0 && now - door_lit[i] < 4) door_recent++;
           const bool calm = (int32_t) (now - burst_until) >= 0;
-          const bool near = calm && have[0] && have[1] && mx[0][1] >= 45 && mx[1][1] >= 45;
-          if (cand >= 3 || door_recent >= 2 || near) {
+          // Not within 10 s of the radio (re)connecting: on 20 Oct 23:17:54
+          // the near rule fired (S1 46, D1 48) in the second the API came
+          // back after a drop-out. The box-adjacent rules sit that out; the
+          // 3-candidate person rule does not.
+          const bool radio_quiet = millis() - id(radio_up_ms) >= 10000;
+          const bool near = calm && radio_quiet && have[0] && have[1] && mx[0][1] >= 45 && mx[1][1] >= 45;
+          if (cand >= 3 || (door_recent >= 2 && radio_quiet) || near) {
             if (!id(path_motion_on)) {
               id(path_motion_on) = true;
               char mw[64];
