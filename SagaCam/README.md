@@ -175,9 +175,14 @@ Forgot something? (21 Oct, FrontPathHallCheck.yaml): "Remember the hall"
 (input_button.saga_cam_hall_remember, Front door dashboard) makes the Saga
 take a hall reference photo (hallref<hhmmss>-a-frame), which saga_web_log
 records in input_text.frontpath_hall_reference (armed; "Forget" clears it).
-When Andy's Pixel reaches the front walkway and a person set's hall photo d
-arrives within 2 min, Claude compares reference and d; if the things put by
-the door are still there, the Pixel gets "Forgot something? Still in the
-hall: ..." with the photo. One shot; an unused reference clears at 03:00.
+saga_web_log also keeps the newest hall photo (d of a set, inside, hallref)
+in input_text.frontpath_hall_latest and, at "Remember", freezes the previous
+one as input_text.frontpath_hall_baseline: the hall before the things were
+put down. When Andy's Pixel reaches the front walkway and a person set's
+hall photo d arrives within 2 min, Claude gets baseline, reference and d
+("the things to take are what the reference has that the baseline has not;
+which are still there?"); if any are, the Pixel gets "Forgot something?
+Still in the hall: ..." with the photo. Tested 21 Oct 16:47: nothing staged,
+answer "taken", no nag, 9 s after the hall photo. One shot; an unused reference clears at 03:00.
 Andy only until there is a door sensor (the kids' departures cannot be told
 from arrivals without one).

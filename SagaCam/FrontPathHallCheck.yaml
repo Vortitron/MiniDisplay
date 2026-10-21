@@ -13,7 +13,12 @@
 # arrives (input_text.frontpath_last_photos) with the Pixel out front within
 # 2 minutes, Claude compares the reference with it: are the things that were
 # by the door still there? Yes: "Forgot something?" to the Pixel with the
-# photo. Either way the reference is cleared (one shot); an unused one is
+# photo. A third photo makes that answerable: the hall as it was before
+# "Remember" (input_text.frontpath_hall_baseline, the previous hall photo,
+# kept by saga_web_log from input_text.frontpath_hall_latest), so the things
+# to take are what the reference has and the baseline has not; the first
+# test (21 Oct 16:43) with no baseline flagged a basket that always lives
+# there. Either way the reference is cleared (one shot); an unused one is
 # cleared at 03:00. Only Andy for now: without a door sensor the kids'
 # departures cannot be told from arrivals.
 #
@@ -36,6 +41,9 @@ triggers:
     id: expire
 variables:
   reference: "{{ states('input_text.frontpath_hall_reference') }}"
+  baseline: >-
+    {% set b = states('input_text.frontpath_hall_baseline') %}
+    {{ b if b not in ['', 'unknown', 'unavailable'] and b != reference else '' }}
   armed: "{{ reference not in ['', 'unknown', 'unavailable'] }}"
   area_sensor: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
   pixel_out: >-
@@ -74,18 +82,25 @@ actions:
               task_name: frontpath hall check
               entity_id: ai_task.claude_ai_task
               instructions: >-
-                Two photos of the same hallway from a camera by the front
-                door. The first was taken when things to take along were put
-                down near the door (on the floor, the bench or the shelves by
-                the door). The second was taken just now, after someone went
-                out. Compare them: which of the things that were put down
-                in the first photo are still there in the second? Ignore
-                shoes, coats on hooks and the permanent clutter; only things
-                that look placed to be taken: bags, boxes, parcels, a
+                {% if baseline %}Three photos of the same hallway from a
+                camera by the front door. Photo 1: the hall some time
+                earlier, as it normally is. Photo 2: after things to take
+                along were put down near the door (on the floor, the bench
+                or the shelves by the door). Photo 3: just now, after someone
+                went out. The things to take are what photo 2 has that photo
+                1 does not. Which of those are still there in photo 3?
+                {% else %}Two photos of the same hallway from a camera by the
+                front door. The first was taken when things to take along
+                were put down near the door (on the floor, the bench or the
+                shelves by the door). The second was taken just now, after
+                someone went out. Which of the things that were put down in
+                the first photo are still there in the second?{% endif %}
+                Ignore shoes, coats on hooks and the permanent clutter; only
+                things that look placed to be taken: bags, boxes, parcels, a
                 basket, a helmet, a bottle, keys. Answer still_there yes if
-                any such thing is in both photos, no if they are gone or if
-                nothing in the first photo looked placed to be taken. In
-                'items' name what is still there, briefly.
+                any such thing is still there, no if they are gone or if
+                nothing looked placed to be taken. In 'items' name what is
+                still there, briefly.
               structure:
                 still_there:
                   required: true
@@ -96,14 +111,18 @@ actions:
                   required: true
                   selector:
                     text: {}
-              attachments:
-                - media_content_id: "media-source://media_source/frontpath/{{ reference }}"
-                  media_content_type: image/jpeg
-                - media_content_id: "media-source://media_source/frontpath/{{ after }}"
-                  media_content_type: image/jpeg
+              # Baseline (when there is one), reference, after: a list built
+              # in a loop; Home Assistant reads the rendered list back natively.
+              attachments: >-
+                {% set files = ([baseline] if baseline else []) + [reference, after] %}
+                {% set ns = namespace(l=[]) %}
+                {% for f in files %}
+                {% set ns.l = ns.l + [{'media_content_id': 'media-source://media_source/frontpath/' ~ f, 'media_content_type': 'image/jpeg'}] %}
+                {% endfor %}
+                {{ ns.l }}
           - variables:
               still: "{{ ai is defined and ai.data is defined and ai.data and ai.data.still_there in ['yes', True, 'true'] }}"
-              items: "{{ ai.data.items if ai is defined and ai.data is defined and ai.data else 'no answer from the AI' }}"
+              items: "{{ ai.data['items'] if ai is defined and ai.data is defined and ai.data else 'no answer from the AI' }}"
           - if:
               - condition: template
                 value_template: "{{ still }}"
@@ -125,7 +144,7 @@ actions:
               name: Hall check
               message: >-
                 {{ 'Still there: ' ~ items if still else 'Taken (' ~ items ~ ')' }}
-                ({{ reference }} vs {{ after }})
+                ({{ baseline or 'no baseline' }}, {{ reference }} vs {{ after }})
               entity_id: input_text.frontpath_hall_reference
           - action: input_text.set_value
             target:
