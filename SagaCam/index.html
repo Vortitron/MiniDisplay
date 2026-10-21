@@ -540,9 +540,9 @@ function onEntities(e) {
     const s = ch["+"] && ch["+"].s;
     if (s === undefined) continue;
     if (id === WHY) why = s;
-    else if ((id === DETECT || id === MOTION) && s === "on") burst("detect");
-    else if (id === TEST) burst("test");
-    else if (id === INSIDE) insideShot();
+    else if ((id === DETECT || id === MOTION) && s === "on") burst("detect", id === DETECT);
+    else if (id === TEST) burst("test", true);
+    else if (id === INSIDE) insideShot("inside" + hhmmss() + "-a", "frame hall");
     // Pressed after the page is updated: reload in this tab, so no second
     // tab ends up fighting this one for the camera.
     else if (id === RELOAD) {
@@ -567,10 +567,15 @@ async function shoot(prefix, kind) {
 }
 
 // A frame at once (someone may be gone in seconds), a night stack, then a
-// frame a few seconds on, when someone walking up is nearer the door.
-async function burst(kind) {
+// frame a few seconds on, when someone walking up is nearer the door. Then,
+// when it looks like a person (the person rule fired, the detector here
+// scored 50%+, or it was a test shot), the hall camera 25 s after the first
+// frame: photo d of the same set, by when a visitor has come in or someone
+// leaving has gone through (21 Oct).
+async function burst(kind, personRule) {
   if (document.hidden || shooting || Date.now() - lastShot < 15000) return;
   shooting = true; lastShot = Date.now();
+  const t0 = Date.now();
   const tag = kind + hhmmss();
   const blobs = [];
   try {
@@ -584,21 +589,29 @@ async function burst(kind) {
     await shoot(tag + "-c", "frame");
     if (lastBlob) blobs.push({ part: "c", blob: lastBlob });
   } finally { shooting = false; }
-  if (blobs.length) seen(tag, kind, blobs);
+  if (blobs.length) seen(tag, kind, blobs).then(r => {
+    if (personRule || (r && r.person >= 0.5)) hallLater(tag, t0);
+  });
 }
 
-// The inward (hall) camera, on input_button.saga_cam_inside_shot (21 Oct).
-// As much a test as a photo: it opens the user-facing camera while the
-// outward one is running, takes a frame, sends it as inside<hhmmss>-a-frame,
-// and reports whether the outward stream survived (many phones stop the
-// first camera when a second one opens) and how long the whole thing took.
-// If the outward camera was lost it is started again.
+async function hallLater(tag, t0) {
+  await sleep(Math.max(0, 25000 - (Date.now() - t0)));
+  for (let i = 0; i < 4 && shooting; i++) await sleep(5000);   // a new set in the way
+  await insideShot(tag + "-d", "hall camera");
+}
+
+// The inward (hall) camera: on input_button.saga_cam_inside_shot as a photo
+// of its own (inside<hhmmss>-a-frame), or as photo d of a set (hallLater).
+// It opens the user-facing camera while the outward one is running, takes a
+// frame, sends it, and reports whether the outward stream survived (tested
+// 21 Oct on the Saga: 1280x960 in 1.2 s, outward camera unaffected). If the
+// outward camera was lost it is started again.
 const INSIDE_CAM = { audio: false, video: { facingMode: { exact: "user" },
   width: { ideal: 1280 }, height: { ideal: 960 }, frameRate: { ideal: 10, max: 10 } } };
-async function insideShot() {
+async function insideShot(prefix, how) {
   if (document.hidden || shooting) return;
   shooting = true;
-  const tag = "inside" + hhmmss();
+  const tag = prefix;
   const t0 = Date.now();
   const before = track && track.readyState === "live";
   let s2 = null;
@@ -617,9 +630,9 @@ async function insideShot() {
     c.width = c.height = 0;
     const alive = track && track.readyState === "live";
     report(`Live: ${tag}: inward ${size} in ${Date.now() - t0} ms; outward camera ${alive ? "still live" : "STOPPED"} (${before ? "was live" : "was not live"})`);
-    show(blob, "frame hall");
+    show(blob, how);
     await sleep(300); await loaded();
-    lastName = tag + "-a-" + lastName;
+    lastName = prefix + "-" + lastName;
     await send();
   } catch (e) {
     report(`Live: ${tag} failed: ${e.name} ${e.message}; outward camera ${track ? track.readyState : "none"}`);
@@ -676,7 +689,7 @@ async function seen(tag, kind, blobs) {
         }
       }
     }
-  } catch (e) { return; }   // no detector: no verdict, as before
+  } catch (e) { return undefined; }   // no detector: no verdict, as before
   const id = hook();
   if (!id) return;
   try {
@@ -686,6 +699,7 @@ async function seen(tag, kind, blobs) {
         person_box: personBox, animal_box: animalBox }),
     });
   } catch (e) {}
+  return { person, animal, animalScore };
 }
 
 // Installed as the "Front door" app (19 Oct) the page runs full screen; the

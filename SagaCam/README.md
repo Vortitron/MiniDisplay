@@ -163,3 +163,10 @@ send it as inside<hhmmss>-a-frame (gallery kind "Inside"), reporting whether
 the outward stream survived. On the Saga it did: 1280x960 in 1.2 s, outward
 camera still live. So the two can run together and an inward snap costs a
 second, no interruption.
+
+Hall photo with a person (21 Oct): after a photo set where the person rule
+fired, the Saga's detector scored 50%+, or it was a test shot, the page takes
+a hall frame 25 s after the first photo and files it as photo d of the same
+set (<tag>-d-hall-1280x960.jpg; the gallery card's strip shows it last). By
+then a visitor has come in, or whoever left has gone through the hall. The
+Front door dashboard has a "Hall photo" button for one on demand.

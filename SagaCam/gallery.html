@@ -259,10 +259,11 @@ function call(msg) {
   });
 }
 
-// web-20261016-213631-detect213622-a-frame-2592x1944.jpg
+// web-20261016-213631-detect213622-a-frame-2592x1944.jpg  (a, b, c: the path;
+// d: the hall camera 25 s on, from 21 Oct)
 // 20261016-105200.jpg (Fully)
 function parse(file) {
-  let m = file.match(/^web-(\d{8})-(\d{6})-(detect|test|inside)(\d{6})-([abc])-([a-z]+)-(\d+x\d+)/);
+  let m = file.match(/^web-(\d{8})-(\d{6})-(detect|test|inside)(\d{6})-([abcd])-([a-z]+)-(\d+x\d+)/);
   if (m) return { date: m[1], saved: m[2], kind: m[3], time: m[4], part: m[5], how: m[6], size: m[7] };
   m = file.match(/^web-(\d{8})-(\d{6})-([a-z]+)-(\d+x\d+)/);
   if (m) return { date: m[1], saved: m[2], kind: "test", time: m[2], part: "", how: m[3], size: m[4] };
@@ -274,7 +275,7 @@ function parse(file) {
 const hms = s => s.slice(0, 2) + ":" + s.slice(2, 4) + ":" + s.slice(4, 6);
 const ymd = s => s.slice(0, 4) + "-" + s.slice(4, 6) + "-" + s.slice(6, 8);
 const when = (d, t) => new Date(`${ymd(d)}T${hms(t)}`).getTime() / 1000;
-const HOW = { frame: "frame", stack: "night stack", full: "full sensor", "Fully still": "Fully still" };
+const HOW = { frame: "frame", stack: "night stack", full: "full sensor", hall: "hall camera", "Fully still": "Fully still" };
 
 async function load() {
   status("Listing photos...");
