@@ -1,0 +1,134 @@
+# Forgot something? (21 Oct 2026)
+#
+# Things to take along get put in the hall and forgotten. So: put them by the
+# door, press "Remember the hall" (input_button.saga_cam_hall_remember, on the
+# Front door dashboard); the Saga's hall camera takes a reference photo
+# (hallref<hhmmss>-a-frame), which saga_web_log records in
+# input_text.frontpath_hall_reference: the check is armed while that is set.
+#
+# Leaving: Andy's Pixel reaches Bermuda area "Front walkway"
+# (input_datetime.pixel_at_front_walkway, kept by frontpath_person_alert)
+# and the path camera takes a person set, whose photo d is the hall 25 s
+# after the first frame, by when he has gone through. When that photo d
+# arrives (input_text.frontpath_last_photos) with the Pixel out front within
+# 2 minutes, Claude compares the reference with it: are the things that were
+# by the door still there? Yes: "Forgot something?" to the Pixel with the
+# photo. Either way the reference is cleared (one shot); an unused one is
+# cleared at 03:00. Only Andy for now: without a door sensor the kids'
+# departures cannot be told from arrivals.
+#
+# Deployed with ha_set_automation, id frontpath_hall_check; the two helpers
+# with ha_set_helper.
+id: frontpath_hall_check
+alias: Front Path - forgot something
+description: >-
+  While a hall reference photo is armed ("Remember the hall"), when Andy's
+  Pixel is out front and a person set's hall photo (d) arrives, Claude
+  compares the two and the Pixel is told what is still in the hall. One
+  shot; cleared at 03:00 if unused.
+mode: single
+triggers:
+  - trigger: state
+    entity_id: input_text.frontpath_last_photos
+    id: photo
+  - trigger: time
+    at: "03:00:00"
+    id: expire
+variables:
+  reference: "{{ states('input_text.frontpath_hall_reference') }}"
+  armed: "{{ reference not in ['', 'unknown', 'unavailable'] }}"
+  area_sensor: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
+  pixel_out: >-
+    {{ is_state(area_sensor, 'Front walkway')
+       or as_timestamp(now()) - as_timestamp(states('input_datetime.pixel_at_front_walkway'), 0) < 120 }}
+  after: >-
+    {% set photos = states('input_text.frontpath_last_photos').split(' ') | select('search', '-d-hall-') | list %}
+    {{ photos | last if photos else '' }}
+  new_hall: >-
+    {{ trigger.id == 'photo' and after != ''
+       and (trigger.from_state is none or after not in (trigger.from_state.state | default(''))) }}
+actions:
+  - choose:
+      - conditions: "{{ trigger.id == 'expire' }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ armed }}"
+            then:
+              - action: logbook.log
+                data:
+                  name: Hall check
+                  message: "Reference {{ reference }} not used; forgotten."
+                  entity_id: input_text.frontpath_hall_reference
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.frontpath_hall_reference
+                data:
+                  value: ""
+      - conditions: "{{ armed and new_hall and pixel_out }}"
+        sequence:
+          - action: ai_task.generate_data
+            continue_on_error: true
+            response_variable: ai
+            data:
+              task_name: frontpath hall check
+              entity_id: ai_task.claude_ai_task
+              instructions: >-
+                Two photos of the same hallway from a camera by the front
+                door. The first was taken when things to take along were put
+                down near the door (on the floor, the bench or the shelves by
+                the door). The second was taken just now, after someone went
+                out. Compare them: which of the things that were put down
+                in the first photo are still there in the second? Ignore
+                shoes, coats on hooks and the permanent clutter; only things
+                that look placed to be taken: bags, boxes, parcels, a
+                basket, a helmet, a bottle, keys. Answer still_there yes if
+                any such thing is in both photos, no if they are gone or if
+                nothing in the first photo looked placed to be taken. In
+                'items' name what is still there, briefly.
+              structure:
+                still_there:
+                  required: true
+                  selector:
+                    select:
+                      options: ["yes", "no"]
+                items:
+                  required: true
+                  selector:
+                    text: {}
+              attachments:
+                - media_content_id: "media-source://media_source/frontpath/{{ reference }}"
+                  media_content_type: image/jpeg
+                - media_content_id: "media-source://media_source/frontpath/{{ after }}"
+                  media_content_type: image/jpeg
+          - variables:
+              still: "{{ ai is defined and ai.data is defined and ai.data and ai.data.still_there in ['yes', True, 'true'] }}"
+              items: "{{ ai.data.items if ai is defined and ai.data is defined and ai.data else 'no answer from the AI' }}"
+          - if:
+              - condition: template
+                value_template: "{{ still }}"
+            then:
+              - action: notify.mobile_app_pixel_8
+                continue_on_error: true
+                data:
+                  title: Forgot something?
+                  message: "Still in the hall: {{ items | truncate(120) }}"
+                  data:
+                    image: "/media/frontpath/{{ after }}"
+                    clickAction: /path-photos
+                    tag: hall-check
+                    channel: Front path
+                    priority: high
+                    ttl: 0
+          - action: logbook.log
+            data:
+              name: Hall check
+              message: >-
+                {{ 'Still there: ' ~ items if still else 'Taken (' ~ items ~ ')' }}
+                ({{ reference }} vs {{ after }})
+              entity_id: input_text.frontpath_hall_reference
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.frontpath_hall_reference
+            data:
+              value: ""

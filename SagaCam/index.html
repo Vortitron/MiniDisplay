@@ -501,6 +501,9 @@ const WHY = "sensor.front_walkway_frontpath_ble_processing_path_motion_trigger";
 const TEST = "input_button.saga_cam_test_shot";
 const RELOAD = "input_button.saga_cam_reload";
 const INSIDE = "input_button.saga_cam_inside_shot";
+// "Remember the hall" (21 Oct): a hall photo as the reference for the
+// forgot-something check (automation frontpath_hall_check), named hallref.
+const HALLREF = "input_button.saga_cam_hall_remember";
 let ws = null, wsId = 1, liveOn = false, why = "", lastShot = 0, shooting = false;
 // Live mode lets go of the camera at 15% battery and takes it back at 35%,
 // so a charger that cannot keep up does not run the Saga flat (17 Oct).
@@ -523,7 +526,7 @@ function connect() {
     else if (m.type === "auth_invalid") { haStatus("token refused", "err"); report("Live: Home Assistant refused the token"); ws.close(); }
     else if (m.type === "auth_ok") {
       haStatus("connected, watching", "ok");
-      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, MOTION, WHY, TEST, RELOAD, INSIDE] }));
+      ws.send(JSON.stringify({ id: wsId++, type: "subscribe_entities", entity_ids: [DETECT, MOTION, WHY, TEST, RELOAD, INSIDE, HALLREF] }));
       report("Live: connected to Home Assistant, watching for detections");
     } else if (m.type === "event" && m.event) onEntities(m.event);
   };
@@ -543,6 +546,7 @@ function onEntities(e) {
     else if ((id === DETECT || id === MOTION) && s === "on") burst("detect", id === DETECT);
     else if (id === TEST) burst("test", true);
     else if (id === INSIDE) insideShot("inside" + hhmmss() + "-a", "frame hall");
+    else if (id === HALLREF) insideShot("hallref" + hhmmss() + "-a", "frame hall");
     // Pressed after the page is updated: reload in this tab, so no second
     // tab ends up fighting this one for the camera.
     else if (id === RELOAD) {

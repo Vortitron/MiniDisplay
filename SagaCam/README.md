@@ -170,3 +170,14 @@ a hall frame 25 s after the first photo and files it as photo d of the same
 set (<tag>-d-hall-1280x960.jpg; the gallery card's strip shows it last). By
 then a visitor has come in, or whoever left has gone through the hall. The
 Front door dashboard has a "Hall photo" button for one on demand.
+
+Forgot something? (21 Oct, FrontPathHallCheck.yaml): "Remember the hall"
+(input_button.saga_cam_hall_remember, Front door dashboard) makes the Saga
+take a hall reference photo (hallref<hhmmss>-a-frame), which saga_web_log
+records in input_text.frontpath_hall_reference (armed; "Forget" clears it).
+When Andy's Pixel reaches the front walkway and a person set's hall photo d
+arrives within 2 min, Claude compares reference and d; if the things put by
+the door are still there, the Pixel gets "Forgot something? Still in the
+hall: ..." with the photo. One shot; an unused reference clears at 03:00.
+Andy only until there is a door sensor (the kids' departures cannot be told
+from arrivals without one).
