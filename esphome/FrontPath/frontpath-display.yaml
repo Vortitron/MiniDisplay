@@ -859,14 +859,34 @@ interval:
           // back after a drop-out. The box-adjacent rules sit that out; the
           // 3-candidate person rule does not.
           const bool radio_quiet = millis() - id(radio_up_ms) >= 10000;
-          const bool near = calm && radio_quiet && have[0] && have[1] && mx[0][1] >= 45 && mx[1][1] >= 45;
-          if (cand >= 3 || (door_recent >= 2 && radio_quiet) || near) {
+          // Rain: on the night of 20-21 Oct the near rule fired 191 times
+          // (water on and around the box is "something beside the box" on
+          // both radars). A visitor sets it off once; three times in ten
+          // minutes is weather, so the box-adjacent rules then rest for ten
+          // minutes. The 3-candidate person rule is not held.
+          static uint32_t box_fire[3] = {0, 0, 0};
+          static int box_fire_i = 0;
+          static uint32_t box_hold_until = 0;
+          const bool box_held = (int32_t) (now - box_hold_until) < 0;
+          const bool box_ok = radio_quiet && !box_held;
+          const bool near = calm && box_ok && have[0] && have[1] && mx[0][1] >= 45 && mx[1][1] >= 45;
+          const bool door = door_recent >= 2 && box_ok;
+          if (cand >= 3 || door || near) {
             if (!id(path_motion_on)) {
               id(path_motion_on) = true;
               char mw[64];
               if (cand >= 3) snprintf(mw, sizeof(mw), "%s", why);
-              else if (door_recent >= 2) snprintf(mw, sizeof(mw), "door %s", why);
+              else if (door) snprintf(mw, sizeof(mw), "door %s", why);
               else snprintf(mw, sizeof(mw), "near S1 %d D1 %d", mx[0][1], mx[1][1]);
+              if (cand < 3) {
+                box_fire[box_fire_i] = now; box_fire_i = (box_fire_i + 1) % 3;
+                int recent = 0;
+                for (int i = 0; i < 3; i++) if (box_fire[i] != 0 && now - box_fire[i] < 600) recent++;
+                if (recent >= 3) {
+                  box_hold_until = now + 600;
+                  snprintf(mw, sizeof(mw), "rain hold 10 min (%s)", near ? "near" : "door");
+                }
+              }
               id(path_motion_trigger).publish_state(mw);
             }
             motion_last = now;

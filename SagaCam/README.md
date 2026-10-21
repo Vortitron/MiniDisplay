@@ -145,3 +145,14 @@ Pixel's Bluetooth beacon is in Bermuda area "Front walkway" (now, in the
 last 3 min, or within 30 s), or it came home by GPS in the last 5 min.
 saga_web_log now also keeps the current set's saved file names in
 input_text.frontpath_last_photos for it.
+
+Overnight 20-21 Oct (rain): 528 photo sets between 23:25 and 07:50, 191 of
+the 218 Path Motion triggers the near-box rule (rain on and around the box),
+the lights rule itself about 80 times, and Claude asked 520 times. One alert,
+05:32 "person holding umbrella": the night stack (8 frames added) of the
+white cat bounding up the steps, each layer smaller as it goes. So: the
+firmware holds the near/door rules for 10 min once they fire 3 times in 10
+min ("rain hold" in the Path Motion Trigger); FrontPathSeen.yaml asks Claude
+for a box-only set at most once in 10 min (input_datetime.frontpath_ai_asked;
+person-rule sets and Saga 15%+ always go), and the prompt explains the stack
+and the white cat.
