@@ -12,6 +12,7 @@ Old thumbnails go with the photos: frontpath_snapshot_cleanup's `find` is
 recursive.
 """
 import os
+import re
 import shutil
 import sys
 
@@ -20,6 +21,11 @@ from PIL import Image
 DIR = "/config/frontpath_snapshots"
 THUMBS = os.path.join(DIR, "thumbs")
 WIDTH = 480
+
+
+# Hall camera photos (21 Oct): photo d of a set, and inside/hallref/hallwatch
+# shots. They get thumbnails but are never latest.jpg, which is the path.
+HALL = re.compile(r"^web-\d{8}-\d{6}-(inside|hallref|hallwatch)\d{6}-|-d-hall-")
 
 
 def photos():
@@ -45,7 +51,7 @@ def main():
         except Exception as err:  # a half-written file: next run gets it
             print(f"skip {name}: {err}", file=sys.stderr)
 
-    newest = max((n for n in photos() if n.startswith("web-")), default=None)
+    newest = max((n for n in photos() if n.startswith("web-") and not HALL.search(n)), default=None)
     latest = os.path.join(DIR, "latest.jpg")
     copied = False
     if newest:

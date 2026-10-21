@@ -186,3 +186,14 @@ Still in the hall: ..." with the photo. Tested 21 Oct 16:47: nothing staged,
 answer "taken", no nag, 9 s after the hall photo. One shot; an unused reference clears at 03:00.
 Andy only until there is a door sensor (the kids' departures cannot be told
 from arrivals without one).
+
+Automatic hall check (21 Oct, FrontPathHallWatch.yaml + FrontPathHallCheck.yaml):
+weekday mornings 07:00-08:30 the Saga takes a hall photo every 5 min
+(hallwatch...; the gallery shows these only under Tests), and saga_web_log
+keeps the last four hall photos in input_text.frontpath_hall_history. When
+Andy leaves between 07:15 and 08:45 with nothing armed by hand, Claude gets
+the newest hall photo 15+ min old, the newest since then, and the hall photo
+after he left: "what appeared since the first and is still there?". At most
+once per 20 min. The hall is always messy, so this one is an experiment.
+latest.jpg (camera.frontpath_latest, "Latest path photo") is now the newest
+path photo only: frontpath_photos.py skips hall photos.

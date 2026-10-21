@@ -22,6 +22,16 @@
 # cleared at 03:00. Only Andy for now: without a door sensor the kids'
 # departures cannot be told from arrivals.
 #
+# Automatic on weekday mornings (21 Oct): frontpath_hall_watch has the Saga
+# take a hall photo every 5 min from 07:00 to 08:30 (hallwatch...), and
+# saga_web_log keeps the last four hall photos of any kind in
+# input_text.frontpath_hall_history. When Andy leaves between 07:15 and
+# 08:45 with nothing armed by hand, the baseline is the newest hall photo
+# 15+ min old, the reference the newest one since then, and the question
+# becomes "what appeared since the baseline and is still there?". At most
+# once per 20 min (input_datetime.frontpath_hall_checked). The hall is
+# always messy, so this one is an experiment.
+#
 # Deployed with ha_set_automation, id frontpath_hall_check; the two helpers
 # with ha_set_helper.
 id: frontpath_hall_check
@@ -45,6 +55,18 @@ variables:
     {% set b = states('input_text.frontpath_hall_baseline') %}
     {{ b if b not in ['', 'unknown', 'unavailable'] and b != reference else '' }}
   armed: "{{ reference not in ['', 'unknown', 'unavailable'] }}"
+  # The automatic morning check: from the rolling hall history.
+  history: >-
+    {{ states('input_text.frontpath_hall_history').split(' ')
+       | reject('in', ['', 'unknown', 'unavailable']) | list }}
+  cutoff: "{{ (now() - timedelta(minutes=15)).strftime('%Y%m%d-%H%M%S') }}"
+  auto_base: >-
+    {% set old = history | select('search', '^web-') | select('lt', 'web-' ~ cutoff) | list %}
+    {{ old | sort | last if old else '' }}
+  in_window: >-
+    {{ now().weekday() < 5 and today_at('07:15') <= now() <= today_at('08:45') }}
+  auto_quiet: >-
+    {{ as_timestamp(now()) - as_timestamp(states('input_datetime.frontpath_hall_checked'), 0) > 1200 }}
   area_sensor: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
   pixel_out: >-
     {{ is_state(area_sensor, 'Front walkway')
@@ -73,8 +95,24 @@ actions:
                   entity_id: input_text.frontpath_hall_reference
                 data:
                   value: ""
-      - conditions: "{{ armed and new_hall and pixel_out }}"
+      - conditions: >-
+          {{ new_hall and pixel_out and (armed or (in_window and auto_quiet and auto_base != '')) }}
         sequence:
+          - variables:
+              auto: "{{ not armed }}"
+              # Automatic: the newest hall photo since the baseline, not the
+              # one taken after leaving.
+              auto_ref: >-
+                {% set new = history | select('search', '^web-') | select('ge', 'web-' ~ cutoff)
+                   | reject('eq', after) | list %}
+                {{ new | sort | last if new else '' }}
+              base: "{{ auto_base if auto else baseline }}"
+              ref: "{{ auto_ref if auto else reference }}"
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.frontpath_hall_checked
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
           - action: ai_task.generate_data
             continue_on_error: true
             response_variable: ai
@@ -82,7 +120,14 @@ actions:
               task_name: frontpath hall check
               entity_id: ai_task.claude_ai_task
               instructions: >-
-                {% if baseline %}Three photos of the same hallway from a
+                {% if auto %}Photos of the same hallway from a camera by the
+                front door, oldest first. The first is the hall 15 minutes or
+                more ago; {% if ref %}the second is shortly before someone
+                went out; {% endif %}the last is just now, after someone went
+                out. The hall is always messy, so ignore what was already in
+                the first photo. Things that appeared since the first photo
+                and are still there in the last were probably put down to be
+                taken along and forgotten.{% elif baseline %}Three photos of the same hallway from a
                 camera by the front door. Photo 1: the hall some time
                 earlier, as it normally is. Photo 2: after things to take
                 along were put down near the door (on the floor, the bench
@@ -114,7 +159,7 @@ actions:
               # Baseline (when there is one), reference, after: a list built
               # in a loop; Home Assistant reads the rendered list back natively.
               attachments: >-
-                {% set files = ([baseline] if baseline else []) + [reference, after] %}
+                {% set files = ([base] if base else []) + ([ref] if ref else []) + [after] %}
                 {% set ns = namespace(l=[]) %}
                 {% for f in files %}
                 {% set ns.l = ns.l + [{'media_content_id': 'media-source://media_source/frontpath/' ~ f, 'media_content_type': 'image/jpeg'}] %}
@@ -143,11 +188,15 @@ actions:
             data:
               name: Hall check
               message: >-
-                {{ 'Still there: ' ~ items if still else 'Taken (' ~ items ~ ')' }}
-                ({{ baseline or 'no baseline' }}, {{ reference }} vs {{ after }})
+                {{ '(auto) ' if auto else '' }}{{ 'Still there: ' ~ items if still else 'Taken (' ~ items ~ ')' }}
+                ({{ base or 'no baseline' }}, {{ ref or 'no reference' }} vs {{ after }})
               entity_id: input_text.frontpath_hall_reference
-          - action: input_text.set_value
-            target:
-              entity_id: input_text.frontpath_hall_reference
-            data:
-              value: ""
+          - if:
+              - condition: template
+                value_template: "{{ not auto }}"
+            then:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.frontpath_hall_reference
+                data:
+                  value: ""

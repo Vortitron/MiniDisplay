@@ -263,7 +263,7 @@ function call(msg) {
 // d: the hall camera 25 s on, from 21 Oct)
 // 20261016-105200.jpg (Fully)
 function parse(file) {
-  let m = file.match(/^web-(\d{8})-(\d{6})-(detect|test|inside|hallref)(\d{6})-([abcd])-([a-z]+)-(\d+x\d+)/);
+  let m = file.match(/^web-(\d{8})-(\d{6})-(detect|test|inside|hallref|hallwatch)(\d{6})-([abcd])-([a-z]+)-(\d+x\d+)/);
   if (m) return { date: m[1], saved: m[2], kind: m[3], time: m[4], part: m[5], how: m[6], size: m[7] };
   m = file.match(/^web-(\d{8})-(\d{6})-([a-z]+)-(\d+x\d+)/);
   if (m) return { date: m[1], saved: m[2], kind: "test", time: m[2], part: "", how: m[3], size: m[4] };
@@ -384,14 +384,16 @@ async function showDay(d) {
   if (day === d) { render(); status(count()); }
 }
 
-const KIND = { detect: "Detection", test: "Test shot", burst: "Radar burst", fully: "Fully still", inside: "Inside (hall camera)", hallref: "Hall reference (remember)" };
+const KIND = { detect: "Detection", test: "Test shot", burst: "Radar burst", fully: "Fully still", inside: "Inside (hall camera)", hallref: "Hall reference (remember)", hallwatch: "Hall watch" };
 
 function render() {
   const box = $("days");
   box.innerHTML = "";
   flat = [];
   const shown = events.filter(e => e.date === day &&
-    (filter === "all" || e.kind === filter || (filter === "test" && e.kind === "fully")) &&
+    // Hall watch photos (every 5 min on weekday mornings) only under Tests.
+    ((filter === "all" && e.kind !== "hallwatch") || e.kind === filter ||
+     (filter === "test" && (e.kind === "fully" || e.kind === "hallwatch"))) &&
     (who === "all" || (who === "found" ? e.seen === "person" || e.seen === "animal" : e.seen === who)));
   const sec = document.createElement("section");
   const dd = new Date(ymd(day) + "T12:00:00");

@@ -1,0 +1,22 @@
+# Hall watch (21 Oct 2026): a hall photo every 5 minutes on weekday mornings,
+# 07:00-08:30, for the automatic hall check in FrontPathHallCheck.yaml. The
+# Saga page names them hallwatch<hhmmss>-a-frame; the gallery shows them only
+# under Tests. Deployed with ha_set_automation, id frontpath_hall_watch.
+id: frontpath_hall_watch
+alias: Front Path - hall watch
+description: >-
+  Weekday mornings 07:00-08:30: presses input_button.saga_cam_hall_watch every
+  5 minutes, so the Saga takes a hall photo for the automatic hall check.
+mode: single
+triggers:
+  - trigger: time_pattern
+    minutes: /5
+conditions:
+  - condition: time
+    after: "07:00:00"
+    before: "08:31:00"
+    weekday: [mon, tue, wed, thu, fri]
+actions:
+  - action: input_button.press
+    target:
+      entity_id: input_button.saga_cam_hall_watch
