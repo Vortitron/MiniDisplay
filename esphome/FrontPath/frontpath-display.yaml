@@ -39,6 +39,48 @@ api:
   on_client_connected:
     - lambda: 'id(radio_up_ms) = millis();'
 
+# Bluetooth arrival (22 Oct). On 21 Oct, in drizzle, the radars missed Andy
+# and the babysitter walking both ways on the right-hand steps: water on and
+# around the box doubled the background and halved their echo. Phones,
+# watches and the like advertise over Bluetooth, which rain does not stop.
+# A device counts as arriving when its signal rises from far (-85 dBm or
+# weaker) to near (-65 or stronger) within 30 s; the house's own devices sit
+# at a steady level, and a phone that rotates its address while staying put
+# turns up near, not far then near, so neither counts. One event per
+# approach; a device unheard for 2 min starts again.
+esp32_ble_tracker:
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            struct Dev { uint64_t mac; uint32_t seen; uint32_t weak; };
+            static Dev dev[64];
+            static int n = 0;
+            const uint64_t mac = x.address_uint64();
+            const int rssi = x.get_rssi();
+            const uint32_t now = millis() / 1000;
+            int i = 0;
+            while (i < n && dev[i].mac != mac) i++;
+            if (i == n) {
+              if (n < 64) n++;
+              else {   // full: reuse the longest-unheard entry
+                i = 0;
+                for (int k = 1; k < 64; k++) if (dev[k].seen < dev[i].seen) i = k;
+              }
+              dev[i].mac = mac; dev[i].weak = 0; dev[i].seen = now;
+            }
+            if (now - dev[i].seen > 120) dev[i].weak = 0;
+            dev[i].seen = now;
+            if (rssi <= -85) {
+              dev[i].weak = now;
+            } else if (rssi >= -65 && dev[i].weak != 0 && now - dev[i].weak <= 30) {
+              dev[i].weak = 0;
+              id(ble_approach_s) = now;
+              char t[40];
+              snprintf(t, sizeof(t), "%s %d dBm", x.address_str().c_str(), rssi);
+              id(ble_arrival).publish_state(t);
+              ESP_LOGI("ble_arrival", "%s", t);
+            }
+
 # Reset reason, heap and loop time, after the evening of 20 Oct when the box
 # went deaf to Home Assistant a dozen times (22:28-23:21): a reboot shows as
 # Uptime starting again and a Reset Reason; a stall shows in Loop Time.
@@ -79,6 +121,12 @@ text_sensor:
   - platform: debug
     reset_reason:
       name: "Reset Reason"
+  # The last Bluetooth arrival: address and signal (see esp32_ble_tracker).
+  - platform: template
+    name: "BLE Arrival"
+    id: ble_arrival
+    icon: mdi:bluetooth-connect
+    update_interval: never
   # Both radars' per-gate energies, once a second, for replaying in Home
   # Assistant history: the 14 Oct test walk showed that moving energy only
   # reaches 2-3 m, while static energy follows a person to both ends of the
@@ -164,6 +212,26 @@ text_sensor:
       - script.execute: wx_pick
 
 sensor:
+  # Radar gaps (22 Oct): of the last 60 s, how many had no engineering frame
+  # from each radar, counted here on the box. On 21 Oct the radars barely
+  # registered Andy and the babysitter on the right-hand steps, and Home
+  # Assistant's copy of the gate energies had 7-48 s holes; these say whether
+  # the holes are in the radar link (the rule is blind then) or only in the
+  # Wi-Fi to Home Assistant.
+  - platform: template
+    name: "Street Radar Gaps"
+    id: street_radar_gaps
+    unit_of_measurement: "s"
+    icon: mdi:timer-sand-empty
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    name: "Door Radar Gaps"
+    id: door_radar_gaps
+    unit_of_measurement: "s"
+    icon: mdi:timer-sand-empty
+    accuracy_decimals: 0
+    update_interval: never
   - platform: uptime
     name: "Uptime"
     update_interval: 60s
@@ -374,6 +442,12 @@ globals:
   # millis() when the radio last came up (wifi on_connect, api
   # on_client_connected); the box-adjacent motion rules wait 10 s after it.
   - id: radio_up_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # Bluetooth arrival (22 Oct): millis()/1000 of the last device seen coming
+  # near (esp32_ble_tracker below); the 1 s rule turns it into a detection.
+  - id: ble_approach_s
     type: uint32_t
     restore_value: no
     initial_value: '0'
@@ -841,6 +915,25 @@ interval:
               id(path_trigger).publish_state(why);
             }
             last_lit = now;
+          }
+          // A Bluetooth arrival (esp32_ble_tracker) is a detection too: on
+          // for 20 s from the second it happened.
+          if (id(ble_approach_s) != 0 && now - id(ble_approach_s) <= 1) {
+            if (!id(path_person_on)) {
+              id(path_person_on) = true;
+              id(path_trigger).publish_state("BLE " + id(ble_arrival).state);
+            }
+            last_lit = now;
+          }
+          // Radar gaps: seconds without a frame from each radar, per minute.
+          {
+            static int gap_s[2] = {0, 0}, gap_tick = 0;
+            for (int r = 0; r < 2; r++) if (!have[r]) gap_s[r]++;
+            if (++gap_tick >= 60) {
+              id(street_radar_gaps).publish_state(gap_s[0]);
+              id(door_radar_gaps).publish_state(gap_s[1]);
+              gap_s[0] = gap_s[1] = gap_tick = 0;
+            }
           }
           if (id(path_person_on) && now - last_lit > 20) id(path_person_on) = false;
 
