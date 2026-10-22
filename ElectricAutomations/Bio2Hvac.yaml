@@ -85,6 +85,7 @@ variables:
   prewarm_max: 26
   prewarm_max_lead_h: 4
   bank_margin: 0.15
+  window_min_h: 1
   nordpool: sensor.nordpool_kwh_se4_sek_3_10_025
   manual_lock_minutes: 90
   heat_offset: 1
@@ -186,9 +187,12 @@ actions:
         {% else %}0{% endif %}
       price_now: "{{ states(nordpool) | float(0) }}"
       # Average 15-min price over the plain pre-warm window: the last
-      # min(hours_needed, prewarm_max_lead_h) hours before film time.
+      # min(hours_needed, prewarm_max_lead_h) hours before film time, never
+      # less than window_min_h. (22 Oct: with the room at 19.7 the lead was
+      # 13 min, which holds no 15-min slot, so the average was 0, "cheap"
+      # was false, and banking flipped on and off with every sensor tick.)
       window_avg: >-
-        {% set lead = [hours_needed | float, prewarm_max_lead_h] | min %}
+        {% set lead = [[hours_needed | float, prewarm_max_lead_h] | min, window_min_h] | max %}
         {% set start = film_ts - lead * 3600 %}
         {% set ns = namespace(total=0.0, n=0) %}
         {% for slot in (state_attr(nordpool, 'raw_today') or []) %}
@@ -238,7 +242,10 @@ actions:
         {% else %}
           {{ film_temp }}
         {% endif %}
-      bank_now: "{{ bank_possible and bank_cheap and room_ok and room < (bank_target | float) - 0.3 }}"
+      # Hold the bank target while it is cheap and possible; Bio2's own
+      # setpoint fooling idles at the target, so there is no need to drop
+      # the desired (and re-raise it) around it.
+      bank_now: "{{ bank_possible and bank_cheap and room_ok }}"
       desired: >-
         {% if holiday_mode %}
           {{ frost_temp }}

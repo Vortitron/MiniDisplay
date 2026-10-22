@@ -176,10 +176,15 @@ def test_bank_heat_only_when_cheap_and_within_the_horizon():
 	r = evaluate(hours_until_film=6.0, hours_needed=2.0, t_eq=28.0, bio_k=0.1,
 		bank_horizon_h=4.05, price_now=0.5, window_avg=3.0, room=18.0)
 	assert r["bank_possible"] is False and r["desired"] == 16
-	# Already banked: nothing to add.
+	# Already banked: hold the target (Bio2 idles at it) rather than drop
+	# to 16 and re-raise, which churned the desired helper on 22 Oct.
 	r = evaluate(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
 		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=26.0)
-	assert r["bank_now"] is False and r["desired"] == 16
+	assert r["bank_now"] is True and r["desired"] == 26
+	# Room sensor down: no banking.
+	r = evaluate(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
+		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room_ok=False, room=0.0)
+	assert r["bank_now"] is False
 	# The seed model (k 0.2, 8 °C out): horizon ln(18/12)/0.2 = 2.03 h, so
 	# banking only reaches two hours back until the model learns the room.
 	r = evaluate(hours_until_film=1.0, hours_needed=0.5, bank_horizon_h=2.03, price_now=0.3, window_avg=3.0, room=19.0)
