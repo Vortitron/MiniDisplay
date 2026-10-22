@@ -80,6 +80,22 @@ esp32_ble_tracker:
             const uint64_t mac = x.address_uint64();
             const int rssi = x.get_rssi();
             const uint32_t now = millis() / 1000;
+            // Andy's Pixel, by its HA app beacon (iBeacon UUID 0a1b8d57-...):
+            // its signal here, for tuning the thresholds below (22 Oct; it
+            // walked past at 19:39 without an arrival). At most every 5 s
+            // unless it moves 4 dB.
+            for (auto &md : x.get_manufacturer_datas()) {
+              const auto &d = md.data;
+              if (d.size() >= 6 && d[0] == 0x02 && d[1] == 0x15 && d[2] == 0x0a && d[3] == 0x1b &&
+                  d[4] == 0x8d && d[5] == 0x57) {
+                static uint32_t pix_ms = 0;
+                static int pix_last = 0;
+                if (millis() - pix_ms >= 5000 || abs(rssi - pix_last) >= 4) {
+                  pix_ms = millis(); pix_last = rssi;
+                  id(pixel_rssi).publish_state(rssi);
+                }
+              }
+            }
             int i = 0;
             while (i < n && dev[i].mac != mac) i++;
             if (i == n) {
@@ -98,7 +114,9 @@ esp32_ble_tracker:
               dev[i].weak = 0;
               id(ble_approach_s) = now;
               char t[40];
-              snprintf(t, sizeof(t), "BLE %s %d dBm", x.address_str().c_str(), rssi);
+              snprintf(t, sizeof(t), "BLE %02X:%02X:%02X:%02X:%02X:%02X %d dBm",
+                       (unsigned) (mac >> 40) & 0xFF, (unsigned) (mac >> 32) & 0xFF, (unsigned) (mac >> 24) & 0xFF,
+                       (unsigned) (mac >> 16) & 0xFF, (unsigned) (mac >> 8) & 0xFF, (unsigned) mac & 0xFF, rssi);
               id(ble_arrival).publish_state(t);
               ESP_LOGI("ble_arrival", "%s", t);
             }
@@ -252,6 +270,32 @@ sensor:
     id: door_radar_gaps
     unit_of_measurement: "s"
     icon: mdi:timer-sand-empty
+    accuracy_decimals: 0
+    update_interval: never
+  # Engineering frames per minute from each radar (22 Oct): the rule takes
+  # each second's peak, so fewer frames hide short moving-energy spikes even
+  # with no gap. For checking that Bluetooth scanning does not starve the
+  # radar links.
+  - platform: template
+    name: "Street Radar Frames"
+    id: street_radar_frames
+    unit_of_measurement: "/min"
+    icon: mdi:radar
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: template
+    name: "Door Radar Frames"
+    id: door_radar_frames
+    unit_of_measurement: "/min"
+    icon: mdi:radar
+    accuracy_decimals: 0
+    update_interval: never
+  # Andy's Pixel's Bluetooth signal at the box (see esp32_ble_tracker).
+  - platform: template
+    name: "Pixel Signal"
+    id: pixel_rssi
+    unit_of_measurement: "dBm"
+    device_class: signal_strength
     accuracy_decimals: 0
     update_interval: never
   - platform: uptime
@@ -956,8 +1000,12 @@ interval:
             static int gap_s[2] = {0, 0}, gap_tick = 0;
             for (int r = 0; r < 2; r++) if (!have[r]) gap_s[r]++;
             if (++gap_tick >= 60) {
+              static uint32_t last_f[2] = {0, 0};
               id(street_radar_gaps).publish_state(gap_s[0]);
               id(door_radar_gaps).publish_state(gap_s[1]);
+              id(street_radar_frames).publish_state(id(s1_eng_frames) - last_f[0]);
+              id(door_radar_frames).publish_state(id(s2_eng_frames) - last_f[1]);
+              last_f[0] = id(s1_eng_frames); last_f[1] = id(s2_eng_frames);
               gap_s[0] = gap_s[1] = gap_tick = 0;
             }
           }
