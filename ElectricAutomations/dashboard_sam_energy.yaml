@@ -101,8 +101,29 @@ views:
                 name: Manual lock until
               - entity: input_select.bio_projector
                 name: Projector
+              - entity: input_datetime.bio_film_time
+                name: Film time (pre-warm for)
+              - entity: input_boolean.bio_prewarm_enabled
+                name: Pre-warm / bank on cheap power
               - entity: sensor.bio2_daily_energy
                 name: Energy today
+          - type: glance
+            title: Bio thermal model
+            columns: 4
+            entities:
+              - entity: input_number.bio_heat_loss_k
+                name: k (loss)
+              - entity: input_number.bio_heat_rate
+                name: h (°C/h)
+              - entity: input_number.bio_thermal_tau
+                name: τ (hours)
+              - entity: input_number.bio_hours_to_target
+                name: Hrs → 20°C
+          - type: markdown
+            content: >
+              {{ states('input_text.bio_thermal_status') }}
+
+              _{{ states('input_text.bio2_preheat_calc') }}_
           - type: glance
             columns: 3
             entities:

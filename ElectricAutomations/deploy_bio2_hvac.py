@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy the Bio2 HVAC automation (Bio2Hvac.yaml) via VomeHome.
+"""Deploy the Bio2 HVAC automation and the bio thermal model via VomeHome.
 
   python3 ElectricAutomations/deploy_bio2_hvac.py
 
@@ -18,13 +18,17 @@ import yaml
 from deploy_feed_restore import ROOT, deploy_automation, load_broker
 
 
+FILES = ("Bio2Hvac.yaml", "BioThermalModel.yaml")
+
+
 def main() -> None:
-	path = ROOT / "Bio2Hvac.yaml"
-	config = yaml.safe_load(path.read_text())
 	base, token = load_broker()
-	deploy_automation(base, token, config["id"], config)
-	print(f"  ✓ {config['id']}  ({path.name})")
-	print("Done. Watch input_text.bio2_hvac_headline for the first evaluation.")
+	for name in FILES:
+		path = ROOT / name
+		config = yaml.safe_load(path.read_text())
+		deploy_automation(base, token, config["id"], config)
+		print(f"  ✓ {config['id']}  ({path.name})")
+	print("Done. Watch input_text.bio2_hvac_headline / bio2_preheat_calc and bio_thermal_status.")
 
 
 if __name__ == "__main__":

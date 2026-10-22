@@ -22,10 +22,26 @@
 #                             BioProjectorLights.yaml)
 #   phone in the bio, 07-23   20 C (input_select.phone_zone == bio, from
 #                             PhoneZone.yaml: Andy working in there)
+#   pre-warm for film time    20 C, starting bio_hours_to_target (the bio
+#                             thermal model, BioThermalModel.yaml) before
+#                             input_datetime.bio_film_time (20:00), capped at
+#                             prewarm_max_lead_h when the model says the
+#                             target is out of reach
+#   bank heat on cheap power  up to prewarm_max (26 C) earlier than that, when
+#                             the price now is at least bank_margin below the
+#                             average over the plain pre-warm window AND the
+#                             banked heat will still be 20 C at film time
+#                             (bank_horizon_h = ln((26 - Tout)/(20 - Tout))/k;
+#                             heat leaks, so with k 0.2 and 8 C out that is
+#                             about two hours, four at k 0.1 — the model has
+#                             to learn the room for banking to reach further)
 #   otherwise                 16 C economy, evening or not: with the projector
 #                             off nobody is in the bio hall, so it goes low
 #                             (Sam's living room goes to 20 in the evening; this
 #                             room does not)
+#
+# input_boolean.bio_prewarm_enabled switches the two pre-warm rows off.
+# input_text.bio2_preheat_calc carries the working (hours, prices, horizon).
 #
 # Super-expensive electricity (input_boolean.super_expensive_active): Bio2 is
 # switched off while the room is above its target (it would only be idling);
@@ -44,6 +60,9 @@
 #   input_datetime.bio2_desired_lock_until  date + time
 #   input_text.bio2_hvac_headline           max 64
 #   input_text.bio2_hvac_status             max 255
+#   input_text.bio2_preheat_calc            max 255
+#   input_datetime.bio_film_time            time only, 20:00
+#   input_boolean.bio_prewarm_enabled       on
 #
 # Tests: tests/test_bio2_hvac_templates.py
 # Deploy: python3 ElectricAutomations/deploy_bio2_hvac.py (id bio2_hvac)
@@ -53,13 +72,20 @@ description: >-
   Drives climate.bio2 from the bio hall wall sensor
   (sensor.bedroomlights_bedroomlights_temperature) with the same setpoint
   fooling as Sam. Desired: holiday 10, your own setting kept 90 min, 20 while
-  the projector is on or Andy's phone is in the bio by day, else 16. Off while above target when electricity is
+  the projector is on or Andy's phone is in the bio by day, 20 in the
+  pre-warm run-up to bio_film_time sized by the bio thermal model, up to 26
+  earlier on cheap power when the banked heat will last, else 16. Off while above target when electricity is
   super-expensive. When Bio2 is unavailable it stands aside and Sam covers the
   room through the circulation fan.
 variables:
   film_temp: 20
   economy_temp: 16
   frost_temp: 10
+  # Pre-warm for film time (see header).
+  prewarm_max: 26
+  prewarm_max_lead_h: 4
+  bank_margin: 0.15
+  nordpool: sensor.nordpool_kwh_se4_sek_3_10_025
   manual_lock_minutes: 90
   heat_offset: 1
   base_stop_heat_offset: -2
@@ -91,6 +117,8 @@ triggers:
       - input_select.bio_projector
       - input_select.phone_zone
       - input_boolean.holiday_mode
+      - input_boolean.bio_prewarm_enabled
+      - input_datetime.bio_film_time
       - input_boolean.super_expensive_active
       - input_number.bio2_desired_temperature
   - trigger: time_pattern
@@ -130,6 +158,47 @@ actions:
            and now().hour >= phone_comfort_start_hour and now().hour < 23 }}
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
       super_expensive: "{{ is_state('input_boolean.super_expensive_active', 'on') }}"
+      # ---- Pre-warm planning inputs (BioThermalModel.yaml + Nordpool) ----
+      prewarm_enabled: "{{ is_state('input_boolean.bio_prewarm_enabled', 'on') }}"
+      film_ts: >-
+        {% set t = states('input_datetime.bio_film_time') %}
+        {% set t = t if t not in ['unknown', 'unavailable', 'none', ''] else '20:00:00' %}
+        {% set p = t.split(':') %}
+        {{ now().replace(hour=p[0] | int, minute=p[1] | int, second=0, microsecond=0).timestamp() }}
+      hours_until_film: "{{ ((film_ts - now().timestamp()) / 3600) | round(2) }}"
+      bio_k: "{{ states('input_number.bio_heat_loss_k') | float(0.2) }}"
+      bio_h: "{{ states('input_number.bio_heat_rate') | float(2.0) }}"
+      t_out_fc: >-
+        {% set v = states('input_number.forecast_outside_4h') %}
+        {{ v | float if v not in ['unknown', 'unavailable', 'none', ''] else outdoor }}
+      t_eq: "{{ (t_out_fc + bio_h / bio_k) | round(2) if bio_k > 0 else 99 }}"
+      # Hours of Bio2 heating to take the room from where it is to film_temp.
+      hours_needed: >-
+        {% if not room_ok %}99
+        {% elif room >= film_temp %}0
+        {% elif bio_k <= 0 or t_eq <= film_temp + 0.5 %}99
+        {% else %}{{ ((1 / bio_k) * (((t_eq - room) / (t_eq - film_temp)) | log)) | round(2) }}
+        {% endif %}
+      # How long banked heat at prewarm_max takes to fall back to film_temp.
+      bank_horizon_h: >-
+        {% if bio_k > 0 and film_temp > t_out_fc + 0.5 %}
+          {{ ((1 / bio_k) * (((prewarm_max - t_out_fc) / (film_temp - t_out_fc)) | log)) | round(2) }}
+        {% else %}0{% endif %}
+      price_now: "{{ states(nordpool) | float(0) }}"
+      # Average 15-min price over the plain pre-warm window: the last
+      # min(hours_needed, prewarm_max_lead_h) hours before film time.
+      window_avg: >-
+        {% set lead = [hours_needed | float, prewarm_max_lead_h] | min %}
+        {% set start = film_ts - lead * 3600 %}
+        {% set ns = namespace(total=0.0, n=0) %}
+        {% for slot in (state_attr(nordpool, 'raw_today') or []) %}
+          {% set ts = as_timestamp(slot['start'], 0) %}
+          {% if ts >= start and ts < film_ts %}
+            {% set ns.total = ns.total + (slot['value'] | float(0)) %}
+            {% set ns.n = ns.n + 1 %}
+          {% endif %}
+        {% endfor %}
+        {{ (ns.total / ns.n) | round(3) if ns.n > 0 else 0 }}
       current_desired: "{{ states('input_number.bio2_desired_temperature') | float(economy_temp) }}"
       auto_set: "{{ states('input_number.bio2_automation_set_value') | float(economy_temp) }}"
       lock_until_ts: "{{ as_timestamp(states('input_datetime.bio2_desired_lock_until'), 0) | float(0) }}"
@@ -142,6 +211,34 @@ actions:
         {% else %}
           0
         {% endif %}
+      # ---- Pre-warm decisions ----
+      prewarm_lead_h: "{{ [hours_needed | float, prewarm_max_lead_h] | min }}"
+      # Inside the plain run-up: heat to film_temp now, whatever the price.
+      prewarm_window: >-
+        {{ prewarm_enabled and not holiday_mode
+           and hours_until_film > 0
+           and hours_until_film <= prewarm_lead_h + 0.25 }}
+      # Earlier than that: bank heat only if it would still be film_temp at
+      # film time when left to leak (coast time within bank_horizon_h) ...
+      bank_possible: >-
+        {{ prewarm_enabled and not holiday_mode
+           and hours_until_film > prewarm_lead_h + 0.25
+           and hours_until_film <= bank_horizon_h }}
+      # ... and only when it is genuinely cheaper now than in the run-up.
+      bank_cheap: >-
+        {{ price_now > 0 and window_avg > 0
+           and price_now <= window_avg * (1 - bank_margin) }}
+      # What to bank now so that it has leaked back to exactly film_temp at
+      # film time: Tout + (20 - Tout) * e^(k * hours_until_film), capped.
+      bank_target: >-
+        {% if bank_possible %}
+          {% set e = (2.718281828 ** (bio_k * hours_until_film)) %}
+          {% set t = t_out_fc + (film_temp - t_out_fc) * e %}
+          {{ [[t, prewarm_max] | min, film_temp] | max | round(0) }}
+        {% else %}
+          {{ film_temp }}
+        {% endif %}
+      bank_now: "{{ bank_possible and bank_cheap and room_ok and room < (bank_target | float) - 0.3 }}"
       desired: >-
         {% if holiday_mode %}
           {{ frost_temp }}
@@ -149,6 +246,10 @@ actions:
           {{ current_desired }}
         {% elif projector_on or phone_comfort %}
           {{ film_temp }}
+        {% elif prewarm_window %}
+          {{ film_temp }}
+        {% elif bank_now %}
+          {{ bank_target }}
         {% else %}
           {{ economy_temp }}
         {% endif %}
@@ -163,9 +264,16 @@ actions:
           Film on {{ film_temp }}°C
         {% elif phone_comfort %}
           Phone in bio {{ film_temp }}°C
+        {% elif prewarm_window %}
+          Pre-warm for {{ (film_ts | timestamp_custom('%H:%M', True)) }}
+        {% elif bank_now %}
+          Bank heat {{ bank_target }}°C (cheap)
         {% else %}
           Bio idle {{ economy_temp }}°C
         {% endif %}
+      preheat_calc: >-
+        {% set s %}film={{ film_ts | timestamp_custom('%H:%M', True) }} in {{ hours_until_film }}h need={{ hours_needed }}h lead={{ prewarm_lead_h }}h | room={{ room | round(1) if room_ok else 'n/a' }} out_fc={{ t_out_fc | round(1) }} k={{ bio_k }} h={{ bio_h }} Teq={{ t_eq }} | now={{ price_now }} win_avg={{ window_avg }} cheap={{ bank_cheap }} | horizon={{ bank_horizon_h }}h bank_ok={{ bank_possible }} bank_to={{ bank_target }} bank={{ bank_now }} win={{ prewarm_window }} on={{ prewarm_enabled }}{% endset -%}
+        {{ s | truncate(255, True, '', 0) }}
   - variables:
       target: "{{ desired | float }}"
       heat_diff: "{{ room - target }}"
@@ -232,6 +340,11 @@ actions:
           entity_id: input_number.bio2_desired_temperature
         data:
           value: "{{ desired }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.bio2_preheat_calc
+    data:
+      value: "{{ preheat_calc }}"
   # ---- Bio2 not there: Sam covers the room (sam.yaml, BioProjectorLights) ----
   - if:
       - condition: template

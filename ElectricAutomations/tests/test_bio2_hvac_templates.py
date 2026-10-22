@@ -39,6 +39,7 @@ def _ha_round(value, precision=0, method="common", default=None):
 
 
 _ENV.filters["round"] = _ha_round
+_ENV.filters["timestamp_custom"] = lambda ts, fmt="%H:%M", local=True: "20:00"
 # lock_minutes_remaining uses now(); pin it so the tests are deterministic.
 NOW_TS = 1_800_000_000.0
 _ENV.globals["now"] = lambda: type("Now", (), {"timestamp": staticmethod(lambda: NOW_TS)})()
@@ -84,6 +85,20 @@ def inputs(**over) -> dict:
 			"projector_on": False,
 			"phone_zone": "away",
 			"phone_comfort": False,
+			# Pre-warm planning inputs (block 1): a 14 °C room, 8 °C out, the
+			# seed model k 0.2 / h 2 (Teq 18 -> 20 is out of reach -> 99 h ->
+			# lead capped at prewarm_max_lead_h), 13:00 with the film at 20:00.
+			"prewarm_enabled": True,
+			"film_ts": 1_800_000_000.0 + 7 * 3600,
+			"hours_until_film": 7.0,
+			"bio_k": 0.2,
+			"bio_h": 2.0,
+			"t_out_fc": 8.0,
+			"t_eq": 18.0,
+			"hours_needed": 99,
+			"bank_horizon_h": 2.03,
+			"price_now": 2.0,
+			"window_avg": 3.0,
 			"holiday_mode": False,
 			"super_expensive": False,
 			"current_desired": 16.0,
@@ -121,6 +136,69 @@ def test_phone_in_bio_by_day_wants_20():
 	# The film reason wins the label when both hold.
 	r = evaluate(phone_zone="bio", phone_comfort=True, projector_on=True)
 	assert r["reason"].strip() == "Film on 20°C"
+
+
+# --- pre-warm for film time ------------------------------------------------
+
+def test_prewarm_window_heats_in_the_run_up_whatever_the_price():
+	# Target out of reach for the seed model: lead capped at 4 h, so from
+	# 16:00 the room is heated towards 20 even at a dear price.
+	r = evaluate(hours_until_film=3.5, price_now=3.3, window_avg=3.0)
+	assert r["prewarm_window"] is True and r["desired"] == 20
+	assert r["reason"].strip() == "Pre-warm for 20:00"
+	# With a learned, reachable model the lead is the model's answer.
+	r = evaluate(hours_until_film=3.5, hours_needed=2.1, t_eq=24.0)
+	assert r["prewarm_lead_h"] == 2.1 and r["prewarm_window"] is False
+	r = evaluate(hours_until_film=2.0, hours_needed=2.1, t_eq=24.0)
+	assert r["prewarm_window"] is True and r["desired"] == 20
+
+
+def test_bank_heat_only_when_cheap_and_within_the_horizon():
+	# A tight room: k 0.1 -> horizon ln(18/12)/0.1 = 4.05 h, so heat banked
+	# at 26 °C is still 20 °C four hours later. Film at 20:00, now 16:00
+	# (4 h), plain lead 1.5 h: banking now (8 + 12 * e^0.4 = 25.9 -> 26)
+	# replaces the whole dear run-up, and the price is well below its average.
+	r = evaluate(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
+		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=18.0)
+	assert r["bank_possible"] is True and r["bank_cheap"] is True
+	assert r["bank_target"] == 26
+	assert r["bank_now"] is True and r["desired"] == 26
+	assert r["reason"].strip() == "Bank heat 26°C (cheap)"
+	# Closer to film time less is needed: 2 h out -> 8 + 12 * e^0.2 = 22.7 -> 23.
+	r = evaluate(hours_until_film=2.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
+		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=18.0)
+	assert r["bank_target"] == 23 and r["desired"] == 23
+	# Same but the price now is only 10 % cheaper: under the 15 % margin.
+	r = evaluate(hours_until_film=2.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
+		bank_horizon_h=4.05, price_now=2.7, window_avg=3.0, room=18.0)
+	assert r["bank_cheap"] is False and r["desired"] == 16
+	# Too early: the heat would have leaked away by 20:00.
+	r = evaluate(hours_until_film=6.0, hours_needed=2.0, t_eq=28.0, bio_k=0.1,
+		bank_horizon_h=4.05, price_now=0.5, window_avg=3.0, room=18.0)
+	assert r["bank_possible"] is False and r["desired"] == 16
+	# Already banked: nothing to add.
+	r = evaluate(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
+		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=26.0)
+	assert r["bank_now"] is False and r["desired"] == 16
+	# The seed model (k 0.2, 8 °C out): horizon ln(18/12)/0.2 = 2.03 h, so
+	# banking only reaches two hours back until the model learns the room.
+	r = evaluate(hours_until_film=1.0, hours_needed=0.5, bank_horizon_h=2.03, price_now=0.3, window_avg=3.0, room=19.0)
+	assert r["bank_possible"] is True and r["bank_now"] is True and r["desired"] == 23  # 8 + 12 * e^0.2 = 22.7
+	r = evaluate(hours_until_film=2.5, hours_needed=0.5, bank_horizon_h=2.03, price_now=0.3, window_avg=3.0, room=19.0)
+	assert r["bank_possible"] is False
+
+
+def test_prewarm_switch_and_holiday():
+	r = evaluate(hours_until_film=1.0, prewarm_enabled=False)
+	assert r["prewarm_window"] is False and r["desired"] == 16
+	r = evaluate(hours_until_film=1.0, holiday_mode=True)
+	assert r["prewarm_window"] is False and r["desired"] == 10
+
+
+def test_after_film_time_nothing_is_planned():
+	r = evaluate(hours_until_film=-1.0, price_now=0.1)
+	assert r["prewarm_window"] is False and r["bank_possible"] is False
+	assert r["desired"] == 16
 
 
 def test_holiday_wins_over_everything():

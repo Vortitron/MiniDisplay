@@ -1,0 +1,191 @@
+# Bio hall thermal model (20 Oct 2026) — HouseThermalModel.yaml for Bio2's room.
+#
+# Every 10 minutes: read the bio wall sensor and Bio2's outside sensor, and
+# fit the room's heat-loss coefficient k (1/h) while Bio2 is idle and its
+# heating rate h (°C/h at zero ΔT) while Bio2 reports heating, by the same
+# EMA (alpha 0.05) and sample gates as the house model. See
+# README_HouseThermalModel.md for the physics; this file only changes the
+# entities, reuses the house model's input_number.forecast_outside_4h instead
+# of calling the weather service again, and writes bio_* helpers.
+#
+# Caveats the numbers carry:
+#   - While climate.bio2 is unavailable its hvac_action is unknown, so no
+#     sample is taken (Sam may be heating the room through the fan then).
+#   - h is learned at whatever fan speed / preset Bio2 happens to be on.
+#     20 Oct it is on powerful + High, so h will be an upper bound if that
+#     is later turned down.
+#   - A film adds people and a ~300 W projector; those samples pull h up a
+#     little. Fine for planning.
+#
+# Helpers (storage, created over MCP, NO initial: so the learned values
+# survive restarts — see the house model's note):
+#   input_number.bio_heat_loss_k        0-3 step 0.0001  1/h   seeded 0.2
+#   input_number.bio_heat_rate          0-30 step 0.001  °C/h  seeded 2.0
+#   input_number.bio_thermal_tau        0-100 step 0.01  h
+#   input_number.bio_thermal_last_inside / _last_outside  -50..50 step 0.01
+#   input_datetime.bio_thermal_last_sample  date+time
+#   input_number.bio_hours_to_target    0-24 step 0.01  h   (to 20 °C)
+#   input_text.bio_thermal_status       max 255
+#
+# Deployed with deploy_bio2_hvac.py, id bio_thermal_model.
+id: bio_thermal_model
+alias: Bio Thermal Model
+description: >-
+  Samples the bio hall every 10 minutes and learns its heat-loss coefficient
+  k (Bio2 idle) and Bio2's heating rate h (Bio2 heating) by EMA, as the House
+  Thermal Model does for Sam. Writes bio_heat_loss_k, bio_heat_rate,
+  bio_thermal_tau and bio_hours_to_target (to 20 °C at the 4 h forecast).
+triggers:
+  - trigger: time_pattern
+    minutes: "/10"
+conditions:
+  - condition: template
+    value_template: >-
+      {{ states('sensor.bedroomlights_bedroomlights_temperature') not in ['unknown', 'unavailable', 'none', ''] }}
+variables:
+  ema_alpha: 0.05
+  min_sample_minutes: 5
+  max_sample_minutes: 30
+  max_dt_per_sample: 2.0
+  min_delta_temp: 2.0
+  min_k: 0.01
+  max_k: 2.0
+  min_h: 0.1
+  max_h: 20.0
+  target_temp: 20
+actions:
+  - variables:
+      now_iso: "{{ now().isoformat() }}"
+      inside_now: "{{ states('sensor.bedroomlights_bedroomlights_temperature') | float }}"
+      outside_now: >-
+        {% set v = states('sensor.bio2_outside_temperature') %}
+        {{ v | float if v not in ['unknown', 'unavailable', 'none', ''] else states('sensor.sam_outside_temperature') | float(10) }}
+      hvac_action: "{{ state_attr('climate.bio2', 'hvac_action') | default('unknown', true) }}"
+      last_inside: "{{ states('input_number.bio_thermal_last_inside') | float(-999) }}"
+      last_outside: "{{ states('input_number.bio_thermal_last_outside') | float(-999) }}"
+      last_sample_iso: "{{ states('input_datetime.bio_thermal_last_sample') }}"
+      last_sample_valid: >-
+        {{ last_sample_iso not in ['unknown', 'unavailable', 'none', ''] and last_inside > -100 }}
+      dt_minutes: >-
+        {% if last_sample_valid %}
+          {{ ((now().timestamp() - (last_sample_iso | as_datetime | as_local).timestamp()) / 60) | round(2) }}
+        {% else %}
+          0
+        {% endif %}
+      dt_hours: "{{ dt_minutes / 60 }}"
+      delta_inside: "{{ inside_now - last_inside }}"
+      delta_temp: "{{ last_inside - last_outside }}"
+      dT_per_hour: >-
+        {% if dt_hours > 0 %}
+          {{ (delta_inside / dt_hours) | round(3) }}
+        {% else %}
+          0
+        {% endif %}
+      current_k: "{{ states('input_number.bio_heat_loss_k') | float(0.2) }}"
+      current_h: "{{ states('input_number.bio_heat_rate') | float(2.0) }}"
+      sample_valid: >-
+        {{ last_sample_valid
+           and dt_minutes >= min_sample_minutes
+           and dt_minutes <= max_sample_minutes
+           and delta_inside | abs <= max_dt_per_sample
+           and delta_temp | abs >= min_delta_temp }}
+      is_passive: "{{ hvac_action in ['idle', 'fan', 'off', 'cooling'] }}"
+      is_heating: "{{ hvac_action == 'heating' }}"
+      new_k: >-
+        {% if sample_valid and is_passive and delta_temp > min_delta_temp %}
+          {% set observed_k = (-dT_per_hour) / delta_temp %}
+          {% if observed_k >= min_k and observed_k <= max_k %}
+            {{ ((1 - ema_alpha) * current_k + ema_alpha * observed_k) | round(4) }}
+          {% else %}
+            {{ current_k }}
+          {% endif %}
+        {% else %}
+          {{ current_k }}
+        {% endif %}
+      new_h: >-
+        {% if sample_valid and is_heating %}
+          {% set observed_h = dT_per_hour + current_k * delta_temp %}
+          {% if observed_h >= min_h and observed_h <= max_h %}
+            {{ ((1 - ema_alpha) * current_h + ema_alpha * observed_h) | round(3) }}
+          {% else %}
+            {{ current_h }}
+          {% endif %}
+        {% else %}
+          {{ current_h }}
+        {% endif %}
+      tau_hours: >-
+        {% if new_k | float > 0 %}
+          {{ (1 / (new_k | float)) | round(2) }}
+        {% else %}
+          0
+        {% endif %}
+      t_out_effective: >-
+        {% set v = states('input_number.forecast_outside_4h') %}
+        {{ v | float if v not in ['unknown', 'unavailable', 'none', ''] else outside_now }}
+      equilibrium_with_heat: >-
+        {% if new_k | float > 0 %}
+          {{ (t_out_effective + (new_h | float) / (new_k | float)) | round(2) }}
+        {% else %}
+          99
+        {% endif %}
+      hours_to_target: >-
+        {% if inside_now >= target_temp %}
+          0
+        {% elif new_k | float <= 0 or (equilibrium_with_heat | float) <= target_temp + 0.5 %}
+          99
+        {% else %}
+          {% set num = (equilibrium_with_heat | float) - inside_now %}
+          {% set den = (equilibrium_with_heat | float) - target_temp %}
+          {{ ((1 / (new_k | float)) * ((num / den) | log)) | round(2) }}
+        {% endif %}
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.bio_thermal_last_inside
+    data:
+      value: "{{ inside_now }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.bio_thermal_last_outside
+    data:
+      value: "{{ outside_now }}"
+  - action: input_datetime.set_datetime
+    target:
+      entity_id: input_datetime.bio_thermal_last_sample
+    data:
+      datetime: "{{ now_iso }}"
+  - if:
+      - condition: template
+        value_template: "{{ new_k != current_k }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.bio_heat_loss_k
+        data:
+          value: "{{ new_k }}"
+  - if:
+      - condition: template
+        value_template: "{{ new_h != current_h }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.bio_heat_rate
+        data:
+          value: "{{ new_h }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.bio_thermal_tau
+    data:
+      value: "{{ [tau_hours | float, 100] | min }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.bio_hours_to_target
+    data:
+      value: "{{ [hours_to_target | float, 24] | min }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.bio_thermal_status
+    data:
+      value: >-
+        {% set s %}k={{ new_k }}/h (τ={{ tau_hours }}h), h={{ new_h }}°C/h, eq_w_heat={{ equilibrium_with_heat }}°C, hours_to_{{ target_temp }}°C={{ hours_to_target }}, inside={{ inside_now | round(1) }}°C, outside={{ outside_now | round(1) }}°C, fc4h={{ t_out_effective | round(1) }}°C, last={{ hvac_action }} {{ 'valid' if sample_valid else 'skip' }}{% endset -%}
+        {{ s | truncate(255, True, '', 0) }}
+mode: single
