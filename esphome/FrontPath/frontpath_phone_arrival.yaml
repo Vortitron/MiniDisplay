@@ -1,0 +1,31 @@
+# Andy's Pixel at the front walkway marks a FrontPath arrival (22 Oct 2026).
+#
+# On the evening of 21 Oct the radars barely registered Andy and the
+# babysitter on the right-hand steps, both ways, and the path lights stayed
+# at idle. Bermuda places the Pixel's Bluetooth beacon (the HA app's
+# transmitter) in area "Front walkway" whenever he is out there, through
+# FrontPath's own Bluetooth proxy. This calls the box's mark_arrival action
+# (frontpath-display.yaml, api: actions), which turns Path Person Detected on
+# for 20 s exactly as a radar or Bluetooth detection does: lights, camera.
+# Bermuda lags a few seconds to half a minute, so it is a backup, not the
+# first thing to light the path. At most once a minute.
+#
+# Deployed with ha_set_automation, id frontpath_phone_arrival.
+id: frontpath_phone_arrival
+alias: Front Path - phone arrival
+description: >-
+  When Andy's Pixel reaches Bermuda area Front walkway, calls FrontPath's
+  mark_arrival, which turns Path Person Detected on for 20 s (lights,
+  camera), as a backup to the radars.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: state
+    entity_id: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
+    to: Front walkway
+actions:
+  - action: esphome.frontpath_mark_arrival
+    continue_on_error: true
+    data:
+      who: Andy's Pixel
+  - delay: "00:01:00"

@@ -38,17 +38,39 @@ wifi:
 api:
   on_client_connected:
     - lambda: 'id(radio_up_ms) = millis();'
+  # Home Assistant can mark an arrival too (22 Oct): automation
+  # frontpath_phone_arrival calls it when Andy's Pixel reaches the front
+  # walkway in Bermuda. Same effect as a Bluetooth arrival seen here.
+  actions:
+    - action: mark_arrival
+      variables:
+        who: string
+      then:
+        - lambda: |-
+            id(ble_approach_s) = millis() / 1000;
+            id(ble_arrival).publish_state("HA " + who);
 
-# Bluetooth arrival (22 Oct). On 21 Oct, in drizzle, the radars missed Andy
-# and the babysitter walking both ways on the right-hand steps: water on and
-# around the box doubled the background and halved their echo. Phones,
-# watches and the like advertise over Bluetooth, which rain does not stop.
-# A device counts as arriving when its signal rises from far (-85 dBm or
-# weaker) to near (-65 or stronger) within 30 s; the house's own devices sit
-# at a steady level, and a phone that rotates its address while staying put
-# turns up near, not far then near, so neither counts. One event per
-# approach; a device unheard for 2 min starts again.
+# Bluetooth arrival (22 Oct). On the evening of 21 Oct the radars barely
+# registered Andy and the babysitter on the right-hand steps (their echo did
+# not clear the evening background; why is still open). Phones, watches and
+# the like advertise over Bluetooth, which the radars' troubles do not touch.
+# A device counts as arriving when its signal rises from far (-80 dBm or
+# weaker, or first heard at -72 or weaker) to near (-68 or stronger) within
+# 30 s; the house's own devices sit at a steady level, and a phone that
+# rotates its address while staying put turns up near, not far then near, so
+# neither counts. One event per approach; a device unheard for 2 min starts
+# again. The first version (-85/-65) missed Andy coming home on 22 Oct 08:01.
+#
+# Scanning: the default listens 30 ms in every 320 (9%), sharing the radio
+# with the two radar connections, so a phone advertising once a second was
+# heard about once every 10 s. 120 ms in 320 (37%) here; Street/Door Radar
+# Gaps show at once if the radar links suffer for it.
 esp32_ble_tracker:
+  scan_parameters:
+    interval: 320ms
+    window: 120ms
+    active: false
+    continuous: true
   on_ble_advertise:
     - then:
         - lambda: |-
@@ -66,17 +88,17 @@ esp32_ble_tracker:
                 i = 0;
                 for (int k = 1; k < 64; k++) if (dev[k].seen < dev[i].seen) i = k;
               }
-              dev[i].mac = mac; dev[i].weak = 0; dev[i].seen = now;
+              dev[i].mac = mac; dev[i].weak = rssi <= -72 ? now : 0; dev[i].seen = now;
             }
-            if (now - dev[i].seen > 120) dev[i].weak = 0;
+            if (now - dev[i].seen > 120) dev[i].weak = rssi <= -72 ? now : 0;   // back after 2 min: as if new
             dev[i].seen = now;
-            if (rssi <= -85) {
+            if (rssi <= -80) {
               dev[i].weak = now;
-            } else if (rssi >= -65 && dev[i].weak != 0 && now - dev[i].weak <= 30) {
+            } else if (rssi >= -68 && dev[i].weak != 0 && now - dev[i].weak <= 30) {
               dev[i].weak = 0;
               id(ble_approach_s) = now;
               char t[40];
-              snprintf(t, sizeof(t), "%s %d dBm", x.address_str().c_str(), rssi);
+              snprintf(t, sizeof(t), "BLE %s %d dBm", x.address_str().c_str(), rssi);
               id(ble_arrival).publish_state(t);
               ESP_LOGI("ble_arrival", "%s", t);
             }
@@ -921,7 +943,7 @@ interval:
           if (id(ble_approach_s) != 0 && now - id(ble_approach_s) <= 1) {
             if (!id(path_person_on)) {
               id(path_person_on) = true;
-              id(path_trigger).publish_state("BLE " + id(ble_arrival).state);
+              id(path_trigger).publish_state(id(ble_arrival).state);
             }
             last_lit = now;
           }
