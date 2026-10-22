@@ -24,7 +24,14 @@
 # verdict stands. The AI also says how sure it is: a "person" it is not
 # sure of becomes "unsure (AI: ...)", which the gallery shows but the
 # person alert leaves alone (20 Oct 23:17 it called a tree trunk by the
-# fairy lights "a dark silhouette of a person", and the phone buzzed).
+# fairy lights "a dark silhouette of a person", and the phone buzzed). The
+# night-stack wording first said a pale trail "is the cat"; on the morning of
+# 22 Oct it then called Andy leaving (07:49) and coming back (08:01) "white
+# cat trail", so it now says both leave trails and to judge by height.
+# Nearly every night (21-22 Oct, 30-odd sets) it also said "white cat trail
+# ... left side of the steps" with no cat there: that was the spinning white
+# pinwheel by the left railing and the string lights along the steps, so
+# those are now named as fixtures.
 #
 # Results: input_text.frontpath_seen ("detect072009: person 83% (Saga)"),
 # input_datetime.frontpath_person_seen when it was a person, and a logbook
@@ -120,17 +127,26 @@ actions:
                 This photo is from a camera inside a house door, looking out
                 across a patio and up garden steps towards the street.
                 {% if dark %}It is night, and the photo is eight frames over
-                about four seconds added together, so anything moving appears
-                as a trail of repeated or smeared pale shapes, each a little
-                smaller as it moves away up the steps. A white cat lives here
-                and makes exactly that trail: a pale blob or streak repeated
-                up the steps is the cat, not a person with a light or an
-                umbrella.{% else %}It is a single frame in daylight, possibly
+                about four seconds added together, so anything that moved
+                appears as a smeared trail of repeated, overlapping shapes.
+                People and the household's white cat both leave such trails;
+                tell them apart by size against the steps and the railing. A
+                cat's trail stays low, about one step high and close to the
+                ground. A person's reaches up to the railing or higher, is
+                several steps tall, and is often dark (clothing) with a paler
+                head or hands.{% else %}It is a single frame in daylight, possibly
                 dull or wet. A white cat lives here.{% endif %} Is there a
                 person anywhere in it? If not, is there an animal (cat, dog,
-                fox, deer, bird)? Be sceptical: tree trunks, posts, the
-                railing, the garden chairs and reflections of the hallway in
-                the door glass are not people; a shape is only a person if
+                fox, deer, bird)? These are always there and are neither: a
+                white star-shaped pinwheel on a stick by the left railing (it
+                spins, so at night it smears into a pale blur), a string of
+                small lights along the railing on the left of the steps
+                (glowing streaks and dots, often pinkish), and the wooden
+                table and chairs on the patio. Only call something an animal
+                if you can make out a body (head, legs or tail), not from a
+                pale blur or streak alone. Be sceptical: tree trunks,
+                posts, the railing, the garden chairs and reflections of the
+                hallway in the door glass are not people; a shape is only a person if
                 you can make out a head and shoulders, limbs or clothing at a
                 person's size against the steps and railing. Answer verdict
                 person, animal or nothing, and in 'confidence' high when you
