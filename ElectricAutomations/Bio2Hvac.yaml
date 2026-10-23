@@ -27,7 +27,14 @@
 #                             input_datetime.bio_film_time (20:00), capped at
 #                             prewarm_max_lead_h when the model says the
 #                             target is out of reach
-#   bank heat on cheap power  up to prewarm_max (26 C) earlier than that, when
+#   bank heat on cheap power  only on the SPOT feed (input_boolean
+#                             .on_fixed_price_feed off, set by FeedDetect.yaml):
+#                             on the monthly fixed price the timing of a kWh
+#                             buys nothing, and holding 26 C instead of 20 C
+#                             leaks more, so banking is pure loss. Flip
+#                             input_boolean.bio_bank_test_on_fixed to exercise
+#                             it on the fixed feed anyway. Up to prewarm_max
+#                             (26 C) earlier than the run-up, when
 #                             the price now is at least bank_margin below the
 #                             average over the plain pre-warm window AND the
 #                             banked heat will still be 20 C at film time
@@ -39,6 +46,9 @@
 #                             off nobody is in the bio hall, so it goes low
 #                             (Sam's living room goes to 20 in the evening; this
 #                             room does not)
+#
+# The run-up itself is price-blind and runs on either feed: being warm by
+# film time is comfort, not economy.
 #
 # input_boolean.bio_prewarm_enabled switches the two pre-warm rows off.
 # input_text.bio2_preheat_calc carries the working (hours, prices, horizon).
@@ -63,6 +73,7 @@
 #   input_text.bio2_preheat_calc            max 255
 #   input_datetime.bio_film_time            time only, 20:00
 #   input_boolean.bio_prewarm_enabled       on
+#   input_boolean.bio_bank_test_on_fixed    off (test banking on the fixed feed)
 #
 # Tests: tests/test_bio2_hvac_templates.py
 # Deploy: python3 ElectricAutomations/deploy_bio2_hvac.py (id bio2_hvac)
@@ -74,7 +85,8 @@ description: >-
   fooling as Sam. Desired: holiday 10, your own setting kept 90 min, 20 while
   the projector is on or Andy's phone is in the bio by day, 20 in the
   pre-warm run-up to bio_film_time sized by the bio thermal model, up to 26
-  earlier on cheap power when the banked heat will last, else 16. Off while above target when electricity is
+  earlier on cheap power when the banked heat will last (spot feed only),
+  else 16. Off while above target when electricity is
   super-expensive. When Bio2 is unavailable it stands aside and Sam covers the
   room through the circulation fan.
 variables:
@@ -119,6 +131,8 @@ triggers:
       - input_select.phone_zone
       - input_boolean.holiday_mode
       - input_boolean.bio_prewarm_enabled
+      - input_boolean.bio_bank_test_on_fixed
+      - input_boolean.on_fixed_price_feed
       - input_datetime.bio_film_time
       - input_boolean.super_expensive_active
       - input_number.bio2_desired_temperature
@@ -161,6 +175,11 @@ actions:
       super_expensive: "{{ is_state('input_boolean.super_expensive_active', 'on') }}"
       # ---- Pre-warm planning inputs (BioThermalModel.yaml + Nordpool) ----
       prewarm_enabled: "{{ is_state('input_boolean.bio_prewarm_enabled', 'on') }}"
+      # Monthly fixed price: a kWh costs the same whenever it is used, and
+      # holding 26 C leaks more than holding 20 C, so banking only loses
+      # money. The run-up below is unaffected — that is comfort, not price.
+      on_fixed_price: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
+      bank_test: "{{ is_state('input_boolean.bio_bank_test_on_fixed', 'on') }}"
       film_ts: >-
         {% set t = states('input_datetime.bio_film_time') %}
         {% set t = t if t not in ['unknown', 'unavailable', 'none', ''] else '20:00:00' %}
@@ -228,9 +247,11 @@ actions:
         {{ prewarm_enabled and not holiday_mode
            and hours_until_film > prewarm_lead_h + 0.25
            and hours_until_film <= bank_horizon_h }}
-      # ... and only when it is genuinely cheaper now than in the run-up.
+      # ... and only when the spot price signal is live (or being tested) and
+      # it is genuinely cheaper now than in the run-up.
       bank_cheap: >-
-        {{ price_now > 0 and window_avg > 0
+        {{ (not on_fixed_price or bank_test)
+           and price_now > 0 and window_avg > 0
            and price_now <= window_avg * (1 - bank_margin) }}
       # What to bank now so that it has leaked back to exactly film_temp at
       # film time: Tout + (20 - Tout) * e^(k * hours_until_film), capped.
@@ -279,7 +300,7 @@ actions:
           Bio idle {{ economy_temp }}°C
         {% endif %}
       preheat_calc: >-
-        {% set s %}film={{ film_ts | timestamp_custom('%H:%M', True) }} in {{ hours_until_film }}h need={{ hours_needed }}h lead={{ prewarm_lead_h }}h | room={{ room | round(1) if room_ok else 'n/a' }} out_fc={{ t_out_fc | round(1) }} k={{ bio_k }} h={{ bio_h }} Teq={{ t_eq }} | now={{ price_now }} win_avg={{ window_avg }} cheap={{ bank_cheap }} | horizon={{ bank_horizon_h }}h bank_ok={{ bank_possible }} bank_to={{ bank_target }} bank={{ bank_now }} win={{ prewarm_window }} on={{ prewarm_enabled }}{% endset -%}
+        {% set s %}film={{ film_ts | timestamp_custom('%H:%M', True) }} in {{ hours_until_film }}h need={{ hours_needed }}h lead={{ prewarm_lead_h }}h | room={{ room | round(1) if room_ok else 'n/a' }} out_fc={{ t_out_fc | round(1) }} k={{ bio_k }} h={{ bio_h }} Teq={{ t_eq }} | now={{ price_now }} win_avg={{ window_avg }} cheap={{ bank_cheap }} fixed={{ on_fixed_price }}{{ '+test' if bank_test else '' }} | horizon={{ bank_horizon_h }}h bank_ok={{ bank_possible }} bank_to={{ bank_target }} bank={{ bank_now }} win={{ prewarm_window }} on={{ prewarm_enabled }}{% endset -%}
         {{ s | truncate(255, True, '', 0) }}
   - variables:
       target: "{{ desired | float }}"

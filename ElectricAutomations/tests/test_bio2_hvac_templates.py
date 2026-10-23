@@ -99,6 +99,10 @@ def inputs(**over) -> dict:
 			"bank_horizon_h": 2.03,
 			"price_now": 2.0,
 			"window_avg": 3.0,
+			# 23 Oct: the house is on the monthly fixed feed, where banking
+			# only loses money. The default here is the spot feed.
+			"on_fixed_price": False,
+			"bank_test": False,
 			"holiday_mode": False,
 			"super_expensive": False,
 			"current_desired": 16.0,
@@ -191,6 +195,23 @@ def test_bank_heat_only_when_cheap_and_within_the_horizon():
 	assert r["bank_possible"] is True and r["bank_now"] is True and r["desired"] == 23  # 8 + 12 * e^0.2 = 22.7
 	r = evaluate(hours_until_film=2.5, hours_needed=0.5, bank_horizon_h=2.03, price_now=0.3, window_avg=3.0, room=19.0)
 	assert r["bank_possible"] is False
+
+
+def test_banking_is_off_on_the_fixed_feed():
+	cheap = dict(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
+		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=18.0)
+	# Spot feed: banks, as above.
+	assert evaluate(**cheap)["bank_now"] is True
+	# Fixed feed: the price signal means nothing, so no banking at all.
+	r = evaluate(**cheap, on_fixed_price=True)
+	assert r["bank_cheap"] is False and r["bank_now"] is False
+	assert r["desired"] == 16
+	# ... unless the test switch is on.
+	r = evaluate(**cheap, on_fixed_price=True, bank_test=True)
+	assert r["bank_cheap"] is True and r["bank_now"] is True and r["desired"] == 26
+	# The run-up is comfort, not price: unaffected by the feed.
+	r = evaluate(hours_until_film=1.0, hours_needed=1.5, t_eq=28.0, on_fixed_price=True)
+	assert r["prewarm_window"] is True and r["desired"] == 20
 
 
 def test_prewarm_switch_and_holiday():

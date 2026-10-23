@@ -30,7 +30,7 @@ target + 2 (`Bio2 sensor only`).
 | **Projector playing or paused** (`input_select.bio_projector`, from `BioProjectorLights.yaml`) | **20 °C** |
 | **Andy's phone in the bio, 07:00–23:00** (`input_select.phone_zone` = `bio`, from `PhoneZone.yaml`) | **20 °C** |
 | **Pre-warm run-up**: within `hours_needed` of `input_datetime.bio_film_time` (20:00) | **20 °C**, whatever the price |
-| **Bank heat**: earlier than that, power now ≥ 15 % cheaper than the run-up average, and the banked heat still 20 °C at film time | **up to 26 °C** |
+| **Bank heat** (spot feed only): earlier than that, power now ≥ 15 % cheaper than the run-up average, and the banked heat still 20 °C at film time | **up to 26 °C** |
 | Otherwise — evening included | **16 °C** |
 
 ## Pre-warming for film time (Oct 2026)
@@ -62,8 +62,17 @@ switches the planning off):
    third more leakage over a couple of hours, at a fraction of the price.
    Reason `Bank heat 22°C (cheap)`.
 
+**Only on the spot feed.** Banking is gated on
+`input_boolean.on_fixed_price_feed` being **off** (`FeedDetect.yaml` sets it from
+the two P1 meters — see `README_FixedPriceSwap.md`). On the monthly fixed price
+the timing of a kWh buys nothing and holding 26 °C leaks more than holding
+20 °C, so banking would be pure loss. The **run-up is price-blind and runs on
+either feed**: being warm by film time is comfort, not economy. Flip
+**`input_boolean.bio_bank_test_on_fixed`** to exercise banking on the fixed feed
+anyway (`fixed=True+test` in the working line); turn it off afterwards.
+
 `input_text.bio2_preheat_calc` shows the working on the dashboard (hours,
-prices, horizon, which rule fired). Tests: `test_prewarm_window_*`,
+prices, horizon, feed, which rule fired). Tests: `test_prewarm_window_*`,
 `test_bank_heat_*` in `tests/test_bio2_hvac_templates.py`.
 
 Sam's living room goes to 20 °C every evening; the bio hall does not. With
@@ -105,6 +114,7 @@ only "is it there" signal.
 | `input_text.bio2_preheat_calc` | max 255 — pre-warm working |
 | `input_datetime.bio_film_time` | time only, 20:00 |
 | `input_boolean.bio_prewarm_enabled` | on |
+| `input_boolean.bio_bank_test_on_fixed` | off — lets banking run on the fixed feed, for testing |
 | `input_number.bio_heat_loss_k`, `bio_heat_rate`, `bio_thermal_tau`, `bio_thermal_last_inside`, `bio_thermal_last_outside`, `bio_hours_to_target`, `input_datetime.bio_thermal_last_sample`, `input_text.bio_thermal_status` | the bio thermal model (no `initial:` — learned values must survive restarts) |
 
 ## Dashboards
