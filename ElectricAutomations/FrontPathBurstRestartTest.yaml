@@ -1,0 +1,57 @@
+# Temporary test (23 Oct 2026): are the FrontPath bursts the two LD2410s in
+# the box interfering with each other?
+#
+# Every burst lights every gate on both radars in the same second. The period
+# (8-12 min) drifts with the day, and spells fade in and out rather than
+# stopping. Two radars of the same make on the same band, each on its own
+# clock, would do exactly that: their frames slide past each other and
+# collide once per beat period, and the beat drifts as the clocks warm and
+# cool. Restarting one radar resets its frame timing. If the bursts are the
+# two radars colliding, the next burst after a restart lands off the old beat.
+# If the source is outside the box, it stays on the beat.
+#
+# So, after a strong burst, wait 2-6 min (a random point in the beat) and
+# restart the street radar. "Auto Calibrate Sensor 1" sends the LD2410
+# restart command (0xA3) and reconnects. At most once per 40 min, so each
+# restart has a few bursts either side to measure. Stops by itself after
+# 25 Oct. Read the result from the raw gate energies around each logbook line.
+#
+# Deployed with ha_set_automation, id frontpath_burst_restart_test.
+id: frontpath_burst_restart_test
+alias: Front Path - burst test, restart the street radar
+description: >-
+  Test, ends 25 Oct: after a whole-box radar burst, wait 2-6 min and restart
+  the street radar (Auto Calibrate Sensor 1 = LD2410 restart), at most once
+  per 40 min, to see whether the next burst moves off its beat.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: template
+    value_template: >-
+      {% set p = states('sensor.front_walkway_frontpath_ble_processing_gate_energies').split(';') %}
+      {% if p | count == 4 %}
+        {% set m1 = (p[0].split(':')[1].split(',') | map('int') | list)[2:] %}
+        {% set m2 = (p[2].split(':')[1].split(',') | map('int') | list)[2:] %}
+        {{ (m1 | select('>=', 40) | list | count) >= 5 or (m2 | select('>=', 40) | list | count) >= 5 }}
+      {% else %}false{% endif %}
+conditions:
+  - condition: template
+    value_template: >-
+      {{ now() < as_datetime('2026-10-26T00:00:00+02:00')
+         and as_timestamp(now()) - as_timestamp(this.attributes.last_triggered, 0) > 2400 }}
+actions:
+  - variables:
+      burst_at: "{{ now().strftime('%H:%M:%S') }}"
+      wait_s: "{{ range(120, 361) | random }}"
+  - delay:
+      seconds: "{{ wait_s }}"
+  - action: button.press
+    target:
+      entity_id: button.frontpath_ble_processing_auto_calibrate_sensor_1
+  - action: logbook.log
+    data:
+      name: FrontPath burst test
+      message: >-
+        Street radar restarted at {{ now().strftime('%H:%M:%S') }},
+        {{ wait_s }} s after the burst at {{ burst_at }}.
+      entity_id: input_button.saga_cam_test_shot
