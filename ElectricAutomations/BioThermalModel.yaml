@@ -23,7 +23,12 @@
 #     each 10-min sample dragged k up ~0.02 (0.064 -> 0.124 in 20 min). Now
 #     sampling stops entirely while input_boolean.bio_ventilating is on, and
 #     any observation more than k_outlier_factor away from the running
-#     estimate is rejected rather than blended.
+#     estimate is rejected rather than blended. When airing ends the stored
+#     baseline is from before the doors opened, so the first sample would
+#     span the whole airing: the automation re-baselines on the way out
+#     instead, losing one interval rather than relying on rejection. (An
+#     airing longer than max_sample_minutes would be caught by the interval
+#     guard anyway; a short one would not.)
 #   - HOLDING AT TARGET poisoned h downward. At steady state dT/dt is ~0, so
 #     observed_h collapses to k*dT — "whatever maintains this temperature",
 #     not the unit's real capacity. h drifted 2.0 -> 1.32 over five days,
@@ -53,6 +58,13 @@ description: >-
 triggers:
   - trigger: time_pattern
     minutes: "/10"
+    id: sample
+  # Doors shut again: start a fresh baseline, do not measure across the airing.
+  - trigger: state
+    entity_id: input_boolean.bio_ventilating
+    from: "on"
+    to: "off"
+    id: airing_ended
 conditions:
   - condition: template
     value_template: >-
@@ -178,6 +190,34 @@ actions:
           {% set den = (equilibrium_with_heat | float) - target_temp %}
           {{ ((1 / (new_k | float)) * ((num / den) | log)) | round(2) }}
         {% endif %}
+  # Airing just ended: store the baseline and take no sample this time.
+  - if:
+      - condition: trigger
+        id: airing_ended
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.bio_thermal_last_inside
+        data:
+          value: "{{ inside_now }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.bio_thermal_last_outside
+        data:
+          value: "{{ outside_now }}"
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bio_thermal_last_sample
+        data:
+          datetime: "{{ now_iso }}"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio_thermal_status
+        data:
+          value: >-
+            {% set s %}Airing ended: baseline reset to inside={{ inside_now | round(1) }}°C, outside={{ outside_now | round(1) }}°C. k={{ current_k }}/h, h={{ current_h }}°C/h held; next sample in ~10 min.{% endset -%}
+            {{ s | truncate(255, True, '', 0) }}
+      - stop: "Re-baselined after airing"
   - action: input_number.set_value
     target:
       entity_id: input_number.bio_thermal_last_inside

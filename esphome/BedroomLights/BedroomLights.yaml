@@ -1,6 +1,7 @@
-# BedroomLights — the name is historical. This ESP32-C3 lived in the Quiet
-# room (whose lights are still called light.bedroom_light*) and moved to the
-# BIO HALL in Oct 2026, where it is now:
+# BedroomLights — the name is historical, and consistent: the Quiet room IS a
+# bedroom, which is where this ESP32-C3 lived (hence its name, and the names
+# of that room's lights, light.bedroom_light*). It moved to the BIO HALL in
+# Oct 2026, where it is now:
 #
 #   - the bio hall's temperature and humidity (AHT20). Bio2Hvac.yaml,
 #     BioThermalModel.yaml, sam.yaml and CirculationFan.yaml all read
