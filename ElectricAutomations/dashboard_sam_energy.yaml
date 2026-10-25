@@ -104,7 +104,9 @@ views:
               - entity: input_datetime.bio_film_time
                 name: Film time (pre-warm for)
               - entity: input_boolean.bio_prewarm_enabled
-                name: Pre-warm / bank on cheap power
+                name: Pre-warm run-up before film time
+              - entity: input_boolean.bio_bank_enabled
+                name: Bank heat on cheap power (opt-in)
               - entity: input_boolean.bio_bank_test_on_fixed
                 name: Test banking on the fixed feed
               - entity: sensor.bio2_daily_energy

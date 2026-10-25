@@ -13,6 +13,7 @@ Run with:  python3 ElectricAutomations/tests/test_bio2_hvac_templates.py
 
 from __future__ import annotations
 
+import math
 import pathlib
 from ast import literal_eval
 
@@ -23,6 +24,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 AUTOMATION = yaml.safe_load((ROOT / "Bio2Hvac.yaml").read_text())
 CONSTANTS = dict(AUTOMATION["variables"])
 # actions[0] reads live state; actions[1] is the desired ladder, actions[2] the heat maths.
+LIVE_VARS = AUTOMATION["actions"][0]["variables"]
 DESIRED_VARS = AUTOMATION["actions"][1]["variables"]
 HEAT_VARS = AUTOMATION["actions"][2]["variables"]
 
@@ -39,6 +41,8 @@ def _ha_round(value, precision=0, method="common", default=None):
 
 
 _ENV.filters["round"] = _ha_round
+# Home Assistant's log filter is the natural log; plain Jinja2 has none.
+_ENV.filters["log"] = lambda v, base=None: math.log(float(v)) if base is None else math.log(float(v), float(base))
 _ENV.filters["timestamp_custom"] = lambda ts, fmt="%H:%M", local=True: "20:00"
 # lock_minutes_remaining uses now(); pin it so the tests are deterministic.
 NOW_TS = 1_800_000_000.0
@@ -103,6 +107,13 @@ def inputs(**over) -> dict:
 			# only loses money. The default here is the spot feed.
 			"on_fixed_price": False,
 			"bank_test": False,
+			# Banking is OFF by default (25 Oct): tests that want it say so.
+			"bank_enabled": False,
+			"bio_occupied": False,
+			# An internal room cools toward the heated house, not outdoors, so
+			# the coast-down floor is max(outdoor forecast, living room).
+			"living_temp": 10.0,
+			"coast_floor": 10.0,
 			"holiday_mode": False,
 			"super_expensive": False,
 			"current_desired": 16.0,
@@ -118,6 +129,11 @@ def inputs(**over) -> dict:
 
 def evaluate(**over) -> dict:
 	return render(render(inputs(**over), DESIRED_VARS), HEAT_VARS)
+
+
+def live_var(name: str, **over):
+	"""Render one variable from the automation's first (live-state) block."""
+	return render(inputs(**over), {name: LIVE_VARS[name]})[name]
 
 
 # --- desired ladder --------------------------------------------------------
@@ -157,58 +173,87 @@ def test_prewarm_window_heats_in_the_run_up_whatever_the_price():
 	assert r["prewarm_window"] is True and r["desired"] == 20
 
 
+def test_banking_is_off_by_default():
+	"""25 Oct: banking ran unasked and cooked the room. It is opt-in now."""
+	cheap = dict(hours_until_film=1.5, hours_needed=1.0, t_eq=28.0, bio_k=0.1,
+		bank_horizon_h=1.82, price_now=0.6, window_avg=1.2, room=18.0)
+	assert evaluate(**cheap)["bank_now"] is False
+	assert evaluate(**cheap)["desired"] == 16
+	assert evaluate(**cheap, bank_enabled=True)["bank_now"] is True
+
+
 def test_bank_heat_only_when_cheap_and_within_the_horizon():
-	# A tight room: k 0.1 -> horizon ln(18/12)/0.1 = 4.05 h, so heat banked
-	# at 26 °C is still 20 °C four hours later. Film at 20:00, now 16:00
-	# (4 h), plain lead 1.5 h: banking now (8 + 12 * e^0.4 = 25.9 -> 26)
-	# replaces the whole dear run-up, and the price is well below its average.
-	r = evaluate(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
-		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=18.0)
+	# k 0.1, floor 10, ceiling 22, target 20 -> horizon ln(12/10)/0.1 = 1.82 h.
+	# Film at 20:00, now 18:30, plain lead 1 h: 0.5 h of coasting fits.
+	cheap = dict(bank_enabled=True, hours_until_film=1.5, hours_needed=1.0,
+		t_eq=28.0, bio_k=0.1, bank_horizon_h=1.82, price_now=0.6,
+		window_avg=1.2, room=18.0)
+	r = evaluate(**cheap)
 	assert r["bank_possible"] is True and r["bank_cheap"] is True
-	assert r["bank_target"] == 26
-	assert r["bank_now"] is True and r["desired"] == 26
-	assert r["reason"].strip() == "Bank heat 26°C (cheap)"
-	# Closer to film time less is needed: 2 h out -> 8 + 12 * e^0.2 = 22.7 -> 23.
-	r = evaluate(hours_until_film=2.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
-		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=18.0)
-	assert r["bank_target"] == 23 and r["desired"] == 23
-	# Same but the price now is only 10 % cheaper: under the 15 % margin.
-	r = evaluate(hours_until_film=2.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
-		bank_horizon_h=4.05, price_now=2.7, window_avg=3.0, room=18.0)
-	assert r["bank_cheap"] is False and r["desired"] == 16
-	# Too early: the heat would have leaked away by 20:00.
-	r = evaluate(hours_until_film=6.0, hours_needed=2.0, t_eq=28.0, bio_k=0.1,
-		bank_horizon_h=4.05, price_now=0.5, window_avg=3.0, room=18.0)
-	assert r["bank_possible"] is False and r["desired"] == 16
-	# Already banked: hold the target (Bio2 idles at it) rather than drop
-	# to 16 and re-raise, which churned the desired helper on 22 Oct.
-	r = evaluate(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
-		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=26.0)
-	assert r["bank_now"] is True and r["desired"] == 26
+	assert r["bank_target"] == 22
+	assert r["bank_now"] is True and r["desired"] == 22
+	assert r["reason"].strip() == "Bank heat 22°C (cheap)"
+	# Never above the comfort ceiling, whatever the maths asks for.
+	assert float(r["desired"]) <= float(CONSTANTS["prewarm_max"])
+	# Only 10 % cheaper: under the 15 % margin.
+	assert evaluate(**dict(cheap, price_now=1.08))["bank_cheap"] is False
+	# Too early: the heat would have leaked away by film time.
+	assert evaluate(**dict(cheap, hours_until_film=6.0))["bank_possible"] is False
+	# Already banked: hold the target, do not drop and re-raise.
+	r = evaluate(**dict(cheap, room=22.0))
+	assert r["bank_now"] is True and r["desired"] == 22
 	# Room sensor down: no banking.
-	r = evaluate(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
-		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room_ok=False, room=0.0)
-	assert r["bank_now"] is False
-	# The seed model (k 0.2, 8 °C out): horizon ln(18/12)/0.2 = 2.03 h, so
-	# banking only reaches two hours back until the model learns the room.
-	r = evaluate(hours_until_film=1.0, hours_needed=0.5, bank_horizon_h=2.03, price_now=0.3, window_avg=3.0, room=19.0)
-	assert r["bank_possible"] is True and r["bank_now"] is True and r["desired"] == 23  # 8 + 12 * e^0.2 = 22.7
-	r = evaluate(hours_until_film=2.5, hours_needed=0.5, bank_horizon_h=2.03, price_now=0.3, window_avg=3.0, room=19.0)
-	assert r["bank_possible"] is False
+	assert evaluate(**dict(cheap, room_ok=False, room=0.0))["bank_now"] is False
+
+
+def test_no_banking_while_the_room_is_occupied():
+	"""The 25 Oct failure: it ran the unit flat out with Andy working in there."""
+	cheap = dict(bank_enabled=True, hours_until_film=1.5, hours_needed=1.0,
+		t_eq=28.0, bio_k=0.1, bank_horizon_h=1.82, price_now=0.6,
+		window_avg=1.2, room=18.0)
+	assert evaluate(**cheap)["bank_now"] is True
+	r = evaluate(**dict(cheap, bio_occupied=True))
+	assert r["bank_possible"] is False and r["desired"] == 16
+
+
+def test_no_banking_when_the_run_up_is_already_cheap():
+	"""25 Oct live: spot near zero all day, run-up averaged 0.42 SEK/kWh.
+	The percentage margin passed, so it banked to save about 2 SEK."""
+	r = evaluate(bank_enabled=True, hours_until_film=1.5, hours_needed=1.0,
+		t_eq=28.0, bio_k=0.1, bank_horizon_h=1.82, price_now=0.055,
+		window_avg=0.424, room=18.0)
+	assert r["bank_cheap"] is False and r["bank_now"] is False
+	assert r["desired"] == 16
+
+
+def test_no_banking_when_the_house_is_already_at_the_target():
+	"""The bio hall cools toward the heated house, not outdoors. With the
+	living room at the film target there is nowhere to coast down to."""
+	warm_house = dict(bank_enabled=True, hours_until_film=1.5, hours_needed=1.0,
+		t_eq=28.0, bio_k=0.1, price_now=0.6, window_avg=1.2, room=18.0,
+		living_temp=20.0, coast_floor=20.0)
+	# The horizon formula comes straight out of the YAML's live block.
+	horizon = float(live_var("bank_horizon_h", **warm_house))
+	assert horizon == 0
+	r = evaluate(**dict(warm_house, bank_horizon_h=horizon))
+	assert r["bank_possible"] is False and r["desired"] == 16
+	# A cold house leaves real headroom again: ln(12/10)/0.1 = 1.82 h.
+	cold = dict(warm_house, living_temp=10.0, coast_floor=10.0)
+	horizon = float(live_var("bank_horizon_h", **cold))
+	assert abs(horizon - 1.82) < 0.01, horizon
+	r = evaluate(**dict(cold, bank_horizon_h=horizon))
+	assert r["bank_possible"] is True and r["desired"] == 22
 
 
 def test_banking_is_off_on_the_fixed_feed():
-	cheap = dict(hours_until_film=4.0, hours_needed=1.5, t_eq=28.0, bio_k=0.1,
-		bank_horizon_h=4.05, price_now=1.0, window_avg=3.0, room=18.0)
-	# Spot feed: banks, as above.
+	cheap = dict(bank_enabled=True, hours_until_film=1.5, hours_needed=1.0,
+		t_eq=28.0, bio_k=0.1, bank_horizon_h=1.82, price_now=0.6,
+		window_avg=1.2, room=18.0)
 	assert evaluate(**cheap)["bank_now"] is True
-	# Fixed feed: the price signal means nothing, so no banking at all.
-	r = evaluate(**cheap, on_fixed_price=True)
-	assert r["bank_cheap"] is False and r["bank_now"] is False
-	assert r["desired"] == 16
-	# ... unless the test switch is on.
-	r = evaluate(**cheap, on_fixed_price=True, bank_test=True)
-	assert r["bank_cheap"] is True and r["bank_now"] is True and r["desired"] == 26
+	r = evaluate(**dict(cheap, on_fixed_price=True))
+	assert r["bank_cheap"] is False and r["bank_now"] is False and r["desired"] == 16
+	r = evaluate(**dict(cheap, on_fixed_price=True, bank_test=True))
+	assert r["bank_cheap"] is True and r["bank_now"] is True and r["desired"] == 22
 	# The run-up is comfort, not price: unaffected by the feed.
 	r = evaluate(hours_until_film=1.0, hours_needed=1.5, t_eq=28.0, on_fixed_price=True)
 	assert r["prewarm_window"] is True and r["desired"] == 20

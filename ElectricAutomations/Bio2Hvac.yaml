@@ -27,7 +27,12 @@
 #                             input_datetime.bio_film_time (20:00), capped at
 #                             prewarm_max_lead_h when the model says the
 #                             target is out of reach
-#   bank heat on cheap power  only on the SPOT feed (input_boolean
+#   bank heat on cheap power  OFF by default (input_boolean.bio_bank_enabled).
+#                             Never while the room is occupied (projector on
+#                             or the phone in the bio), never above
+#                             prewarm_max (22 C), and never unless the run-up
+#                             itself averages bank_min_window_avg or more.
+#                             Only on the SPOT feed (input_boolean
 #                             .on_fixed_price_feed off, set by FeedDetect.yaml):
 #                             on the monthly fixed price the timing of a kWh
 #                             buys nothing, and holding 26 C instead of 20 C
@@ -74,6 +79,7 @@
 #   input_datetime.bio_film_time            time only, 20:00
 #   input_boolean.bio_prewarm_enabled       on
 #   input_boolean.bio_bank_test_on_fixed    off (test banking on the fixed feed)
+#   input_boolean.bio_bank_enabled          off (master switch for banking)
 #
 # Tests: tests/test_bio2_hvac_templates.py
 # Deploy: python3 ElectricAutomations/deploy_bio2_hvac.py (id bio2_hvac)
@@ -94,10 +100,17 @@ variables:
   economy_temp: 16
   frost_temp: 10
   # Pre-warm for film time (see header).
-  prewarm_max: 26
+  # Banking ceiling. 26 was far too high (25 Oct): with the fooled setpoint an
+  # unreachable target makes Bio2 run at FULL output for hours, which in a room
+  # people sit in is unbearable long before the air temperature gets there.
+  prewarm_max: 22
   prewarm_max_lead_h: 4
   bank_margin: 0.15
   window_min_h: 1
+  # Do not bank at all unless the run-up is genuinely expensive. 25 Oct the
+  # evening averaged 0.42 SEK/kWh (spot was near zero all day) and banking
+  # still fired on the percentage margin, overheating the room to save ~2 SEK.
+  bank_min_window_avg: 0.6
   nordpool: sensor.nordpool_kwh_se4_sek_3_10_025
   manual_lock_minutes: 90
   heat_offset: 1
@@ -132,6 +145,7 @@ triggers:
       - input_boolean.holiday_mode
       - input_boolean.bio_prewarm_enabled
       - input_boolean.bio_bank_test_on_fixed
+      - input_boolean.bio_bank_enabled
       - input_boolean.on_fixed_price_feed
       - input_datetime.bio_film_time
       - input_boolean.super_expensive_active
@@ -180,6 +194,9 @@ actions:
       # money. The run-up below is unaffected — that is comfort, not price.
       on_fixed_price: "{{ is_state('input_boolean.on_fixed_price_feed', 'on') }}"
       bank_test: "{{ is_state('input_boolean.bio_bank_test_on_fixed', 'on') }}"
+      # Master switch for banking, default OFF. The run-up is the useful half;
+      # banking is the speculative half and has now caused two incidents.
+      bank_enabled: "{{ is_state('input_boolean.bio_bank_enabled', 'on') }}"
       film_ts: >-
         {% set t = states('input_datetime.bio_film_time') %}
         {% set t = t if t not in ['unknown', 'unavailable', 'none', ''] else '20:00:00' %}
@@ -192,6 +209,18 @@ actions:
         {% set v = states('input_number.forecast_outside_4h') %}
         {{ v | float if v not in ['unknown', 'unavailable', 'none', ''] else outdoor }}
       t_eq: "{{ (t_out_fc + bio_h / bio_k) | round(2) if bio_k > 0 else 99 }}"
+      # The bio hall is an INTERNAL room: it does not cool toward the outdoor
+      # temperature, it cools toward the heated house next door. Banked heat
+      # therefore cannot coast below the living room, so that is the floor the
+      # coast-down is measured against. When the house is already at the film
+      # target there is nowhere to coast to and banking is pointless.
+      living_temp: >-
+        {% set v = states('sensor.t_h_sensor_temperature') %}
+        {{ v | float(t_out_fc) if v not in ['unknown', 'unavailable', 'none', ''] else t_out_fc }}
+      coast_floor: "{{ [t_out_fc | float, living_temp | float] | max | round(2) }}"
+      # Banking is for an EMPTY room. Someone in there is the whole reason not
+      # to run the unit flat out at a target nobody wants to sit in.
+      bio_occupied: "{{ projector_on or phone_zone == 'bio' }}"
       # Hours of Bio2 heating to take the room from where it is to film_temp.
       hours_needed: >-
         {% if not room_ok %}99
@@ -199,10 +228,12 @@ actions:
         {% elif bio_k <= 0 or t_eq <= film_temp + 0.5 %}99
         {% else %}{{ ((1 / bio_k) * (((t_eq - room) / (t_eq - film_temp)) | log)) | round(2) }}
         {% endif %}
-      # How long banked heat at prewarm_max takes to fall back to film_temp.
+      # How long banked heat at prewarm_max takes to fall back to film_temp,
+      # coasting toward coast_floor (not outdoors). Zero when the floor is at
+      # or above the target: nothing to coast down from.
       bank_horizon_h: >-
-        {% if bio_k > 0 and film_temp > t_out_fc + 0.5 %}
-          {{ ((1 / bio_k) * (((prewarm_max - t_out_fc) / (film_temp - t_out_fc)) | log)) | round(2) }}
+        {% if bio_k > 0 and prewarm_max > film_temp and film_temp > coast_floor | float + 0.5 %}
+          {{ ((1 / bio_k) * (((prewarm_max - coast_floor | float) / (film_temp - coast_floor | float)) | log)) | round(2) }}
         {% else %}0{% endif %}
       price_now: "{{ states(nordpool) | float(0) }}"
       # Average 15-min price over the plain pre-warm window: the last
@@ -244,21 +275,22 @@ actions:
       # Earlier than that: bank heat only if it would still be film_temp at
       # film time when left to leak (coast time within bank_horizon_h) ...
       bank_possible: >-
-        {{ prewarm_enabled and not holiday_mode
+        {{ prewarm_enabled and bank_enabled and not holiday_mode
+           and not bio_occupied
            and hours_until_film > prewarm_lead_h + 0.25
-           and hours_until_film <= bank_horizon_h }}
+           and hours_until_film <= bank_horizon_h | float }}
       # ... and only when the spot price signal is live (or being tested) and
       # it is genuinely cheaper now than in the run-up.
       bank_cheap: >-
         {{ (not on_fixed_price or bank_test)
-           and price_now > 0 and window_avg > 0
+           and price_now > 0 and window_avg >= bank_min_window_avg
            and price_now <= window_avg * (1 - bank_margin) }}
       # What to bank now so that it has leaked back to exactly film_temp at
       # film time: Tout + (20 - Tout) * e^(k * hours_until_film), capped.
       bank_target: >-
         {% if bank_possible %}
           {% set e = (2.718281828 ** (bio_k * hours_until_film)) %}
-          {% set t = t_out_fc + (film_temp - t_out_fc) * e %}
+          {% set t = coast_floor | float + (film_temp - coast_floor | float) * e %}
           {{ [[t, prewarm_max] | min, film_temp] | max | round(0) }}
         {% else %}
           {{ film_temp }}
@@ -300,7 +332,7 @@ actions:
           Bio idle {{ economy_temp }}°C
         {% endif %}
       preheat_calc: >-
-        {% set s %}film={{ film_ts | timestamp_custom('%H:%M', True) }} in {{ hours_until_film }}h need={{ hours_needed }}h lead={{ prewarm_lead_h }}h | room={{ room | round(1) if room_ok else 'n/a' }} out_fc={{ t_out_fc | round(1) }} k={{ bio_k }} h={{ bio_h }} Teq={{ t_eq }} | now={{ price_now }} win_avg={{ window_avg }} cheap={{ bank_cheap }} fixed={{ on_fixed_price }}{{ '+test' if bank_test else '' }} | horizon={{ bank_horizon_h }}h bank_ok={{ bank_possible }} bank_to={{ bank_target }} bank={{ bank_now }} win={{ prewarm_window }} on={{ prewarm_enabled }}{% endset -%}
+        {% set s %}film={{ film_ts | timestamp_custom('%H:%M', True) }} in {{ hours_until_film }}h need={{ hours_needed }}h lead={{ prewarm_lead_h }}h | room={{ room | round(1) if room_ok else 'n/a' }} floor={{ coast_floor }} k={{ bio_k }} Teq={{ t_eq }} | now={{ price_now }} win_avg={{ window_avg }} cheap={{ bank_cheap }} fixed={{ on_fixed_price }}{{ '+test' if bank_test else '' }} | horizon={{ bank_horizon_h }}h occ={{ bio_occupied }} bank_on={{ bank_enabled }} bank_ok={{ bank_possible }} bank_to={{ bank_target }} bank={{ bank_now }} win={{ prewarm_window }}{% endset -%}
         {{ s | truncate(255, True, '', 0) }}
   - variables:
       target: "{{ desired | float }}"
