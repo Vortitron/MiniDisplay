@@ -107,6 +107,19 @@ broke the learner in a way worth recording, because both failures are generic:
   just reachable, when Bio2 had in fact lifted the room 14 → 18.3 °C in an
   afternoon.
 
+**The airing switch is physical too (25 Oct).** The BedroomLights ESP32 moved
+into the bio with the sensor, so its two latching switches and button no longer
+drive the Quiet room's lights (`light.bedroom_light*` — the names are
+historical; those lights keep their own BILRESA buttons in that room). About
+900 lines of light command/ack/guard/LED machinery came out of
+`esphome/BedroomLights/BedroomLights.yaml`, leaving the AHT20, the Bluetooth
+proxy and three inputs. **Switch 1 toggles `input_boolean.bio_ventilating`**
+and its LED shows the state as Home Assistant sees it. It is a toggle on either
+direction of flip rather than position-follows-state, because the boolean is
+also set from the dashboard, so a position-following switch would drift out of
+step. A 10-second arming delay after boot stops a reboot toggling it. Switch 2
+and the button are reported to Home Assistant with nothing bound; LED 2 is free.
+
 Three guards: **`input_boolean.bio_ventilating`** stops sampling altogether and
 turns Bio2 **off** (heating with the doors open just warms the garden, and the
 headline reads `Airing · Off`); `max_k` is 0.5, since an internal room cannot

@@ -1,94 +1,72 @@
+# BedroomLights — the name is historical. This ESP32-C3 lived in the Quiet
+# room (whose lights are still called light.bedroom_light*) and moved to the
+# BIO HALL in Oct 2026, where it is now:
+#
+#   - the bio hall's temperature and humidity (AHT20). Bio2Hvac.yaml,
+#     BioThermalModel.yaml, sam.yaml and CirculationFan.yaml all read
+#     sensor.bedroomlights_bedroomlights_temperature, so the device name and
+#     the sensor names MUST NOT change, however wrong they sound.
+#   - a Bluetooth proxy for the bio (Bermuda reads it for phone_zone).
+#   - three inputs, repurposed below.
+#
+# 25 Oct 2026: the two latching switches and the momentary button used to
+# drive the Quiet room's lights (light.bedroom_light_stand, light.bedroom_light,
+# colour cycling, brightness-on-hold, and media_player.ceol_piccolo). All of
+# that is gone: the device is in the wrong room for it, and those lights have
+# their own BILRESA buttons in the Quiet room (BilresaQuietRoomLight.yaml,
+# BilresaQuietRoomStand.yaml). About 900 lines of command/ack/guard/LED
+# machinery went with it; see git history if any of it is ever wanted back.
+#
+# Inputs now:
+#   Switch 1 (GPIO0, latching)  TOGGLES input_boolean.bio_ventilating — airing.
+#     Deliberately a toggle on either direction of flip, not position-follows-
+#     state: the boolean is also set from the dashboard and read by
+#     Bio2Hvac.yaml, so the switch position would drift out of step. LED 1
+#     shows the truth from Home Assistant, whichever way the switch sits.
+#   Switch 2 (GPIO10, latching) reported to HA only, no device-side action.
+#   Button  (GPIO6, momentary)  reported to HA only, no device-side action.
+#     Bind either in a Home Assistant automation; nothing uses them yet.
+#   LED 2 is free.
+#
+# Airing exists because the bio hall has two external doors. With them open
+# heating warms the garden, and the thermal model's k learns nonsense from
+# the 6 C/h fall, so Bio2Hvac.yaml turns Bio2 off and BioThermalModel.yaml
+# stops sampling while it is on. See README_Bio2HVAC.md.
+
 substitutions:
-  switch_guard_iterations: '10'
-  switch_guard_interval: '1500ms'
-  switch_command_ack_timeout_ms: '20000'
-  switch_led_day_on_level: '1.0'
-  switch_led_night_on_level: '0.5'
-  switch_led_pending_low_ratio: '0.35'
-  switch_led_pending_step: '160ms'
-  switch_led_ha_error_on_step: '90ms'
-  switch_led_ha_error_off_step: '90ms'
-  switch_led_ha_error_pause_step: '280ms'
-  switch_led_bulb_timeout_low_ratio: '0.12'
-  switch_led_bulb_timeout_low_step: '420ms'
-  switch_led_bulb_timeout_high_step: '120ms'
+  led_day_on_level: '1.0'
+  led_night_on_level: '0.5'
 
 esphome:
   name: "bedroomlights"
   friendly_name: BedroomLights
   on_boot:
-    # High priority - wait for WiFi before initialising I2C sensors
+    # Wait for WiFi before touching I2C (this board is fussy about it).
     - priority: 600
       then:
         - wait_until:
             wifi.connected:
         - logger.log: "WiFi connected, enabling environmental sensors"
-        # Start sensor polling now that WiFi is stable
         - component.update: aht10_sensor
-    # Low priority - initialise application state after everything else
+    # Ignore the switches' initial state publish, or a reboot would toggle
+    # airing. Only flips after this point count.
     - priority: -100
       then:
-        - lambda: |-
-            id(ha_connected) = false;
-            id(stand_state_initialised) = false;
-            id(bedroom_state_initialised) = false;
-            id(stand_led_pending) = false;
-            id(bedroom_led_pending) = false;
-            id(stand_command_pending) = false;
-            id(bedroom_command_pending) = false;
-            id(stand_command_send_failed) = false;
-            id(bedroom_command_send_failed) = false;
-            id(stand_command_timed_out) = false;
-            id(bedroom_command_timed_out) = false;
-            id(stand_command_started_ms) = 0;
-            id(bedroom_command_started_ms) = 0;
-        - logger.log: "Boot complete, waiting for Home Assistant state sync"
-
+        - lambda: 'id(inputs_ready) = false;'
+        - delay: 10s
+        - lambda: 'id(inputs_ready) = true;'
+        - logger.log: "Inputs armed"
 
 esp32:
   board: esp32-c3-devkitm-1
   framework:
     type: esp-idf
 
-# Enable logging
 logger:
 
-# Enable Home Assistant API
 api:
   encryption:
-      key: !secret bedroomlights_api_key
-  on_client_connected:
-    - lambda: |-
-        ESP_LOGI("ha_sync", "Home Assistant connected");
-        id(ha_connected) = true;
-        id(stand_led_pending) = false;
-        id(bedroom_led_pending) = false;
-        id(stand_command_pending) = false;
-        id(bedroom_command_pending) = false;
-        id(stand_command_send_failed) = false;
-        id(bedroom_command_send_failed) = false;
-        id(stand_command_timed_out) = false;
-        id(bedroom_command_timed_out) = false;
-        id(stand_command_started_ms) = 0;
-        id(bedroom_command_started_ms) = 0;
-    - delay: 3s
-    - logger.log: "Home Assistant connected"
-  on_client_disconnected:
-    - lambda: |-
-        ESP_LOGW("ha_sync", "Home Assistant disconnected");
-        id(ha_connected) = false;
-        id(stand_state_initialised) = false;
-        id(bedroom_state_initialised) = false;
-        id(stand_led_pending) = false;
-        id(bedroom_led_pending) = false;
-        id(stand_command_pending) = false;
-        id(bedroom_command_pending) = false;
-        id(stand_command_send_failed) = false;
-        id(bedroom_command_send_failed) = false;
-        id(stand_command_timed_out) = false;
-        id(bedroom_command_timed_out) = false;
-        id(stand_command_started_ms) = 0;
-        id(bedroom_command_started_ms) = 0;
+    key: !secret bedroomlights_api_key
 
 ota:
   - platform: esphome
@@ -101,13 +79,13 @@ wifi:
   fast_connect: true
   reboot_timeout: 5min
 
-
-# Bluetooth Proxy (extends HA BLE range)
+# Bluetooth Proxy (extends HA BLE range). Sits in the Bio, also feeding
+# Bermuda (where people are). WiFi motion (ESPectre) was tried here
+# 2026-10-07 and taken off 2026-10-17: it didn't work, and it needed most
+# of the radio.
 bluetooth_proxy:
   active: true
 
-# I2C bus for environmental sensors
-# SDA/SCL on safe pins (avoiding strapping pins GPIO2/8/9)
 i2c:
   id: bedroom_i2c_bus
   sda: GPIO5
@@ -115,13 +93,10 @@ i2c:
   scan: true
   frequency: 100kHz
 
-
-# Time component for potential future use
 time:
   - platform: homeassistant
     id: ha_time
 
-# Interval to poll environmental sensors (only after WiFi connected)
 interval:
   - interval: 2min
     then:
@@ -130,13 +105,15 @@ interval:
             wifi.connected:
           then:
             - component.update: aht10_sensor
-  - interval: 500ms
-    then:
-      - script.execute: monitor_command_outcomes
 
-# Binary Sensors - Switches
+globals:
+  - id: inputs_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
 binary_sensor:
-  # Latching Switch 1 - Controls bedroom_light_stand
+  # Latching Switch 1 — airing. Either direction of flip toggles it.
   - platform: gpio
     pin:
       number: GPIO0
@@ -144,33 +121,19 @@ binary_sensor:
         input: true
         pullup: true
       inverted: true
-    name: "Stand Light Switch"
+    name: "Bio Airing Switch"
     id: switch1
     filters:
       - delayed_on: 200ms
       - delayed_off: 200ms
     on_press:
       then:
-        - logger.log: "Switch 1 pressed - turning on bedroom_light_stand"
-        - lambda: |-
-            id(stand_target_on) = true;
-        - script.execute:
-            id: command_stand_light
-        - script.execute:
-            id: guard_stand_switch_alignment
-        - script.execute:
-            id: maybe_turn_on_media_player
+        - script.execute: toggle_airing
     on_release:
       then:
-        - logger.log: "Switch 1 released - turning off bedroom_light_stand"
-        - lambda: |-
-            id(stand_target_on) = false;
-        - script.execute:
-            id: command_stand_light
-        - script.execute:
-            id: guard_stand_switch_alignment
-  
-  # Latching Switch 2 - Controls bedroom_light
+        - script.execute: toggle_airing
+
+  # Latching Switch 2 — reported to HA, nothing bound on the device.
   - platform: gpio
     pin:
       number: GPIO10
@@ -178,31 +141,13 @@ binary_sensor:
         input: true
         pullup: true
       inverted: true
-    name: "Bedroom Light Switch"
+    name: "Bio Switch 2"
     id: switch2
     filters:
       - delayed_on: 40ms
       - delayed_off: 40ms
-    on_press:
-      then:
-        - logger.log: "Switch 2 pressed - turning on bedroom_light"
-        - lambda: |-
-            id(bedroom_target_on) = true;
-        - script.execute:
-            id: command_bedroom_light
-        - script.execute:
-            id: guard_bedroom_switch_alignment
-    on_release:
-      then:
-        - logger.log: "Switch 2 released - turning off bedroom_light"
-        - lambda: |-
-            id(bedroom_target_on) = false;
-        - script.execute:
-            id: command_bedroom_light
-        - script.execute:
-            id: guard_bedroom_switch_alignment
-  
-  # Momentary Button - Colour and brightness control
+
+  # Momentary button — reported to HA, nothing bound on the device.
   - platform: gpio
     pin:
       number: GPIO6
@@ -210,82 +155,24 @@ binary_sensor:
         input: true
         pullup: true
       inverted: true
-    name: "Colour Control Button"
+    name: "Bio Button"
     id: momentary_button
     filters:
       - delayed_on: 40ms
       - delayed_off: 40ms
-    on_press:
-      then:
-        - lambda: |-
-            id(button_press_time) = millis();
-            ESP_LOGD("button", "Momentary button pressed at %u ms", id(button_press_time));
-        - script.execute: start_hold_brightness
-    on_release:
-      then:
-        - lambda: |-
-            uint32_t press_duration = millis() - id(button_press_time);
-            ESP_LOGD("button", "Momentary button released after %u ms", press_duration);
-            if (press_duration >= 600) {
-              ESP_LOGD("button", "Hold action completed");
-            } else {
-              ESP_LOGD("button", "Short press - cycling colour or toggling LEDs");
-              id(handle_momentary_press).execute();
-            }
-  
-  # Home Assistant sensors to track light states
-  - platform: homeassistant
-    id: stand_light_state
-    entity_id: light.bedroom_light_stand
-    internal: true
-    on_state:
-      - lambda: |-
-          id(stand_state_initialised) = true;
-          bool ha_on = id(stand_light_state).state;
-          if ((id(stand_command_pending) || id(stand_command_send_failed) || id(stand_command_timed_out)) && ha_on == id(stand_target_on)) {
-            ESP_LOGI("pending_led", "Stand light command acknowledged by Home Assistant");
-            id(stand_command_pending) = false;
-            id(stand_command_send_failed) = false;
-            id(stand_command_timed_out) = false;
-            id(stand_command_started_ms) = 0;
-          }
-      - if:
-          condition:
-            lambda: 'return id(stand_light_state).state && id(stand_target_on);'
-          then:
-            - script.execute: apply_stand_light_colour
-      - script.execute: update_pending_leds
-      - script.execute: sync_switch_leds
-  
-  - platform: homeassistant
-    id: bedroom_light_state
-    entity_id: light.bedroom_light
-    internal: true
-    on_state:
-      - lambda: |-
-          id(bedroom_state_initialised) = true;
-          bool ha_on = id(bedroom_light_state).state;
-          if ((id(bedroom_command_pending) || id(bedroom_command_send_failed) || id(bedroom_command_timed_out)) && ha_on == id(bedroom_target_on)) {
-            ESP_LOGI("pending_led", "Bedroom light command acknowledged by Home Assistant");
-            id(bedroom_command_pending) = false;
-            id(bedroom_command_send_failed) = false;
-            id(bedroom_command_timed_out) = false;
-            id(bedroom_command_started_ms) = 0;
-          }
-      - if:
-          condition:
-            lambda: 'return id(bedroom_light_state).state && id(bedroom_target_on);'
-          then:
-            - script.execute: apply_bedroom_light_colour
-      - script.execute: update_pending_leds
-      - script.execute: sync_switch_leds
 
-# Environmental sensors (AHT10 for temp/humidity only)
-# Delayed startup to avoid interfering with WiFi connection
+  # The truth about airing, from Home Assistant, for LED 1.
+  - platform: homeassistant
+    id: airing_state
+    entity_id: input_boolean.bio_ventilating
+    internal: true
+    on_state:
+      - script.execute: sync_airing_led
+
 sensor:
   - platform: aht10
     id: aht10_sensor
-    variant: AHT20  # Specify the model as AHT20
+    variant: AHT20
     i2c_id: bedroom_i2c_bus
     update_interval: never  # Manual control to prevent boot-time polling
     temperature:
@@ -296,967 +183,50 @@ sensor:
         - calibrate_linear:
             - 0.0 -> 0.0
             - 100.0 -> 100.0
-        # Fresh sensor - start with no offset and adjust after testing
         - offset: 0.0
     humidity:
       name: "BedroomLights Humidity"
       id: bedroom_aht10_humidity
       accuracy_decimals: 1
 
-# Outputs - Switch LEDs
 output:
-  # LED for Switch 1 (bedroom_light_stand)
+  # LED 1 — lit while airing is on.
   - platform: ledc
     pin: GPIO4
     id: switch1_led_output
     frequency: 1000Hz
-  
-  # LED for Switch 2 (bedroom_light)
+  # LED 2 — free.
   - platform: ledc
     pin: GPIO7
     id: switch2_led_output
     frequency: 1000Hz
 
-# Global variables
-globals:
-  - id: colour_index
-    type: int
-    restore_value: no
-    initial_value: '1'  # 0-3: kelvin, 4-9: RGB colours (default to 2700K warm white)
-  - id: brightness_level
-    type: int
-    restore_value: no
-    initial_value: '130'  # Start at medium brightness
-  - id: button_press_time
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-  - id: leds_manually_off
-    type: bool
-    restore_value: no
-    initial_value: 'false'  # Track if LEDs were manually turned off
-  - id: stand_target_on
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: bedroom_target_on
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: ha_connected
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: stand_state_initialised
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: bedroom_state_initialised
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: stand_led_pending
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: bedroom_led_pending
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: stand_colour_index
-    type: int
-    restore_value: yes
-    initial_value: '1'
-  - id: bedroom_colour_index
-    type: int
-    restore_value: yes
-    initial_value: '1'
-  - id: stand_command_pending
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: bedroom_command_pending
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: stand_command_send_failed
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: bedroom_command_send_failed
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: stand_command_timed_out
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: bedroom_command_timed_out
-    type: bool
-    restore_value: no
-    initial_value: 'false'
-  - id: stand_command_started_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-  - id: bedroom_command_started_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: '0'
-
-# Scripts
 script:
-  # Turn on media player if stand light has been on for 3 seconds
-  - id: maybe_turn_on_media_player
+  - id: toggle_airing
     mode: restart
     then:
-      - delay: 3s
       - if:
           condition:
-            lambda: 'return id(stand_target_on);'
+            lambda: 'return id(inputs_ready);'
           then:
-            - logger.log: "Stand light steady for 3s - turning on media player"
-            - homeassistant.service:
-                service: media_player.turn_on
+            - logger.log: "Airing switch flipped - toggling input_boolean.bio_ventilating"
+            - homeassistant.action:
+                action: input_boolean.toggle
                 data:
-                  entity_id: media_player.ceol_piccolo
-
-  - id: update_pending_leds
-    mode: restart
-    then:
-      - lambda: |-
-          bool stand_pending = id(stand_command_pending) || id(stand_command_send_failed) || id(stand_command_timed_out);
-          if (stand_pending != id(stand_led_pending)) {
-            id(stand_led_pending) = stand_pending;
-            const char *stand_reason = "SYNCED";
-            if (id(stand_command_send_failed)) {
-              stand_reason = "HA_UNREACHABLE";
-            } else if (id(stand_command_timed_out)) {
-              stand_reason = "NO_ACK_TIMEOUT";
-            } else if (id(stand_command_pending)) {
-              stand_reason = "WAIT_ACK";
-            }
-            ESP_LOGI("pending_led", "Stand LED status -> %s", stand_reason);
-            if (stand_pending) {
-              id(stand_pending_pulse).execute();
-            }
-          }
-          bool bedroom_pending = id(bedroom_command_pending) || id(bedroom_command_send_failed) || id(bedroom_command_timed_out);
-          if (bedroom_pending != id(bedroom_led_pending)) {
-            id(bedroom_led_pending) = bedroom_pending;
-            const char *bedroom_reason = "SYNCED";
-            if (id(bedroom_command_send_failed)) {
-              bedroom_reason = "HA_UNREACHABLE";
-            } else if (id(bedroom_command_timed_out)) {
-              bedroom_reason = "NO_ACK_TIMEOUT";
-            } else if (id(bedroom_command_pending)) {
-              bedroom_reason = "WAIT_ACK";
-            }
-            ESP_LOGI("pending_led", "Bedroom LED status -> %s", bedroom_reason);
-            if (bedroom_pending) {
-              id(bedroom_pending_pulse).execute();
-            }
-          }
-      - script.execute: sync_switch_leds
-
-  - id: monitor_command_outcomes
-    mode: restart
-    then:
-      - lambda: |-
-          bool status_changed = false;
-          const uint32_t now_ms = millis();
-          const uint32_t timeout_ms = ${switch_command_ack_timeout_ms};
-
-          if (id(stand_command_pending) && id(stand_command_started_ms) > 0) {
-            uint32_t stand_elapsed = now_ms - id(stand_command_started_ms);
-            if (stand_elapsed >= timeout_ms) {
-              id(stand_command_pending) = false;
-              id(stand_command_timed_out) = false;
-              id(stand_command_send_failed) = false;
-              id(stand_command_started_ms) = 0;
-              id(stand_led_pending) = false;
-              status_changed = true;
-              ESP_LOGW("switch_guard", "Stand light no-ack timeout after %u ms - giving up", stand_elapsed);
-            }
-          }
-
-          if (id(bedroom_command_pending) && id(bedroom_command_started_ms) > 0) {
-            uint32_t bedroom_elapsed = now_ms - id(bedroom_command_started_ms);
-            if (bedroom_elapsed >= timeout_ms) {
-              id(bedroom_command_pending) = false;
-              id(bedroom_command_timed_out) = false;
-              id(bedroom_command_send_failed) = false;
-              id(bedroom_command_started_ms) = 0;
-              id(bedroom_led_pending) = false;
-              status_changed = true;
-              ESP_LOGW("switch_guard", "Bedroom light no-ack timeout after %u ms - giving up", bedroom_elapsed);
-            }
-          }
-
-          if (status_changed) {
-            id(update_pending_leds).execute();
-          }
-
-  - id: set_stand_light_colour
-    mode: restart
-    parameters:
-      requested_index: int
-      include_brightness: bool
-    then:
-      - lambda: |-
-          int idx = requested_index;
-          if (idx < 0 || idx > 3) {
-            idx = 1;
-          }
-          id(stand_colour_index) = idx;
-      - if:
-          condition:
-            lambda: 'return include_brightness;'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.bedroom_light_stand
-                  color_temp_kelvin: !lambda |-
-                    switch (id(stand_colour_index)) {
-                      case 0: return 1900;
-                      case 1: return 2700;
-                      case 2: return 3500;
-                      case 3: return 6500;
-                    }
-                    return 2700;
-                  brightness: !lambda 'return id(brightness_level);'
+                  entity_id: input_boolean.bio_ventilating
           else:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.bedroom_light_stand
-                  color_temp_kelvin: !lambda |-
-                    switch (id(stand_colour_index)) {
-                      case 0: return 1900;
-                      case 1: return 2700;
-                      case 2: return 3500;
-                      case 3: return 6500;
-                    }
-                    return 2700;
+            - logger.log: "Airing switch flip ignored (still booting)"
 
-  - id: set_bedroom_light_colour
+  - id: sync_airing_led
     mode: restart
-    parameters:
-      requested_index: int
-      include_brightness: bool
     then:
       - lambda: |-
-          int idx = requested_index;
-          if (idx < 0 || idx > 9) {
-            idx = 1;
+          auto now = id(ha_time).now();
+          float cap = ${led_day_on_level};
+          if (now.is_valid() && (now.hour >= 18 || now.hour < 6)) {
+            cap = ${led_night_on_level};
           }
-          id(bedroom_colour_index) = idx;
-      - if:
-          condition:
-            lambda: 'return id(bedroom_colour_index) <= 3;'
-          then:
-            - if:
-                condition:
-                  lambda: 'return include_brightness;'
-                then:
-                  - homeassistant.service:
-                      service: light.turn_on
-                      data:
-                        entity_id: light.bedroom_light
-                        color_temp_kelvin: !lambda |-
-                          switch (id(bedroom_colour_index)) {
-                            case 0: return 1900;
-                            case 1: return 2700;
-                            case 2: return 3500;
-                            case 3: return 6500;
-                          }
-                          return 2700;
-                        brightness: !lambda 'return id(brightness_level);'
-                else:
-                  - homeassistant.service:
-                      service: light.turn_on
-                      data:
-                        entity_id: light.bedroom_light
-                        color_temp_kelvin: !lambda |-
-                          switch (id(bedroom_colour_index)) {
-                            case 0: return 1900;
-                            case 1: return 2700;
-                            case 2: return 3500;
-                            case 3: return 6500;
-                          }
-                          return 2700;
-          else:
-            - if:
-                condition:
-                  lambda: 'return include_brightness;'
-                then:
-                  - homeassistant.service:
-                      service: light.turn_on
-                      data:
-                        entity_id: light.bedroom_light
-                        color_name: !lambda |-
-                          switch (id(bedroom_colour_index)) {
-                            case 4: return std::string("red");
-                            case 5: return std::string("orange");
-                            case 6: return std::string("purple");
-                            case 7: return std::string("blue");
-                            case 8: return std::string("green");
-                            case 9: return std::string("pink");
-                          }
-                          return std::string("pink");
-                        brightness: !lambda 'return id(brightness_level);'
-                else:
-                  - homeassistant.service:
-                      service: light.turn_on
-                      data:
-                        entity_id: light.bedroom_light
-                        color_name: !lambda |-
-                          switch (id(bedroom_colour_index)) {
-                            case 4: return std::string("red");
-                            case 5: return std::string("orange");
-                            case 6: return std::string("purple");
-                            case 7: return std::string("blue");
-                            case 8: return std::string("green");
-                            case 9: return std::string("pink");
-                          }
-                          return std::string("pink");
-
-  - id: stand_pending_pulse
-    mode: restart
-    then:
-      - while:
-          condition:
-            lambda: 'return id(stand_led_pending);'
-          then:
-            - if:
-                condition:
-                  lambda: 'return id(stand_command_send_failed);'
-                then:
-                  - lambda: |-
-                      auto compute_cap = [&]() -> float {
-                        auto now = id(ha_time).now();
-                        const float day_cap = ${switch_led_day_on_level};
-                        const float night_cap = ${switch_led_night_on_level};
-                        if (now.is_valid()) {
-                          int hour = now.hour;
-                          if (hour >= 18 || hour < 6) {
-                            return night_cap;
-                          }
-                        }
-                        return day_cap;
-                      };
-                      float cap = compute_cap();
-                      id(switch1_led_output).set_level(cap);
-                  - delay: ${switch_led_ha_error_on_step}
-                  - lambda: |-
-                      id(switch1_led_output).set_level(0.0f);
-                  - delay: ${switch_led_ha_error_off_step}
-                  - lambda: |-
-                      auto compute_cap = [&]() -> float {
-                        auto now = id(ha_time).now();
-                        const float day_cap = ${switch_led_day_on_level};
-                        const float night_cap = ${switch_led_night_on_level};
-                        if (now.is_valid()) {
-                          int hour = now.hour;
-                          if (hour >= 18 || hour < 6) {
-                            return night_cap;
-                          }
-                        }
-                        return day_cap;
-                      };
-                      float cap = compute_cap();
-                      id(switch1_led_output).set_level(cap);
-                  - delay: ${switch_led_ha_error_on_step}
-                  - lambda: |-
-                      id(switch1_led_output).set_level(0.0f);
-                  - delay: ${switch_led_ha_error_pause_step}
-                else:
-                  - if:
-                      condition:
-                        lambda: 'return id(stand_command_timed_out);'
-                      then:
-                        - lambda: |-
-                            auto compute_cap = [&]() -> float {
-                              auto now = id(ha_time).now();
-                              const float day_cap = ${switch_led_day_on_level};
-                              const float night_cap = ${switch_led_night_on_level};
-                              if (now.is_valid()) {
-                                int hour = now.hour;
-                                if (hour >= 18 || hour < 6) {
-                                  return night_cap;
-                                }
-                              }
-                              return day_cap;
-                            };
-                            float cap = compute_cap();
-                            const float low_ratio = ${switch_led_bulb_timeout_low_ratio};
-                            id(switch1_led_output).set_level(cap * low_ratio);
-                        - delay: ${switch_led_bulb_timeout_low_step}
-                        - lambda: |-
-                            auto compute_cap = [&]() -> float {
-                              auto now = id(ha_time).now();
-                              const float day_cap = ${switch_led_day_on_level};
-                              const float night_cap = ${switch_led_night_on_level};
-                              if (now.is_valid()) {
-                                int hour = now.hour;
-                                if (hour >= 18 || hour < 6) {
-                                  return night_cap;
-                                }
-                              }
-                              return day_cap;
-                            };
-                            float cap = compute_cap();
-                            id(switch1_led_output).set_level(cap);
-                        - delay: ${switch_led_bulb_timeout_high_step}
-                      else:
-                        - lambda: |-
-                            auto compute_cap = [&]() -> float {
-                              auto now = id(ha_time).now();
-                              const float day_cap = ${switch_led_day_on_level};
-                              const float night_cap = ${switch_led_night_on_level};
-                              if (now.is_valid()) {
-                                int hour = now.hour;
-                                if (hour >= 18 || hour < 6) {
-                                  return night_cap;
-                                }
-                              }
-                              return day_cap;
-                            };
-                            float cap = compute_cap();
-                            const float low_ratio = ${switch_led_pending_low_ratio};
-                            id(switch1_led_output).set_level(cap * low_ratio);
-                        - delay: ${switch_led_pending_step}
-                        - lambda: |-
-                            auto compute_cap = [&]() -> float {
-                              auto now = id(ha_time).now();
-                              const float day_cap = ${switch_led_day_on_level};
-                              const float night_cap = ${switch_led_night_on_level};
-                              if (now.is_valid()) {
-                                int hour = now.hour;
-                                if (hour >= 18 || hour < 6) {
-                                  return night_cap;
-                                }
-                              }
-                              return day_cap;
-                            };
-                            float cap = compute_cap();
-                            id(switch1_led_output).set_level(cap);
-                        - delay: ${switch_led_pending_step}
-      - script.execute: sync_switch_leds
-
-  - id: bedroom_pending_pulse
-    mode: restart
-    then:
-      - while:
-          condition:
-            lambda: 'return id(bedroom_led_pending);'
-          then:
-            - if:
-                condition:
-                  lambda: 'return id(bedroom_command_send_failed);'
-                then:
-                  - lambda: |-
-                      auto compute_cap = [&]() -> float {
-                        auto now = id(ha_time).now();
-                        const float day_cap = ${switch_led_day_on_level};
-                        const float night_cap = ${switch_led_night_on_level};
-                        if (now.is_valid()) {
-                          int hour = now.hour;
-                          if (hour >= 18 || hour < 6) {
-                            return night_cap;
-                          }
-                        }
-                        return day_cap;
-                      };
-                      float cap = compute_cap();
-                      id(switch2_led_output).set_level(cap);
-                  - delay: ${switch_led_ha_error_on_step}
-                  - lambda: |-
-                      id(switch2_led_output).set_level(0.0f);
-                  - delay: ${switch_led_ha_error_off_step}
-                  - lambda: |-
-                      auto compute_cap = [&]() -> float {
-                        auto now = id(ha_time).now();
-                        const float day_cap = ${switch_led_day_on_level};
-                        const float night_cap = ${switch_led_night_on_level};
-                        if (now.is_valid()) {
-                          int hour = now.hour;
-                          if (hour >= 18 || hour < 6) {
-                            return night_cap;
-                          }
-                        }
-                        return day_cap;
-                      };
-                      float cap = compute_cap();
-                      id(switch2_led_output).set_level(cap);
-                  - delay: ${switch_led_ha_error_on_step}
-                  - lambda: |-
-                      id(switch2_led_output).set_level(0.0f);
-                  - delay: ${switch_led_ha_error_pause_step}
-                else:
-                  - if:
-                      condition:
-                        lambda: 'return id(bedroom_command_timed_out);'
-                      then:
-                        - lambda: |-
-                            auto compute_cap = [&]() -> float {
-                              auto now = id(ha_time).now();
-                              const float day_cap = ${switch_led_day_on_level};
-                              const float night_cap = ${switch_led_night_on_level};
-                              if (now.is_valid()) {
-                                int hour = now.hour;
-                                if (hour >= 18 || hour < 6) {
-                                  return night_cap;
-                                }
-                              }
-                              return day_cap;
-                            };
-                            float cap = compute_cap();
-                            const float low_ratio = ${switch_led_bulb_timeout_low_ratio};
-                            id(switch2_led_output).set_level(cap * low_ratio);
-                        - delay: ${switch_led_bulb_timeout_low_step}
-                        - lambda: |-
-                            auto compute_cap = [&]() -> float {
-                              auto now = id(ha_time).now();
-                              const float day_cap = ${switch_led_day_on_level};
-                              const float night_cap = ${switch_led_night_on_level};
-                              if (now.is_valid()) {
-                                int hour = now.hour;
-                                if (hour >= 18 || hour < 6) {
-                                  return night_cap;
-                                }
-                              }
-                              return day_cap;
-                            };
-                            float cap = compute_cap();
-                            id(switch2_led_output).set_level(cap);
-                        - delay: ${switch_led_bulb_timeout_high_step}
-                      else:
-                        - lambda: |-
-                            auto compute_cap = [&]() -> float {
-                              auto now = id(ha_time).now();
-                              const float day_cap = ${switch_led_day_on_level};
-                              const float night_cap = ${switch_led_night_on_level};
-                              if (now.is_valid()) {
-                                int hour = now.hour;
-                                if (hour >= 18 || hour < 6) {
-                                  return night_cap;
-                                }
-                              }
-                              return day_cap;
-                            };
-                            float cap = compute_cap();
-                            const float low_ratio = ${switch_led_pending_low_ratio};
-                            id(switch2_led_output).set_level(cap * low_ratio);
-                        - delay: ${switch_led_pending_step}
-                        - lambda: |-
-                            auto compute_cap = [&]() -> float {
-                              auto now = id(ha_time).now();
-                              const float day_cap = ${switch_led_day_on_level};
-                              const float night_cap = ${switch_led_night_on_level};
-                              if (now.is_valid()) {
-                                int hour = now.hour;
-                                if (hour >= 18 || hour < 6) {
-                                  return night_cap;
-                                }
-                              }
-                              return day_cap;
-                            };
-                            float cap = compute_cap();
-                            id(switch2_led_output).set_level(cap);
-                        - delay: ${switch_led_pending_step}
-      - script.execute: sync_switch_leds
-
-  # Issue stand light commands.  mode: restart so the guard can queue fresh
-  # attempts — the homeassistant.service action is fire-and-forget (enqueues a
-  # protobuf message instantly) so restarting does not kill in-flight messages.
-  # A 100 ms yield after each service call lets the TCP stack flush the message
-  # to HA, which is critical on this single-core C3 with BLE proxy contention.
-  - id: command_stand_light
-    mode: restart
-    then:
-      - lambda: |-
-          ESP_LOGI("switch_guard", "Stand light command -> %s", id(stand_target_on) ? "ON" : "OFF");
-          bool expect_change = !id(stand_state_initialised) || (id(stand_light_state).state != id(stand_target_on));
-          id(stand_command_send_failed) = false;
-          id(stand_command_timed_out) = false;
-          if (!id(ha_connected)) {
-            id(stand_command_pending) = false;
-            id(stand_command_started_ms) = 0;
-            id(stand_command_send_failed) = expect_change;
-            if (expect_change) {
-              ESP_LOGW("switch_guard", "Stand light command not sent - Home Assistant API disconnected");
-            }
-          } else if (expect_change) {
-            id(stand_command_started_ms) = millis();
-            id(stand_command_pending) = true;
-          } else {
-            id(stand_command_pending) = false;
-            id(stand_command_started_ms) = 0;
-          }
-      - if:
-          condition:
-            lambda: 'return id(ha_connected) && id(stand_target_on);'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.bedroom_light_stand
-            - delay: 100ms
-            - lambda: 'ESP_LOGD("switch_guard", "Stand ON service call dispatched");'
-          else:
-            - if:
-                condition:
-                  lambda: 'return id(ha_connected) && !id(stand_target_on);'
-                then:
-                  - homeassistant.service:
-                      service: light.turn_off
-                      data:
-                        entity_id: light.bedroom_light_stand
-                  - delay: 100ms
-                  - lambda: 'ESP_LOGD("switch_guard", "Stand OFF service call dispatched");'
-      - script.execute: update_pending_leds
-
-  # Issue bedroom light commands — same pattern as stand light above.
-  - id: command_bedroom_light
-    mode: restart
-    then:
-      - lambda: |-
-          ESP_LOGI("switch_guard", "Bedroom light command -> %s", id(bedroom_target_on) ? "ON" : "OFF");
-          bool expect_change = !id(bedroom_state_initialised) || (id(bedroom_light_state).state != id(bedroom_target_on));
-          id(bedroom_command_send_failed) = false;
-          id(bedroom_command_timed_out) = false;
-          if (!id(ha_connected)) {
-            id(bedroom_command_pending) = false;
-            id(bedroom_command_started_ms) = 0;
-            id(bedroom_command_send_failed) = expect_change;
-            if (expect_change) {
-              ESP_LOGW("switch_guard", "Bedroom light command not sent - Home Assistant API disconnected");
-            }
-          } else if (expect_change) {
-            id(bedroom_command_started_ms) = millis();
-            id(bedroom_command_pending) = true;
-          } else {
-            id(bedroom_command_pending) = false;
-            id(bedroom_command_started_ms) = 0;
-          }
-      - if:
-          condition:
-            lambda: 'return id(ha_connected) && id(bedroom_target_on);'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.bedroom_light
-            - delay: 100ms
-            - lambda: 'ESP_LOGD("switch_guard", "Bedroom ON service call dispatched");'
-          else:
-            - if:
-                condition:
-                  lambda: 'return id(ha_connected) && !id(bedroom_target_on);'
-                then:
-                  - homeassistant.service:
-                      service: light.turn_off
-                      data:
-                        entity_id: light.bedroom_light
-                  - delay: 100ms
-                  - lambda: 'ESP_LOGD("switch_guard", "Bedroom OFF service call dispatched");'
-      - script.execute: update_pending_leds
-
-  # Apply colour/brightness to the stand light AFTER HA confirms it is ON.
-  # Kept separate from the ON command so the initial turn_on message is as
-  # small as the turn_off (just entity_id) — critical for TCP flush on this
-  # congested single-core C3 with active BLE proxy.
-  - id: apply_stand_light_colour
-    mode: restart
-    then:
-      - lambda: |-
-          int idx = id(stand_colour_index);
-          if (idx < 0 || idx > 3) { idx = 1; id(stand_colour_index) = idx; }
-      - homeassistant.service:
-          service: light.turn_on
-          data:
-            entity_id: light.bedroom_light_stand
-            color_temp_kelvin: !lambda |-
-              switch (id(stand_colour_index)) {
-                case 0: return 1900;
-                case 1: return 2700;
-                case 2: return 3500;
-                case 3: return 6500;
-              }
-              return 2700;
-            brightness: !lambda 'return id(brightness_level);'
-      - delay: 100ms
-      - lambda: 'ESP_LOGD("switch_guard", "Stand colour/brightness applied");'
-
-  # Apply colour/brightness to the bedroom light AFTER HA confirms it is ON.
-  - id: apply_bedroom_light_colour
-    mode: restart
-    then:
-      - lambda: |-
-          int idx = id(bedroom_colour_index);
-          if (idx < 0 || idx > 9) { idx = 1; id(bedroom_colour_index) = idx; }
-      - if:
-          condition:
-            lambda: 'return id(bedroom_colour_index) <= 3;'
-          then:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.bedroom_light
-                  color_temp_kelvin: !lambda |-
-                    switch (id(bedroom_colour_index)) {
-                      case 0: return 1900;
-                      case 1: return 2700;
-                      case 2: return 3500;
-                      case 3: return 6500;
-                    }
-                    return 2700;
-                  brightness: !lambda 'return id(brightness_level);'
-          else:
-            - homeassistant.service:
-                service: light.turn_on
-                data:
-                  entity_id: light.bedroom_light
-                  color_name: !lambda |-
-                    switch (id(bedroom_colour_index)) {
-                      case 4: return std::string("red");
-                      case 5: return std::string("orange");
-                      case 6: return std::string("purple");
-                      case 7: return std::string("blue");
-                      case 8: return std::string("green");
-                      case 9: return std::string("pink");
-                    }
-                    return std::string("pink");
-                  brightness: !lambda 'return id(brightness_level);'
-      - delay: 100ms
-      - lambda: 'ESP_LOGD("switch_guard", "Bedroom colour/brightness applied");'
-
-  # Guard stand light alignment — always re-sends on mismatch because on
-  # this single-core C3 with BLE proxy, the TCP stack may not flush every
-  # message.  Each retry enqueues another protobuf message + yields 100 ms
-  # for the main loop to flush it.
-  - id: guard_stand_switch_alignment
-    mode: restart
-    then:
-      - lambda: |-
-          ESP_LOGD("switch_guard", "Guarding stand light for %s state", id(stand_target_on) ? "ON" : "OFF");
-      - repeat:
-          count: ${switch_guard_iterations}
-          then:
-            - delay: ${switch_guard_interval}
-            - if:
-                condition:
-                  lambda: |-
-                    return id(ha_connected)
-                        && (id(stand_light_state).state != id(stand_target_on));
-                then:
-                  - lambda: |-
-                      ESP_LOGW("switch_guard", "Stand light mismatch (expected %d, actual %d) - re-sending",
-                               (int)id(stand_target_on), (int)id(stand_light_state).state);
-                  - script.execute: command_stand_light
-                  - script.execute: update_pending_leds
-
-  # Guard bedroom light alignment — same pattern as stand light.
-  - id: guard_bedroom_switch_alignment
-    mode: restart
-    then:
-      - lambda: |-
-          ESP_LOGD("switch_guard", "Guarding bedroom light for %s state", id(bedroom_target_on) ? "ON" : "OFF");
-      - repeat:
-          count: ${switch_guard_iterations}
-          then:
-            - delay: ${switch_guard_interval}
-            - if:
-                condition:
-                  lambda: |-
-                    return id(ha_connected)
-                        && (id(bedroom_light_state).state != id(bedroom_target_on));
-                then:
-                  - lambda: |-
-                      ESP_LOGW("switch_guard", "Bedroom light mismatch (expected %d, actual %d) - re-sending",
-                               (int)id(bedroom_target_on), (int)id(bedroom_light_state).state);
-                  - script.execute: command_bedroom_light
-                  - script.execute: update_pending_leds
-
-  # Sync switch LEDs with light states (inverse logic - LED on when light off)
-  - id: sync_switch_leds
-    mode: restart
-    then:
-      - delay: 100ms  # Small delay to ensure states are updated
-      - lambda: |-
-          // If LEDs were manually turned off, keep them off
-          if (id(leds_manually_off)) {
-            ESP_LOGD("led", "LEDs manually disabled, keeping off");
-            id(switch1_led_output).set_level(0.0);
-            id(switch2_led_output).set_level(0.0);
-            return;
-          }
-          
-          // Switch 1 LED - ON when stand light is OFF
-          auto compute_cap = [&]() -> float {
-            auto now = id(ha_time).now();
-            const float day_cap = ${switch_led_day_on_level};
-            const float night_cap = ${switch_led_night_on_level};
-            if (now.is_valid()) {
-              int hour = now.hour;
-              if (hour >= 18 || hour < 6) {
-                return night_cap;
-              }
-            }
-            return day_cap;
-          };
-          float brightness_cap = compute_cap();
-          
-          bool stand_light_on = id(stand_light_state).state;
-          if (id(stand_led_pending)) {
-            ESP_LOGD("led", "Switch 1 LED pending pulse in control");
-          } else {
-            float led1_level = stand_light_on ? 0.0 : brightness_cap;
-          id(switch1_led_output).set_level(led1_level);
-            ESP_LOGD("led", "Switch 1 LED: stand_light=%d, led_level=%.2f", stand_light_on, led1_level);
-          }
-          
-          // Switch 2 LED - ON when bedroom light is OFF
-          bool bedroom_light_on = id(bedroom_light_state).state;
-          if (id(bedroom_led_pending)) {
-            ESP_LOGD("led", "Switch 2 LED pending pulse in control");
-          } else {
-            float led2_level = bedroom_light_on ? 0.0 : brightness_cap;
-          id(switch2_led_output).set_level(led2_level);
-            ESP_LOGD("led", "Switch 2 LED: bedroom_light=%d, led_level=%.2f", bedroom_light_on, led2_level);
-          }
-  
-  # Handle momentary button short press
-  - id: handle_momentary_press
-    then:
-      - lambda: |-
-          bool stand_on = id(stand_light_state).state;
-          bool bedroom_on = id(bedroom_light_state).state;
-          
-          if (!stand_on && !bedroom_on) {
-            // Both lights off - toggle LED visibility
-            id(leds_manually_off) = !id(leds_manually_off);
-            ESP_LOGD("button", "Both lights off - toggling LEDs to %s", id(leds_manually_off) ? "OFF" : "ON");
-          } else {
-            // At least one light on - cycle colour
-            ESP_LOGD("button", "Cycling colour for active lights");
-          }
-      - if:
-          condition:
-            lambda: 'return !id(stand_light_state).state && !id(bedroom_light_state).state;'
-          then:
-            # Both lights off - just sync LEDs (which respects leds_manually_off flag)
-            - script.execute: sync_switch_leds
-          else:
-            # At least one light on - cycle colour
-            - script.execute: cycle_colour
-  
-  # Cycle colour for lights that are on
-  - id: cycle_colour
-    then:
-      - lambda: |-
-          // Cycle through all 10 colours (0-9)
-          id(colour_index) = (id(colour_index) + 1) % 10;
-          ESP_LOGD("button", "Cycling to colour index %d", id(colour_index));
-      # Apply colour to lights that are on
-      - script.execute: apply_colour_to_active_lights
-  
-  # Apply current colour to lights that are on
-  - id: apply_colour_to_active_lights
-    then:
-      - lambda: |-
-          static const char* labels[] = {
-            "Candle 1900K",
-            "Warm White 2700K",
-            "Neutral 3500K",
-            "Daylight 6500K",
-            "Red",
-            "Orange",
-            "Purple",
-            "Blue",
-            "Green",
-            "Pink"
-          };
-          int colour = id(colour_index);
-          if (colour < 0 || colour > 9) {
-            colour = 1;
-            id(colour_index) = colour;
-          }
-          bool stand_on = id(stand_light_state).state;
-          bool bedroom_on = id(bedroom_light_state).state;
-          ESP_LOGD("colour", "Applying colour %d (%s) - stand=%d, bedroom=%d",
-                   colour, labels[colour], stand_on, bedroom_on);
-      - if:
-          condition:
-            lambda: 'return id(stand_light_state).state;'
-          then:
-            - lambda: |-
-                int idx = (id(colour_index) <= 3) ? id(colour_index) : 1;
-                id(set_stand_light_colour).execute(idx, false);
-      - if:
-          condition:
-            lambda: 'return id(bedroom_light_state).state;'
-          then:
-            - lambda: |-
-                id(set_bedroom_light_colour).execute(id(colour_index), false);
-  
-  # Start hold brightness cycling after 600ms
-  - id: start_hold_brightness
-    mode: restart
-    then:
-      - delay: 600ms
-      - if:
-          condition:
-            binary_sensor.is_on: momentary_button
-          then:
-            - script.execute: hold_brightness_loop
-  
-  # Continuous brightness cycling while button is held
-  - id: hold_brightness_loop
-    mode: restart
-    then:
-      - while:
-          condition:
-            binary_sensor.is_on: momentary_button
-          then:
-            - lambda: |-
-                // Cycle brightness: 10 -> 30 -> 60 -> 90 -> 130 -> 180 -> 230 -> 255 -> 10...
-                const int brightnesses[] = {10, 30, 60, 90, 130, 180, 230, 255};
-                int current_idx = 0;
-                
-                // Find current brightness index (or closest match)
-                int closest_diff = 999;
-                for (int i = 0; i < 8; i++) {
-                  int diff = abs(id(brightness_level) - brightnesses[i]);
-                  if (diff < closest_diff) {
-                    closest_diff = diff;
-                    current_idx = i;
-                  }
-                }
-                
-                // Move to next brightness
-                current_idx = (current_idx + 1) % 8;
-                id(brightness_level) = brightnesses[current_idx];
-                
-                ESP_LOGD("button", "Hold brightness cycling to %d", id(brightness_level));
-            - if:
-                condition:
-                  lambda: 'return id(stand_light_state).state;'
-                then:
-                  - homeassistant.service:
-                      service: light.turn_on
-                      data:
-                        entity_id: light.bedroom_light_stand
-                        brightness: !lambda 'return id(brightness_level);'
-            - if:
-                condition:
-                  lambda: 'return id(bedroom_light_state).state;'
-                then:
-                  - homeassistant.service:
-                      service: light.turn_on
-                      data:
-                        entity_id: light.bedroom_light
-                        brightness: !lambda 'return id(brightness_level);'
-            - delay: 800ms
+          bool airing = id(airing_state).state;
+          id(switch1_led_output).set_level(airing ? cap : 0.0f);
+          id(switch2_led_output).set_level(0.0f);
+          ESP_LOGD("led", "Airing LED %s", airing ? "ON" : "off");
