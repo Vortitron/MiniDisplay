@@ -1,0 +1,63 @@
+# FrontPath "whole-box" radar bursts are the box's two LD2410Cs interfering
+# with each other, and restarting one radar usually ends a spell of them.
+#
+# The cause: both radars use the same band, each on its own clock. Their
+# transmissions slide past each other and collide once every 8-12 min, a
+# period that drifts as the clocks warm and cool. Each collision lights every
+# gate on both radars for a few seconds.
+#
+# The proof, from frontpath_burst_restart_test (23-25 Oct), restarting the
+# street radar 2-6 min after a burst:
+# - 24 Oct 03:49: before, bursts at 03:29, 03:37 and 03:45, door radar only.
+#   The next came 5.7 min after the 03:45 one, not on the ~8 min beat, at full
+#   strength on both radars, then a new steady 8.2-8.5 min beat.
+# - 24 Oct 04:36, 24 Oct 16:57, 25 Oct 05:04 (after 04:37/04:48/04:59, an
+#   11.2 min beat getting stronger): no more bursts after any of them.
+# A source outside the box would have kept its beat.
+#
+# So: 20 s after a strong burst, restart the street radar ("Auto Calibrate
+# Sensor 1" sends the LD2410 restart command, 0xA3). It is blind for about
+# 16 s and comes back in engineering mode. At most every 10 min, so a restart
+# that only moves the beat is followed by another one at the next burst.
+# The firmware already ignores burst seconds and stays blind for 8 s after
+# each; this ends the spell instead of sitting through it.
+#
+# Replaces frontpath_burst_restart_test. Deployed with ha_set_automation,
+# id frontpath_burst_restart.
+id: frontpath_burst_restart
+alias: Front Path - restart the street radar after a burst
+description: >-
+  The box's two radars interfere with each other in spells ("bursts", every
+  8-12 min). 20 s after a strong burst, restart the street radar (Auto
+  Calibrate Sensor 1 = LD2410 restart), at most every 10 min; that usually
+  ends the spell.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: template
+    value_template: >-
+      {% set p = states('sensor.front_walkway_frontpath_ble_processing_gate_energies').split(';') %}
+      {% if p | count == 4 %}
+        {% set m1 = (p[0].split(':')[1].split(',') | map('int') | list)[2:] %}
+        {% set m2 = (p[2].split(':')[1].split(',') | map('int') | list)[2:] %}
+        {{ (m1 | select('>=', 40) | list | count) >= 5 or (m2 | select('>=', 40) | list | count) >= 5 }}
+      {% else %}false{% endif %}
+conditions:
+  - condition: template
+    value_template: >-
+      {{ as_timestamp(now()) - as_timestamp(this.attributes.last_triggered, 0) > 600 }}
+actions:
+  - variables:
+      burst_at: "{{ now().strftime('%H:%M:%S') }}"
+  - delay:
+      seconds: 20
+  - action: button.press
+    target:
+      entity_id: button.frontpath_ble_processing_auto_calibrate_sensor_1
+  - action: logbook.log
+    data:
+      name: FrontPath burst restart
+      message: >-
+        Street radar restarted at {{ now().strftime('%H:%M:%S') }} after a
+        burst at {{ burst_at }}.
+      entity_id: input_button.saga_cam_test_shot

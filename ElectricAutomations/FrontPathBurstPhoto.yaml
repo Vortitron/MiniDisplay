@@ -1,3 +1,6 @@
+# Switched off 25 Oct 2026: the bursts are the box's two radars interfering
+# with each other (see FrontPathBurstRestart.yaml), nothing a camera can see.
+#
 # Temporary: photograph the FrontPath "whole-box" radar bursts to find their
 # source. A burst is every distance gate on a radar lighting up at once for
 # 4-6 s, every 7-10 minutes, on some evenings and mornings (14 Oct
