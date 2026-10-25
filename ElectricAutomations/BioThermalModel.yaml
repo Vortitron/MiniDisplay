@@ -17,6 +17,20 @@
 #   - A film adds people and a ~300 W projector; those samples pull h up a
 #     little. Fine for planning.
 #
+# Two biases found on 25 Oct, both now guarded:
+#   - OPEN DOORS poisoned k. The bio hall has two external doors; aired for
+#     fresh air the room fell ~6 C/h, which at dT 10 looks like k=0.6, and
+#     each 10-min sample dragged k up ~0.02 (0.064 -> 0.124 in 20 min). Now
+#     sampling stops entirely while input_boolean.bio_ventilating is on, and
+#     any observation more than k_outlier_factor away from the running
+#     estimate is rejected rather than blended.
+#   - HOLDING AT TARGET poisoned h downward. At steady state dT/dt is ~0, so
+#     observed_h collapses to k*dT — "whatever maintains this temperature",
+#     not the unit's real capacity. h drifted 2.0 -> 1.32 over five days,
+#     which made Teq (= Tout + h/k) sag to ~20.8 and the planner believe 20 C
+#     was barely reachable. h is now only learned while the room is actually
+#     rising at least min_rise_for_h.
+#
 # Helpers (storage, created over MCP, NO initial: so the learned values
 # survive restarts — see the house model's note):
 #   input_number.bio_heat_loss_k        0-3 step 0.0001  1/h   seeded 0.2
@@ -26,6 +40,7 @@
 #   input_datetime.bio_thermal_last_sample  date+time
 #   input_number.bio_hours_to_target    0-24 step 0.01  h   (to 20 °C)
 #   input_text.bio_thermal_status       max 255
+#   input_boolean.bio_ventilating       off (doors open: stop sampling)
 #
 # Deployed with deploy_bio2_hvac.py, id bio_thermal_model.
 id: bio_thermal_model
@@ -42,6 +57,11 @@ conditions:
   - condition: template
     value_template: >-
       {{ states('sensor.bedroomlights_bedroomlights_temperature') not in ['unknown', 'unavailable', 'none', ''] }}
+  # Doors open: every sample is nonsense. Keep the stored last_* values as
+  # they are so the first sample after airing is rejected on its interval.
+  - condition: state
+    entity_id: input_boolean.bio_ventilating
+    state: "off"
 variables:
   ema_alpha: 0.05
   min_sample_minutes: 5
@@ -49,9 +69,18 @@ variables:
   max_dt_per_sample: 2.0
   min_delta_temp: 2.0
   min_k: 0.01
-  max_k: 2.0
+  # An internal room cannot plausibly lose heat faster than this; anything
+  # above it is a door, a window or a sensor glitch.
+  max_k: 0.5
   min_h: 0.1
   max_h: 20.0
+  # Reject an observation this many times away from the running estimate.
+  # The EMA still moves (5% per accepted sample), so a genuine change in the
+  # room is learned over a few hours; a 20-minute airing is not.
+  k_outlier_factor: 2.5
+  # Only learn h while the room is genuinely rising: at steady state the
+  # observation degenerates to k*dT and drags h down.
+  min_rise_for_h: 0.3
   target_temp: 20
 actions:
   - variables:
@@ -91,25 +120,36 @@ actions:
            and delta_temp | abs >= min_delta_temp }}
       is_passive: "{{ hvac_action in ['idle', 'fan', 'off', 'cooling'] }}"
       is_heating: "{{ hvac_action == 'heating' }}"
-      new_k: >-
+      observed_k: >-
         {% if sample_valid and is_passive and delta_temp > min_delta_temp %}
-          {% set observed_k = (-dT_per_hour) / delta_temp %}
-          {% if observed_k >= min_k and observed_k <= max_k %}
-            {{ ((1 - ema_alpha) * current_k + ema_alpha * observed_k) | round(4) }}
-          {% else %}
-            {{ current_k }}
-          {% endif %}
+          {{ ((-dT_per_hour) / delta_temp) | round(4) }}
+        {% else %}
+          -1
+        {% endif %}
+      # Plausible range AND close enough to the running estimate: an airing
+      # reads an order of magnitude high and must not be blended in.
+      k_ok: >-
+        {{ observed_k | float(-1) >= min_k
+           and observed_k | float(-1) <= max_k
+           and observed_k | float(-1) <= current_k * k_outlier_factor
+           and observed_k | float(-1) >= current_k / k_outlier_factor }}
+      new_k: >-
+        {% if k_ok %}
+          {{ ((1 - ema_alpha) * current_k + ema_alpha * (observed_k | float)) | round(4) }}
         {% else %}
           {{ current_k }}
         {% endif %}
+      observed_h: >-
+        {% if sample_valid and is_heating and dT_per_hour >= min_rise_for_h %}
+          {{ (dT_per_hour + current_k * delta_temp) | round(3) }}
+        {% else %}
+          -1
+        {% endif %}
+      h_ok: >-
+        {{ observed_h | float(-1) >= min_h and observed_h | float(-1) <= max_h }}
       new_h: >-
-        {% if sample_valid and is_heating %}
-          {% set observed_h = dT_per_hour + current_k * delta_temp %}
-          {% if observed_h >= min_h and observed_h <= max_h %}
-            {{ ((1 - ema_alpha) * current_h + ema_alpha * observed_h) | round(3) }}
-          {% else %}
-            {{ current_h }}
-          {% endif %}
+        {% if h_ok %}
+          {{ ((1 - ema_alpha) * current_h + ema_alpha * (observed_h | float)) | round(3) }}
         {% else %}
           {{ current_h }}
         {% endif %}
@@ -186,6 +226,6 @@ actions:
       entity_id: input_text.bio_thermal_status
     data:
       value: >-
-        {% set s %}k={{ new_k }}/h (τ={{ tau_hours }}h), h={{ new_h }}°C/h, eq_w_heat={{ equilibrium_with_heat }}°C, hours_to_{{ target_temp }}°C={{ hours_to_target }}, inside={{ inside_now | round(1) }}°C, outside={{ outside_now | round(1) }}°C, fc4h={{ t_out_effective | round(1) }}°C, last={{ hvac_action }} {{ 'valid' if sample_valid else 'skip' }}{% endset -%}
+        {% set s %}k={{ new_k }}/h (τ={{ tau_hours }}h), h={{ new_h }}°C/h, eq_w_heat={{ equilibrium_with_heat }}°C, hours_to_{{ target_temp }}°C={{ hours_to_target }}, inside={{ inside_now | round(1) }}°C, outside={{ outside_now | round(1) }}°C, fc4h={{ t_out_effective | round(1) }}°C, dT/dt={{ dT_per_hour }}, last={{ hvac_action }} {{ 'valid' if sample_valid else 'skip' }} k_obs={{ observed_k }}{{ '' if k_ok else ' REJ' }} h_obs={{ observed_h }}{{ '' if h_ok else ' REJ' }}{% endset -%}
         {{ s | truncate(255, True, '', 0) }}
 mode: single

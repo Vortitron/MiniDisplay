@@ -103,6 +103,9 @@ views:
                 name: Projector
               - entity: input_datetime.bio_film_time
                 name: Film time (pre-warm for)
+              - entity: input_boolean.bio_ventilating
+                name: Airing (doors open — heating off, no learning)
+                icon: mdi:door-open
               - entity: input_boolean.bio_prewarm_enabled
                 name: Pre-warm run-up before film time
               - entity: input_boolean.bio_bank_enabled

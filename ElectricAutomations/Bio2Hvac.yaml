@@ -80,6 +80,7 @@
 #   input_boolean.bio_prewarm_enabled       on
 #   input_boolean.bio_bank_test_on_fixed    off (test banking on the fixed feed)
 #   input_boolean.bio_bank_enabled          off (master switch for banking)
+#   input_boolean.bio_ventilating           off (doors open: Bio2 off, no learning)
 #
 # Tests: tests/test_bio2_hvac_templates.py
 # Deploy: python3 ElectricAutomations/deploy_bio2_hvac.py (id bio2_hvac)
@@ -146,6 +147,7 @@ triggers:
       - input_boolean.bio_prewarm_enabled
       - input_boolean.bio_bank_test_on_fixed
       - input_boolean.bio_bank_enabled
+      - input_boolean.bio_ventilating
       - input_boolean.on_fixed_price_feed
       - input_datetime.bio_film_time
       - input_boolean.super_expensive_active
@@ -186,6 +188,9 @@ actions:
         {{ phone_zone == 'bio'
            and now().hour >= phone_comfort_start_hour and now().hour < 23 }}
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
+      # The bio hall has two external doors and gets aired for fresh air.
+      # Heating then just warms the garden, so Bio2 goes off until it clears.
+      ventilating: "{{ is_state('input_boolean.bio_ventilating', 'on') }}"
       super_expensive: "{{ is_state('input_boolean.super_expensive_active', 'on') }}"
       # ---- Pre-warm planning inputs (BioThermalModel.yaml + Nordpool) ----
       prewarm_enabled: "{{ is_state('input_boolean.bio_prewarm_enabled', 'on') }}"
@@ -485,6 +490,35 @@ actions:
           entity_id: climate.bio2
         data:
           preset_mode: none
+  # ---- Airing: doors open, so stop heating the garden ----
+  - if:
+      - condition: template
+        value_template: "{{ ventilating }}"
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ bio2_state != 'off' }}"
+        then:
+          - action: climate.set_hvac_mode
+            target:
+              entity_id: climate.bio2
+            data:
+              hvac_mode: "off"
+          - action: logbook.log
+            data:
+              name: Bio2 HVAC
+              message: "Airing: Bio2 OFF (doors open), room={{ room | round(1) if room_ok else 'n/a' }}°C."
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio2_hvac_headline
+        data:
+          value: "Airing · Off"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.bio2_hvac_status
+        data:
+          value: "Airing (input_boolean.bio_ventilating on): Bio2 OFF, room={{ room | round(1) if room_ok else 'n/a' }}°C, want {{ target | round(1) }}°C, outdoor={{ outdoor | round(1) }}°C. Thermal model is not sampling."
+      - stop: "Airing"
   # ---- Super-expensive: off while idling above target ----
   - if:
       - condition: template

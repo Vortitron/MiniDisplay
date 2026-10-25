@@ -89,11 +89,40 @@ that fires when power is already nearly free, and a coast-down referenced to
 the outdoor temperature for a room that cools toward the house. Banking is also
 off by default now. The preset and fan were returned to `none` and `Auto`.
 
+### Airing, and two learning biases (25 Oct 2026)
+
+The bio hall has **two external doors** and gets opened for fresh air. That
+broke the learner in a way worth recording, because both failures are generic:
+
+- **Open doors poisoned `k`.** Aired, the room fell about **6 °C/h**, which
+  against a 10 °C ΔT looks like `k = 0.6`. The old bounds (0.01–2.0) accepted
+  it, so every 10-minute sample dragged `k` up by ~0.02: **0.064 → 0.124 in
+  twenty minutes**. Left alone it would have reached 0.4 within hours, which
+  collapses `Teq` and makes the planner pre-warm for the maximum lead every
+  single day.
+- **Holding at target poisoned `h` downward.** At steady state `dT/dt ≈ 0`, so
+  the observation degenerates to `k·ΔT` — "whatever maintains this
+  temperature", not the unit's capacity. `h` drifted **2.0 → 1.32** over five
+  days, dropping `Teq` to ~20.8 and making the planner believe 20 °C was only
+  just reachable, when Bio2 had in fact lifted the room 14 → 18.3 °C in an
+  afternoon.
+
+Three guards: **`input_boolean.bio_ventilating`** stops sampling altogether and
+turns Bio2 **off** (heating with the doors open just warms the garden, and the
+headline reads `Airing · Off`); `max_k` is 0.5, since an internal room cannot
+lose heat faster; and any observation more than `k_outlier_factor` (2.5×) from
+the running estimate is **rejected rather than blended**, which the status line
+marks `REJ`. `h` is now only learned while the room is actually rising at least
+`min_rise_for_h` (0.3 °C/h). `k` and `h` were reset to 0.15 and 2.0 afterwards,
+since both were corrupted and the sensor had moved.
+
 > **The wall sensor is not representative.** It peaked at 20.6 °C over four days
 > while the room felt far too warm, and it read low even after being moved to
 > the middle of the room. Every decision here is computed from it, so treat its
 > absolute value with suspicion until a second sensor at seat height confirms
-> it.
+> it. Moved to where people actually sit it read **23 °C while the old spot
+> read 20.4** — a 2.5 °C gradient, so the target now means something different
+> from what it meant before the move.
    Reason `Bank heat 22°C (cheap)`.
 
 **Only on the spot feed.** Banking is gated on
@@ -150,6 +179,7 @@ only "is it there" signal.
 | `input_boolean.bio_prewarm_enabled` | on |
 | `input_boolean.bio_bank_test_on_fixed` | off — lets banking run on the fixed feed, for testing |
 | `input_boolean.bio_bank_enabled` | **off** — master switch for banking |
+| `input_boolean.bio_ventilating` | off — doors open: Bio2 off, no model sampling |
 | `input_number.bio_heat_loss_k`, `bio_heat_rate`, `bio_thermal_tau`, `bio_thermal_last_inside`, `bio_thermal_last_outside`, `bio_hours_to_target`, `input_datetime.bio_thermal_last_sample`, `input_text.bio_thermal_status` | the bio thermal model (no `initial:` — learned values must survive restarts) |
 
 ## Dashboards
