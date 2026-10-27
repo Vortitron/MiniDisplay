@@ -10,11 +10,15 @@
 # Bermuda lags a few seconds to half a minute, so it is a backup, not the
 # first thing to light the path. At most once a minute.
 #
+# From 27 Oct also Andy's wife's phone ("Mama's Mobile", its HA app beacon
+# 4fe2daa6-..., added to Bermuda the same day).
+#
 # Deployed with ha_set_automation, id frontpath_phone_arrival.
 id: frontpath_phone_arrival
 alias: Front Path - phone arrival
 description: >-
-  When Andy's Pixel reaches Bermuda area Front walkway, calls FrontPath's
+  When Andy's Pixel or Mama's Mobile reaches Bermuda area Front walkway,
+  calls FrontPath's
   mark_arrival, which turns Path Person Detected on for 20 s (lights,
   camera), as a backup to the radars.
 mode: single
@@ -23,9 +27,14 @@ triggers:
   - trigger: state
     entity_id: sensor.bermuda_0a1b8d570db2459d80d2b1e17395fbcb_100_40004_area
     to: Front walkway
+    id: Andy's Pixel
+  - trigger: state
+    entity_id: sensor.bermuda_4fe2daa68bfe4ba4b147a6864fd6f7ea_100_40004_area
+    to: Front walkway
+    id: Mama's Mobile
 actions:
   - action: esphome.frontpath_mark_arrival
     continue_on_error: true
     data:
-      who: Andy's Pixel
+      who: "{{ trigger.id }}"
   - delay: "00:01:00"
