@@ -22,6 +22,9 @@
 # zone that settled while a wait was busy. 'unknown' and areas not listed
 # leave the zone as it was.
 #
+# Andy's wife's phone has the same in input_select.mama_zone (MamaZone.yaml,
+# 27 Oct); the readers count either.
+#
 # Readers: DaytimeCheapHeat.yaml (Sam's desired goes to 20 C from 07:00 to
 # 23:00 while the phone is in loft or living, or in the bio with Bio2 away)
 # and Bio2Hvac.yaml (20 C while the phone is in the bio).

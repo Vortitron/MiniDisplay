@@ -59,8 +59,10 @@ triggers:
       - input_boolean.on_fixed_price_feed
       - sensor.forecast_tonight_min
       - sensor.forecast_outside_at_23
-      # Where Andy's phone is (PhoneZone.yaml) — comfort follows him by day.
+      # Where Andy's and his wife's phones are (PhoneZone.yaml, MamaZone.yaml)
+      # — comfort follows either of them by day.
       - input_select.phone_zone
+      - input_select.mama_zone
   # Bio2 coming or going decides whether a phone in the bio is Sam's job.
   - trigger: state
     entity_id: climate.bio2
@@ -121,11 +123,16 @@ actions:
       # (Bio2Hvac.yaml heats it otherwise). By day that room gets 20°C, the
       # same comfort signal as the TV: desired 20 and no expensive-hour cut.
       # Not overnight — the phone is home then too, and 23:00-07:00 is economy.
+      # From 27 Oct either phone counts: input_select.mama_zone (MamaZone.yaml)
+      # is Andy's wife's phone, and comfort_zone is the one that earned it.
       phone_zone: "{{ states('input_select.phone_zone') }}"
+      mama_zone: "{{ states('input_select.mama_zone') }}"
       bio2_live: "{{ states('climate.bio2') not in ['unknown', 'unavailable', 'none', ''] }}"
       phone_in_sam_rooms: >-
-        {{ phone_zone in ['loft', 'living']
-           or (phone_zone == 'bio' and not bio2_live) }}
+        {% set z = [phone_zone, mama_zone] %}{{ z | select('in', ['loft', 'living']) | list | count > 0
+           or ('bio' in z and not bio2_live) }}
+      comfort_zone: >-
+        {% set z = [phone_zone, mama_zone] %}{% set s = z | select('in', ['loft', 'living']) | list %}{{ s[0] if s else ('bio' if 'bio' in z else phone_zone) }}
       phone_comfort_start_hour: 7
       phone_comfort: >-
         {{ phone_in_sam_rooms
@@ -347,7 +354,7 @@ actions:
         {% elif tv_on %}
           Evening comfort {{ d | round(0) }}°C
         {% elif phone_comfort %}
-          Phone in {{ phone_zone }} {{ d | round(0) }}°C
+          Phone in {{ comfort_zone }} {{ d | round(0) }}°C
         {% else %}
           Daytime economy {{ d | round(0) }}°C
         {% endif %}
@@ -432,7 +439,7 @@ actions:
       name: Daytime Cheap Heat
       message: >-
         desired={{ desired }}°C, control={{ control }}°C,
-        tv={{ tv_on }}, phone={{ phone_zone }} (comfort={{ phone_comfort }}, bio2={{ bio2_live }}), evening={{ evening_hours }},
+        tv={{ tv_on }}, phone={{ phone_zone }}/{{ mama_zone }} (comfort={{ phone_comfort }}, bio2={{ bio2_live }}), evening={{ evening_hours }},
         pre_evening={{ approaching_evening }},
         outside={{ outside_temp | round(1) }}°C,
         living={{ living_temp | round(1) if living_ok else 'n/a' }}°C,

@@ -1,0 +1,104 @@
+# Which heated zone Andy's wife's phone is in (27 Oct 2026), as PhoneZone.yaml
+# does for Andy's Pixel, so the heating follows either of them.
+#
+# "Mama's Mobile" runs the HA companion app's BLE transmitter (iBeacon
+# 4fe2daa6-8bfe-4ba4-b147-a6864fd6f7ea, set to high power and balanced
+# advertising on 27 Oct), and Bermuda places it in an area
+# (sensor.bermuda_4fe2daa68bfe4ba4b147a6864fd6f7ea_100_40004_area).
+# input_select.mama_zone (storage helper, made with ha_set_helper) has the
+# same options and area lists as input_select.phone_zone.
+#
+# Her phone has no GPS tracker in HA (device_tracker.mama_s_mobile is
+# unknown), so "away" is Bermuda's own tracker for the beacon having been
+# not_home for 15 minutes. While she is home but unseen (area unknown) the
+# zone stays as it was, and a change lands only after it has held for 3 min.
+#
+# Readers: DaytimeCheapHeat (Sam comfort while either phone is in loft or
+# living, or bio with Bio2 away) and Bio2 HVAC (comfort while either phone is
+# in the bio).
+#
+# Deployed with ha_set_automation, id mama_zone.
+id: mama_zone
+alias: Phone zone (Mama's Mobile room)
+description: >-
+  Settles Mama's Mobile's Bermuda area into input_select.mama_zone (loft /
+  living / bio / other / away) after it has held for 3 minutes, so the heating
+  follows her room as well as Andy's. Away = Bermuda tracker not_home 15 min.
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: state
+    entity_id: sensor.bermuda_4fe2daa68bfe4ba4b147a6864fd6f7ea_100_40004_area
+  - trigger: state
+    entity_id: device_tracker.bermuda_4fe2daa68bfe4ba4b147a6864fd6f7ea_100_40004_bermuda_tracker
+  - trigger: time_pattern
+    minutes: /5
+variables:
+  area_sensor: sensor.bermuda_4fe2daa68bfe4ba4b147a6864fd6f7ea_100_40004_area
+  tracker: device_tracker.bermuda_4fe2daa68bfe4ba4b147a6864fd6f7ea_100_40004_bermuda_tracker
+  away_after_s: 900
+  settle_s: 180
+  loft_areas:
+    - Loft
+  bio_areas:
+    - bio
+    - Bio Office
+  living_areas:
+    - Living Room
+    - Kitchen
+    - Bedroom
+    - Quiet room
+    - Upper Rear Vestibule
+    - Upstairs Shower
+    - Sofie Wardrobe
+    - Window Sills
+    - Residence
+  other_areas:
+    - Allrum
+    - Cellar 0
+    - Comms Room
+    - Back Garden
+    - Front walkway
+actions:
+  - variables:
+      zone_raw: >-
+        {% if is_state(tracker, 'not_home')
+              and as_timestamp(now()) - as_timestamp(states[tracker].last_changed, 0) > away_after_s %}away
+        {% else %}
+          {% set a = states(area_sensor) %}
+          {% if a in loft_areas %}loft
+          {% elif a in bio_areas %}bio
+          {% elif a in living_areas %}living
+          {% elif a in other_areas %}other
+          {% else %}keep{% endif %}
+        {% endif %}
+      zone_now: "{{ zone_raw | trim }}"
+      current: "{{ states('input_select.mama_zone') }}"
+  - condition: template
+    value_template: "{{ zone_now != 'keep' and zone_now != current }}"
+  - delay:
+      seconds: "{{ settle_s }}"
+  - variables:
+      zone_after_raw: >-
+        {% if is_state(tracker, 'not_home')
+              and as_timestamp(now()) - as_timestamp(states[tracker].last_changed, 0) > away_after_s %}away
+        {% else %}
+          {% set a = states(area_sensor) %}
+          {% if a in loft_areas %}loft
+          {% elif a in bio_areas %}bio
+          {% elif a in living_areas %}living
+          {% elif a in other_areas %}other
+          {% else %}keep{% endif %}
+        {% endif %}
+      zone_after: "{{ zone_after_raw | trim }}"
+  - condition: template
+    value_template: "{{ zone_after == zone_now }}"
+  - action: input_select.select_option
+    target:
+      entity_id: input_select.mama_zone
+    data:
+      option: "{{ zone_now }}"
+  - action: logbook.log
+    data:
+      name: Mama zone
+      message: "{{ current }} -> {{ zone_now }} (area {{ states(area_sensor) }}, held {{ settle_s }} s)."

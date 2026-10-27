@@ -20,8 +20,9 @@
 #                             nothing else here — there is no price ladder)
 #   projector playing/paused  20 C (film on — input_select.bio_projector, from
 #                             BioProjectorLights.yaml)
-#   phone in the bio, 07-23   20 C (input_select.phone_zone == bio, from
-#                             PhoneZone.yaml: Andy working in there)
+#   phone in the bio, 07-23   20 C (input_select.phone_zone or mama_zone ==
+#                             bio, from PhoneZone.yaml / MamaZone.yaml: Andy
+#                             working in there, or his wife)
 #   pre-warm for film time    20 C, starting bio_hours_to_target (the bio
 #                             thermal model, BioThermalModel.yaml) before
 #                             input_datetime.bio_film_time (20:00), capped at
@@ -143,6 +144,7 @@ triggers:
     entity_id:
       - input_select.bio_projector
       - input_select.phone_zone
+      - input_select.mama_zone
       - input_boolean.holiday_mode
       - input_boolean.bio_prewarm_enabled
       - input_boolean.bio_bank_test_on_fixed
@@ -180,12 +182,14 @@ actions:
         {% endif %}
       projector_state: "{{ states('input_select.bio_projector') }}"
       projector_on: "{{ projector_state in ['playing', 'paused'] }}"
-      # Andy's phone settled in the bio (PhoneZone.yaml): 20°C by day, as
-      # DaytimeCheapHeat does for Sam's rooms. Not overnight.
+      # Andy's or his wife's phone settled in the bio (PhoneZone.yaml,
+      # MamaZone.yaml): 20°C by day, as DaytimeCheapHeat does for Sam's
+      # rooms. Not overnight.
       phone_zone: "{{ states('input_select.phone_zone') }}"
+      mama_zone: "{{ states('input_select.mama_zone') }}"
       phone_comfort_start_hour: 7
       phone_comfort: >-
-        {{ phone_zone == 'bio'
+        {{ 'bio' in [phone_zone, mama_zone]
            and now().hour >= phone_comfort_start_hour and now().hour < 23 }}
       holiday_mode: "{{ is_state('input_boolean.holiday_mode', 'on') }}"
       # The bio hall has two external doors and gets aired for fresh air.
@@ -225,7 +229,7 @@ actions:
       coast_floor: "{{ [t_out_fc | float, living_temp | float] | max | round(2) }}"
       # Banking is for an EMPTY room. Someone in there is the whole reason not
       # to run the unit flat out at a target nobody wants to sit in.
-      bio_occupied: "{{ projector_on or phone_zone == 'bio' }}"
+      bio_occupied: "{{ projector_on or 'bio' in [phone_zone, mama_zone] }}"
       # Hours of Bio2 heating to take the room from where it is to film_temp.
       hours_needed: >-
         {% if not room_ok %}99
